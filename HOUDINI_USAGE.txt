@@ -1,0 +1,95 @@
+两边适用（专用 Houdini 注入器）
+================================
+
+下载产物（一个压缩包里全有）
+----------------------------
+Actions -> Android Arm64 Build（或 build-injector）-> 下载 Mod-Toolbox-Release：
+
+  libMyMenu.so           ARM64 菜单 SO（真机 / MuMu 都用这份）
+  injector-arm64-v8a     真机注入器
+  injector-x86_64        MuMu（Houdini）注入器
+  HOUDINI_USAGE.txt      本说明
+
+路径说明（/data/1）
+-------------------
+- 注入器：可以直接在 /data/1 执行（chmod 755 后跑）。
+- SO：会优先尝试从 /data/1/libMyMenu.so 加载；若 NativeBridge 拒绝该路径，
+  注入器会自动覆盖复制到应用目录再试（这是 Houdini 限制，不是故意不用 /data/1）。
+
+真机
+----
+1. 推送:
+   adb push libMyMenu.so /data/1/libMyMenu.so
+   adb push injector-arm64-v8a /data/1/injector
+   adb shell chmod 755 /data/1/injector
+2. 启动金铲铲后执行 /data/1/injector
+
+MuMu（x86_64 + Houdini）
+------------------------
+1. 仍用 ARM64 的 libMyMenu.so（不要换成 x86_64 SO）
+2. 推送:
+   adb push libMyMenu.so /data/1/libMyMenu.so
+   adb push injector-x86_64 /data/1/injector
+   adb shell chmod 755 /data/1/injector
+3. 游戏进到可玩界面后再执行 injector
+   （NativeBridge 未初始化时会失败，可稍后重试）
+
+原理
+----
+- 真机: ARM64 ptrace -> mmap + dlopen
+- MuMu: x86_64 ptrace -> NativeBridgeItf.loadLibraryExt 加载 ARM64 SO
+- x86_64 构建只编 injector（libdobby.a 是 arm64），SO 始终来自 arm64-v8a
+
+本机 NDK 编译（可选）
+--------------------
+# 真机 SO + 注入器
+cmake -S . -B build-arm64 ^
+  -DCMAKE_TOOLCHAIN_FILE=%NDK%\build\cmake\android.toolchain.cmake ^
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 ^
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build-arm64 -j
+
+# 仅 MuMu 注入器
+cmake -S . -B build-x64 ^
+  -DCMAKE_TOOLCHAIN_FILE=%NDK%\build\cmake\android.toolchain.cmake ^
+  -DANDROID_ABI=x86_64 -DANDROID_PLATFORM=android-24 ^
+  -DINJECTOR_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-x64 --target injector -j
+
+卡死 / 闪退排查（注入显示成功之后）
+------------------------------------
+无法远程连接你的 MuMu。用下面命令抓原因，把输出贴回来。
+
+0) 先清掉可能残留的旧 SO（旧注入器没覆盖 data 目录副本，会一直加载旧文件）:
+
+  adb shell su -c "rm -f /data/data/com.tencent.jkchess/libMyMenu.so /data/data/com.tencent.jkchess/files/libMyMenu.so /data/local/tmp/libMyMenu.so"
+  adb push libMyMenu.so /data/1/libMyMenu.so
+  adb push injector-x86_64 /data/1/injector-x86_64
+
+1) 清日志并监视（电脑 PowerShell）:
+
+  adb logcat -c
+  adb logcat -v threadtime JKInternal:V DEBUG:I AndroidRuntime:E libc:F ActivityManager:I *:S
+
+2) 进游戏后再注入。logcat 必须出现:
+     MyMenu mymenu-20260803-softalive-v3 loaded
+   若没有这行 = 仍在加载旧 SO。
+
+3) 卡死时另开终端抓线程栈:
+
+  adb shell pidof com.tencent.jkchess
+  adb shell su -c "kill -3 $(pidof com.tencent.jkchess)"
+  adb shell su -c "ls -lt /data/anr | head"
+  adb shell su -c "ls -lt /data/tombstones | head"
+  adb logcat -b crash -d -v threadtime
+
+4) 软存活期望日志:
+  MyMenu mymenu-20260803-softalive-v3 loaded
+  Houdini soft-alive: SO loaded, hooks/config skipped (prevent freeze)
+  SetupThread finished (houdini soft-alive)
+
+说明（你贴的 crash）:
+  signal 11 SEGV fault addr 0x1468 + 栈含 libMyMenu：
+  常见原因是 LoadConfig 找不到配置文件时调用 SaveConfig，
+  而 SaveConfig 在 ImGui 未初始化时调用了 FindWindowByName（空指针+偏移）。
+  v3 已修复；请确认 logcat 出现 softalive-v3。

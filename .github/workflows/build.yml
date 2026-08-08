@@ -1,0 +1,65 @@
+name: Android Arm64 Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c
+
+      - name: Build arm64 (libMyMenu.so + phone injector)
+        run: |
+          cmake -S . -B build-arm64 \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-21 \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-arm64 --config Release -j
+
+      - name: Build x86_64 injector (MuMu Houdini)
+        run: |
+          cmake -S . -B build-x64 \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=x86_64 \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DINJECTOR_ONLY=ON
+          cmake --build build-x64 --target injector -j
+
+      - name: Pack release zip contents
+        run: |
+          mkdir -p release
+          cp build-arm64/libMyMenu.so      release/libMyMenu.so
+          cp build-arm64/injector          release/injector-arm64-v8a
+          cp build-x64/injector            release/injector-x86_64
+          cp HOUDINI_USAGE.txt             release/HOUDINI_USAGE.txt
+          ls -lh release/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mod-Toolbox-Release
+          path: release/
