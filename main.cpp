@@ -3057,10 +3057,15 @@ void RenderImGuiFrame() {
     ImGui::Render();
     glViewport(0, 0, g_gl_width, g_gl_height);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    if (!g_menu_render_ok.exchange(true)) LOGI("JKInternal: MENU RENDER OK (ImGui drawn to GL surface)");
     s_in_render.store(false);
 }
 
 void* hook_SendWillRenderCanvases() {
+    // [DIAG] 一次性记录该回调是否持有 GL 上下文：决定 UnityMain 兜底渲染是否可行。
+    // ctx=1 表示每帧能直接画 menu；ctx=0 表示 UnityMain 无上下文、必须换宿主侧方案。
+    if (eglGetCurrentContext() != EGL_NO_CONTEXT && !g_swrc_ctx_ok.exchange(true))
+        LOGI("JKInternal: SWRC has GL context -> UnityMain render feasible");
     {
         std::lock_guard<std::mutex> lock(g_Tasks.buy_mutex);
         if (!g_Tasks.buy_slots.empty()) {
@@ -3097,6 +3102,8 @@ void* hook_SendWillRenderCanvases() {
 static std::atomic<bool> g_egl_fired{false};      // eglSwapBuffers 是否真正被调用
 static std::atomic<bool> g_dmg_fired{false};      // eglSwapBuffersWithDamageKHR 是否真正被调用
 static std::atomic<bool> g_glflush_fired{false};  // glFlush 是否真正被调用
+static std::atomic<bool> g_swrc_ctx_ok{false};    // SendWillRenderCanvases 是否曾拿到 GL 上下文
+static std::atomic<bool> g_menu_render_ok{false}; // 是否已成功完成一次 ImGui 渲染
 
 void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     extern int g_current_frame; g_current_frame++;
@@ -3141,16 +3148,22 @@ void hook_glFlush() {
 }
 
 void* DelayedHookThread(void*) {
-    while (!g_engine_rendering.load()) { sleep(1); }
+    // 渲染引擎启动标志只在 eglSwap 触发时置位，MuMu 上 egl 从不触发 → 加超时兜底，避免永久阻塞
+    int waited = 0;
+    while (!g_engine_rendering.load() && waited++ < 10) { sleep(1); }
     sleep(4);
     FindAndHookHiddenJNI();
-    // [DIAG] 打印各渲染入口触发状态：用于判断 MuMu(Houdini) 上哪条路径真正执行。
-    // imGuiInit=1 表示已有渲染路径成功初始化菜单；eglFired/dmgFired/glFlushFired=1
-    // 分别表示对应 hook 入口被游戏实际调用。全 0 说明 stub 全部被桥接截获，需换方案。
-    sleep(3);
+    return nullptr;
+}
+
+// [DIAG] 独立诊断线程：注入后固定 8s 输出各渲染入口/上下文状态，不依赖任何触发点。
+// 无论菜单出没出，必有这一行日志用于定位。
+void* DiagThread(void*) {
+    sleep(8);
     __android_log_print(ANDROID_LOG_ERROR, "JKInternal",
-        "DIAG: imGuiInit=%d eglFired=%d dmgFired=%d glFlushFired=%d",
-        (int)g_isImGuiInit, (int)g_egl_fired.load(), (int)g_dmg_fired.load(), (int)g_glflush_fired.load());
+        "DIAG: imGuiInit=%d eglFired=%d dmgFired=%d glFlushFired=%d swrcCtxOk=%d menuRenderOk=%d",
+        (int)g_isImGuiInit, (int)g_egl_fired.load(), (int)g_dmg_fired.load(),
+        (int)g_glflush_fired.load(), (int)g_swrc_ctx_ok.load(), (int)g_menu_render_ok.load());
     return nullptr;
 }
 
@@ -3266,6 +3279,9 @@ void* SetupThread(void*) {
     pthread_t t;
     pthread_create(&t, 0, DelayedHookThread, 0);
     pthread_detach(t);
+    pthread_t t2;
+    pthread_create(&t2, 0, DiagThread, 0);
+    pthread_detach(t2);
     return nullptr;
 }
 
