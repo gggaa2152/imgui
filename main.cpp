@@ -1,4 +1,4 @@
-﻿#include <sys/syscall.h>
+#include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -424,6 +424,11 @@ std::string GetConfigPath() {
 }
 
 static void CaptureWindowPos(const char* name, float& x, float& y) {
+    // [FIX] 守卫：SaveConfig 会在 SetupThread(worker 线程) 里、ImGui 尚未初始化时
+    // 被 LoadConfig 调用。此时 GImGui 上下文为空，直接 FindWindowByName 会解引用
+    // 空/坏指针导致 SIGSEGV（真机时序侥幸不炸，MuMu/Houdini 翻译层必崩）。
+    // 没有上下文时跳过窗口位置捕获即可（globals 已是默认值，功能不受影响）。
+    if (ImGui::GetCurrentContext() == nullptr) return;
     ImGuiWindow* w = ImGui::FindWindowByName(name);
     if (w) { x = w->Pos.x; y = w->Pos.y; }
 }
