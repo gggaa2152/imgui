@@ -2988,6 +2988,10 @@ func_SendWillRenderCanvases_t orig_SendWillRenderCanvases = nullptr;
 // hook（MuMu/Houdini 兜底）共用。在 SendWillRenderCanvases 路径下 eglSwapBuffers 可能不被
 // Houdini 调用，故尺寸从当前 GL surface 回退获取（eglGetCurrentSurface）。
 void RenderImGuiFrame() {
+    // [FIX] 重入/并发防护：防止 hook_eglSwap 被异常重入（或未来多路径调用）导致 ImGui
+    // 状态被同时操作而损坏/卡死；并发到达时直接跳过本帧，绝不阻塞或被递归重入。
+    static std::atomic<bool> s_in_render{false};
+    if (s_in_render.exchange(true)) return;
     // 若 eglSwapBuffers 路径未设置过尺寸（Houdini 下 eglSwap 可能不生效），从当前 GL surface 回退
     if (g_gl_width == 0 || g_gl_height == 0) {
         EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
@@ -2997,7 +3001,7 @@ void RenderImGuiFrame() {
             eglQuerySurface(d, s, EGL_HEIGHT, &g_gl_height);
         }
     }
-    if (g_gl_width == 0 || g_gl_height == 0) return;  // GL 未就绪，跳过本帧
+    if (g_gl_width == 0 || g_gl_height == 0) { s_in_render.store(false); return; }  // GL 未就绪，跳过本帧并复位防护
 
     if (!g_isImGuiInit) {
         ImGui::CreateContext();
@@ -3041,6 +3045,7 @@ void RenderImGuiFrame() {
     ImGui::Render();
     glViewport(0, 0, g_gl_width, g_gl_height);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    s_in_render.store(false);
 }
 
 void* hook_SendWillRenderCanvases() {
@@ -3068,8 +3073,10 @@ void* hook_SendWillRenderCanvases() {
         g_need_segment_gap_before_enter = true;
         g_Tasks.trigger_game_end.store(true, std::memory_order_release);
     }
-    // [FIX] Houdini 下 eglSwapBuffers 可能被中介导致 hook 不生效；用 il2cpp 渲染回调兜底绘制
-    if (!g_isImGuiInit) RenderImGuiFrame();
+    // [FIX] 不在 SendWillRenderCanvases 内做 ImGui/GL 渲染：该回调运行在 Unity 主线程，
+    // GL 上下文未必在该线程持有，且会与 hook_eglSwap 的每帧渲染并发/重复执行，MuMu(Houdini)
+    // 下会直接卡死渲染管线。渲染统一由 hook_eglSwap 每帧完成——Houdini 下游戏 ARM 代码
+    // 调用的 libEGL.so::eglSwapBuffers 仍会命中我们的钩子，尺寸与绘制都在 GL 上下文内进行。
     if (orig_SendWillRenderCanvases) return orig_SendWillRenderCanvases();
     return nullptr;
 }
