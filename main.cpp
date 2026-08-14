@@ -2984,42 +2984,21 @@ void hook_set_IsGameEnd(void* thisObj, uint8_t isEnd) {
 
 typedef void* (*func_SendWillRenderCanvases_t)();
 func_SendWillRenderCanvases_t orig_SendWillRenderCanvases = nullptr;
-void* hook_SendWillRenderCanvases() {
-    {
-        std::lock_guard<std::mutex> lock(g_Tasks.buy_mutex);
-        if (!g_Tasks.buy_slots.empty()) {
-            typedef void (*func_buy_new_t)(void*);
-            func_buy_new_t buy_hero = (func_buy_new_t)(g_il2cppTrueBase + g_off.func_buy_hero_new);
-            if (buy_hero) {
-                for (uintptr_t slot_addr : g_Tasks.buy_slots) {
-                    try { buy_hero((void*)slot_addr); } catch(...) {}
-                }
-            }
-            g_Tasks.buy_slots.clear();
+// [FIX] 抽离 ImGui 帧绘制，供 eglSwapBuffers hook（真机首选）与 il2cpp SendWillRenderCanvases
+// hook（MuMu/Houdini 兜底）共用。在 SendWillRenderCanvases 路径下 eglSwapBuffers 可能不被
+// Houdini 调用，故尺寸从当前 GL surface 回退获取（eglGetCurrentSurface）。
+void RenderImGuiFrame() {
+    // 若 eglSwapBuffers 路径未设置过尺寸（Houdini 下 eglSwap 可能不生效），从当前 GL surface 回退
+    if (g_gl_width == 0 || g_gl_height == 0) {
+        EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
+        if (s) {
+            EGLDisplay d = eglGetCurrentDisplay();
+            eglQuerySurface(d, s, EGL_WIDTH, &g_gl_width);
+            eglQuerySurface(d, s, EGL_HEIGHT, &g_gl_height);
         }
     }
-    if (g_Tasks.trigger_quit.load()) {
-        g_Tasks.trigger_quit.store(false);
-        typedef void (*func_quit_t)(uintptr_t, int, int);
-        func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
-        if (quit_func && IsValidPtr(g_dbg_segmentcsogame)) {
-            try { quit_func(g_dbg_segmentcsogame, g_my_player_id, 1); } catch(...) {}
-        }
-        g_is_in_match.store(false, std::memory_order_release);
-        g_need_segment_gap_before_enter = true;
-        g_Tasks.trigger_game_end.store(true, std::memory_order_release);
-    }
-    if (orig_SendWillRenderCanvases) return orig_SendWillRenderCanvases();
-    return nullptr;
-}
+    if (g_gl_width == 0 || g_gl_height == 0) return;  // GL 未就绪，跳过本帧
 
-void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
-    extern int g_current_frame; g_current_frame++;
-    if (!g_engine_rendering.load()) g_engine_rendering.store(true);
-
-    eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
-    eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
-    
     if (!g_isImGuiInit) {
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
@@ -3032,7 +3011,7 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     }
     if (g_needUpdateFontSafe) { UpdateFontHD(true); g_needUpdateFontSafe = false; }
     ImGuiIO& io = ImGui::GetIO(); io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
-    
+
     UpdateMatchState();
 
     if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire))
@@ -3058,10 +3037,51 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     DrawClickerCapsule();
     DrawClickerFeedback();
     if (g_apply_saved_float_pos) g_apply_saved_float_pos = false;
-    
+
     ImGui::Render();
     glViewport(0, 0, g_gl_width, g_gl_height);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+void* hook_SendWillRenderCanvases() {
+    {
+        std::lock_guard<std::mutex> lock(g_Tasks.buy_mutex);
+        if (!g_Tasks.buy_slots.empty()) {
+            typedef void (*func_buy_new_t)(void*);
+            func_buy_new_t buy_hero = (func_buy_new_t)(g_il2cppTrueBase + g_off.func_buy_hero_new);
+            if (buy_hero) {
+                for (uintptr_t slot_addr : g_Tasks.buy_slots) {
+                    try { buy_hero((void*)slot_addr); } catch(...) {}
+                }
+            }
+            g_Tasks.buy_slots.clear();
+        }
+    }
+    if (g_Tasks.trigger_quit.load()) {
+        g_Tasks.trigger_quit.store(false);
+        typedef void (*func_quit_t)(uintptr_t, int, int);
+        func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
+        if (quit_func && IsValidPtr(g_dbg_segmentcsogame)) {
+            try { quit_func(g_dbg_segmentcsogame, g_my_player_id, 1); } catch(...) {}
+        }
+        g_is_in_match.store(false, std::memory_order_release);
+        g_need_segment_gap_before_enter = true;
+        g_Tasks.trigger_game_end.store(true, std::memory_order_release);
+    }
+    // [FIX] Houdini 下 eglSwapBuffers 可能被中介导致 hook 不生效；用 il2cpp 渲染回调兜底绘制
+    if (!g_isImGuiInit) RenderImGuiFrame();
+    if (orig_SendWillRenderCanvases) return orig_SendWillRenderCanvases();
+    return nullptr;
+}
+
+void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
+    extern int g_current_frame; g_current_frame++;
+    if (!g_engine_rendering.load()) g_engine_rendering.store(true);
+
+    eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
+    eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
+    
+    RenderImGuiFrame();
     
     old_eglSwap(display, surface);
 }
@@ -3098,9 +3118,30 @@ void* SetupThread(void*) {
         DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
     }
     
+    // [FIX] MuMu/Houdini 下 libEGL.so 名字或符号解析可能失败；原 while 死循环会卡死整个
+    // SetupThread，导致 eglSwap 永远不被 hook、菜单永远不渲染。改为多候选库名 + 全局搜索回退
+    // + 超时 + 明确日志，杜绝静默卡死。
     void* egl_ptr = nullptr;
-    while ((egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers")) == nullptr) { sleep(1); }
-    DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
+    LOGI("JKInternal: resolving eglSwapBuffers ...");
+    const char* egl_libs[] = {"libEGL.so", "libEGL.so.1", "libGLESv2.so", "libGLESv3.so", nullptr};
+    for (int li = 0; egl_libs[li] && !egl_ptr; li++) {
+        for (int attempt = 0; attempt < 25 && !egl_ptr; attempt++) {
+            egl_ptr = DobbySymbolResolver(egl_libs[li], "eglSwapBuffers");
+            if (!egl_ptr) usleep(200000);  // 0.2s
+        }
+        if (egl_ptr) LOGI("JKInternal: eglSwapBuffers resolved via %s", egl_libs[li]);
+    }
+    if (!egl_ptr) {
+        egl_ptr = DobbySymbolResolver(nullptr, "eglSwapBuffers");  // 全局搜索
+        if (egl_ptr) LOGI("JKInternal: eglSwapBuffers resolved via global search");
+    }
+    if (!egl_ptr) {
+        __android_log_print(ANDROID_LOG_ERROR, "JKInternal",
+            "FATAL: eglSwapBuffers NOT resolved (Houdini/software-rendering?) - menu render disabled");
+    } else {
+        DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
+        LOGI("JKInternal: eglSwapBuffers hooked OK -> menu render enabled");
+    }
     
     typedef void* (*il2cpp_domain_get_t)();
     typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
