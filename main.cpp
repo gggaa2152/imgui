@@ -2992,6 +2992,18 @@ void RenderImGuiFrame() {
     // 状态被同时操作而损坏/卡死；并发到达时直接跳过本帧，绝不阻塞或被递归重入。
     static std::atomic<bool> s_in_render{false};
     if (s_in_render.exchange(true)) return;
+    // [FIX] 无当前 GL 上下文时直接跳过：规避 MuMu 上 il2cpp 回调线程（UnityMain）无
+    // 上下文时 ImGui_ImplOpenGL3_Init 内 glGetString 返回 NULL 导致 SIGSEGV 的问题。
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT) { s_in_render.store(false); return; }
+    // [MuMu] 统一帧率节流：egl/glFlush/SendWillRenderCanvases 多入口在单帧内可能多次
+    // 触发，限流到 ~30fps，避免 Houdini 转译环境下 GL 调用过载卡顿（放在上下文检查之后，
+    // 无上下文的空帧不会挤占真实渲染名额）。
+    static std::chrono::steady_clock::time_point g_last_render_tp{};
+    std::chrono::steady_clock::time_point now_tp = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now_tp - g_last_render_tp).count() < 33) {
+        s_in_render.store(false); return;
+    }
+    g_last_render_tp = now_tp;
     // 若 eglSwapBuffers 路径未设置过尺寸（Houdini 下 eglSwap 可能不生效），从当前 GL surface 回退
     if (g_gl_width == 0 || g_gl_height == 0) {
         EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
@@ -3073,30 +3085,72 @@ void* hook_SendWillRenderCanvases() {
         g_need_segment_gap_before_enter = true;
         g_Tasks.trigger_game_end.store(true, std::memory_order_release);
     }
-    // [FIX] 不在 SendWillRenderCanvases 内做 ImGui/GL 渲染：该回调运行在 Unity 主线程，
-    // GL 上下文未必在该线程持有，且会与 hook_eglSwap 的每帧渲染并发/重复执行，MuMu(Houdini)
-    // 下会直接卡死渲染管线。渲染统一由 hook_eglSwap 每帧完成——Houdini 下游戏 ARM 代码
-    // 调用的 libEGL.so::eglSwapBuffers 仍会命中我们的钩子，尺寸与绘制都在 GL 上下文内进行。
+    // [FIX] MuMu/Houdini 下 EGL/GLES 的 ARM stub 被桥接直通宿主、函数体从不执行，
+    // eglSwapBuffers/glFlush 钩子不会触发（maps 已证实）。真正被翻译执行的只有
+    // il2cpp 代码：SendWillRenderCanvases 是每帧稳定回调，挂渲染兜底（RenderImGuiFrame
+    // 内部有 glGetCurrentContext 保护 + 帧率节流，无上下文/过快时安全跳过，不会崩/卡）。
+    RenderImGuiFrame();
     if (orig_SendWillRenderCanvases) return orig_SendWillRenderCanvases();
     return nullptr;
 }
 
+static std::atomic<bool> g_egl_fired{false};      // eglSwapBuffers 是否真正被调用
+static std::atomic<bool> g_dmg_fired{false};      // eglSwapBuffersWithDamageKHR 是否真正被调用
+static std::atomic<bool> g_glflush_fired{false};  // glFlush 是否真正被调用
+
 void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     extern int g_current_frame; g_current_frame++;
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
+    if (!g_egl_fired.exchange(true)) LOGI("JKInternal: eglSwapBuffers FIRED -> render path active");
 
     eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
-    
-    RenderImGuiFrame();
-    
+
+    // 若 damage 入口已接管（新引擎用 eglSwapBuffersWithDamageKHR），本入口不再重复渲染
+    if (!g_dmg_fired.load()) RenderImGuiFrame();
+
     old_eglSwap(display, surface);
+}
+
+// [MuMu] 新引擎（Unity 2020+）在支持 KHR_damage 的驱动上换缓冲走 eglSwapBuffersWithDamageKHR，
+// 这是 MuMu 上 eglSwapBuffers 从未触发的最可能原因：游戏实际调用的交换入口是它。
+typedef EGLBoolean (*eglSwapWithDamage_t)(EGLDisplay, EGLSurface, const EGLint*, EGLint);
+static eglSwapWithDamage_t old_swapWithDamage = nullptr;
+EGLBoolean hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, const EGLint* rects, EGLint nrects) {
+    if (!g_dmg_fired.exchange(true)) LOGI("JKInternal: eglSwapBuffersWithDamageKHR FIRED -> render path active");
+
+    eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
+    eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
+
+    if (!g_egl_fired.load()) RenderImGuiFrame();
+
+    if (old_swapWithDamage) return old_swapWithDamage(display, surface, rects, nrects);
+    return EGL_TRUE;
+}
+
+// [MuMu] GLES 执行点兜底：glFlush 在渲染线程被调用、GL 上下文必然 current。
+// 若 Houdini 只桥接截获 EGL stub、却翻译执行 libGLESv2 的 stub，此入口就会触发并负责渲染。
+static void (*old_glFlush)() = nullptr;
+void hook_glFlush() {
+    if (!g_glflush_fired.exchange(true)) LOGI("JKInternal: glFlush FIRED -> GLES render path active");
+    static int ctr = 0; ctr++;
+    // egl/damage 任一接管则不再渲染；否则每 3 次 flush 渲染一次，避免转译慢造成卡顿
+    if (g_egl_fired.load() || g_dmg_fired.load() || (ctr % 3) != 0) { if (old_glFlush) old_glFlush(); return; }
+    RenderImGuiFrame();
+    if (old_glFlush) old_glFlush();
 }
 
 void* DelayedHookThread(void*) {
     while (!g_engine_rendering.load()) { sleep(1); }
     sleep(4);
     FindAndHookHiddenJNI();
+    // [DIAG] 打印各渲染入口触发状态：用于判断 MuMu(Houdini) 上哪条路径真正执行。
+    // imGuiInit=1 表示已有渲染路径成功初始化菜单；eglFired/dmgFired/glFlushFired=1
+    // 分别表示对应 hook 入口被游戏实际调用。全 0 说明 stub 全部被桥接截获，需换方案。
+    sleep(3);
+    __android_log_print(ANDROID_LOG_ERROR, "JKInternal",
+        "DIAG: imGuiInit=%d eglFired=%d dmgFired=%d glFlushFired=%d",
+        (int)g_isImGuiInit, (int)g_egl_fired.load(), (int)g_dmg_fired.load(), (int)g_glflush_fired.load());
     return nullptr;
 }
 
@@ -3148,6 +3202,31 @@ void* SetupThread(void*) {
     } else {
         DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
         LOGI("JKInternal: eglSwapBuffers hooked OK -> menu render enabled");
+    }
+
+    // [MuMu] eglSwapBuffers 补丁即使装上，游戏也可能从不调用（Houdini bridge 截获 stub /
+    // 或实际走 eglSwapBuffersWithDamageKHR）。多入口兜底：damage 交换 + glFlush，任一触发即渲染。
+    void* dmg_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffersWithDamageKHR");
+    if (!dmg_ptr) dmg_ptr = DobbySymbolResolver(nullptr, "eglSwapBuffersWithDamageKHR");
+    if (dmg_ptr) {
+        DobbyHook(dmg_ptr, (void*)hook_eglSwapWithDamage, (void**)&old_swapWithDamage);
+        LOGI("JKInternal: eglSwapBuffersWithDamageKHR hooked OK");
+    } else {
+        LOGI("JKInternal: eglSwapBuffersWithDamageKHR NOT found (skip)");
+    }
+
+    const char* gles_libs[] = {"libGLESv2.so", "libGLESv3.so", nullptr};
+    void* glflush_ptr = nullptr;
+    for (int li = 0; gles_libs[li] && !glflush_ptr; li++) {
+        glflush_ptr = DobbySymbolResolver(gles_libs[li], "glFlush");
+        if (glflush_ptr) LOGI("JKInternal: glFlush resolved via %s", gles_libs[li]);
+    }
+    if (!glflush_ptr) glflush_ptr = DobbySymbolResolver(nullptr, "glFlush");
+    if (glflush_ptr) {
+        DobbyHook(glflush_ptr, (void*)hook_glFlush, (void**)&old_glFlush);
+        LOGI("JKInternal: glFlush hooked OK -> MuMu render fallback armed");
+    } else {
+        LOGI("JKInternal: glFlush NOT resolved (skip)");
     }
     
     typedef void* (*il2cpp_domain_get_t)();
