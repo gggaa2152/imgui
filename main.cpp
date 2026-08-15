@@ -1,4 +1,4 @@
-﻿#include <sys/syscall.h>
+#include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -2575,7 +2575,7 @@ void DrawMainMenu() {
                     if (ImGui::Button((const char*)u8"- 删除最后一个")) { if (g_click_positions.size() > 1) g_click_positions.pop_back(); }
                     for (size_t i = 0; i < g_click_positions.size(); i++) {
                         char label[32]; snprintf(label, sizeof(label), "位置 %zu", i+1);
-                        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.f, 1.f), label);
+                        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.f, 1.f), "%s", label);
                         SliderFloatFine((const char*)u8"X", &g_click_positions[i].x, 0.0f, (float)g_cached_view_width > 0 ? (float)g_cached_view_width : 1440.0f);
                         SliderFloatFine((const char*)u8"Y", &g_click_positions[i].y, 0.0f, (float)g_cached_view_height > 0 ? (float)g_cached_view_height : 3200.0f);
                         if (ImGui::Button("删除", ImVec2(60 * g_autoScale, 0))) {
