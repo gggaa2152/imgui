@@ -17,6 +17,7 @@
 #include <mutex>
 #include <deque>
 #include <chrono>
+#include <fcntl.h> // 【新增】用于模拟器安全的内存校验
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_SIMD
@@ -325,16 +326,26 @@ uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x
     return 0;
 }
 
+// 【修复：兼容模拟器的 SafeReadMemory】
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
-    if (addr < 0x10000000 || addr > 0x00007FFFFFFFFFFF) return false;
-    struct iovec local[1];
-    struct iovec remote[1];
-    local[0].iov_base = buffer;
-    local[0].iov_len = size;
-    remote[0].iov_base = (void*)addr;
-    remote[0].iov_len = size;
-    ssize_t bytesRead = syscall(__NR_process_vm_readv, getpid(), local, 1, remote, 1, 0);
-    return bytesRead == (ssize_t)size;
+    // 兼容模拟器及真机：放宽地址验证下限至 0x10000
+    if (addr < 0x10000 || addr > 0x00007FFFFFFFFFFF) return false;
+
+    // 使用 /dev/random 作为黑洞校验目标，如果内存无效 write 会安全地失败
+    static int safe_fd = -1;
+    if (safe_fd == -1) {
+        safe_fd = open("/dev/random", O_WRONLY);
+    }
+    
+    if (safe_fd >= 0) {
+        if (write(safe_fd, (void*)addr, size) < 0) {
+            return false;
+        }
+    }
+
+    // 通过安全校验后，直接在进程内拷贝数据
+    memcpy(buffer, (void*)addr, size);
+    return true;
 }
 
 uintptr_t SafeReadPtr(uintptr_t addr, uint32_t offset) {
@@ -358,7 +369,7 @@ uint8_t SafeReadByte(uintptr_t addr, uint32_t offset) {
 #define SAFE_READ_PTR(addr, offset) SafeReadPtr(addr, offset)
 #define SAFE_READ_INT(addr, offset) SafeReadInt(addr, offset)
 #define SAFE_READ_BYTE(addr, offset) SafeReadByte(addr, offset)
-#define IsValidPtr(ptr) ((ptr) > 0x10000000 && (ptr) < 0x00007FFFFFFFFFFF)
+#define IsValidPtr(ptr) ((ptr) > 0x10000 && (ptr) < 0x00007FFFFFFFFFFF)
 
 std::string utf16_to_utf8(const std::wstring& wstr) {
     std::string res;
@@ -2752,6 +2763,7 @@ jobject g_view_obj = nullptr;
 jobject g_context = nullptr;
 void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
 
+// 【修复：兼容模拟器的 InjectTouchClick】
 void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
     if (!env || !view || !old_nativeInjectEvent) return;
     static jclass SystemClock = nullptr;
@@ -2795,7 +2807,8 @@ void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
     }
 
     if (eventDown) {
-        if (setSource) env->CallVoidMethod(eventDown, setSource, 4098); // 4098 = InputDevice.SOURCE_TOUCHSCREEN
+        // 在模拟器中，如果 4098 被过滤，可以叠加 SOURCE_MOUSE 或不设置
+        if (setSource) env->CallVoidMethod(eventDown, setSource, 4098 | 8194); 
         old_nativeInjectEvent(env, view, eventDown);
         // 注意：绝不能在此处调用 event.recycle()！
         // 因为 Unity 引擎会在主线程异步读取 MotionEvent。如果立即 recycle()，会将其 mNativePtr 置 0，导致 Unity 读到全空数据而无反应。
@@ -2817,7 +2830,7 @@ void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
     }
 
     if (eventUp) {
-        if (setSource) env->CallVoidMethod(eventUp, setSource, 4098);
+        if (setSource) env->CallVoidMethod(eventUp, setSource, 4098 | 8194);
         old_nativeInjectEvent(env, view, eventUp);
         env->DeleteLocalRef(eventUp);
     }
