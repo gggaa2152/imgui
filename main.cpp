@@ -35,6 +35,7 @@
 #include <jni.h>
 #include "dobby.h"
 
+// 统一的日志输出宏，终端过滤词为 JKInternal
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "JKInternal", __VA_ARGS__)
 
 uintptr_t g_il2cppTrueBase = 0;
@@ -2636,7 +2637,7 @@ jobject g_view_obj = nullptr;
 jobject g_context = nullptr;
 void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
 
-// 抽取出来的核心 ImGui 渲染画板
+// 将 ImGui 的渲染核心逻辑独立出来
 void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     g_current_frame++;
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
@@ -2657,24 +2658,32 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
         
         const char* gl_ver = (const char*)glGetString(GL_VERSION);
         const char* glsl_ver = "#version 300 es";
-        if (gl_ver && strstr(gl_ver, "OpenGL ES 2.")) glsl_ver = "#version 100";
-        
+        if (gl_ver && strstr(gl_ver, "OpenGL ES 2.")) {
+            glsl_ver = "#version 100";
+        }
         ImGui_ImplOpenGL3_Init(glsl_ver);
+        
         io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
         SetupImGuiStyle();
         UpdateFontHD(true);
         g_isImGuiInit = true;
+        
+        LOGI("[+] ImGui Initialized with %s, Res: %dx%d", glsl_ver, g_gl_width, g_gl_height);
     }
     
     if (g_needUpdateFontSafe) { UpdateFontHD(true); g_needUpdateFontSafe = false; }
     
     ImGuiIO& io = ImGui::GetIO(); 
     io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
-    io.DeltaTime = 1.0f / 60.0f; // 注入假时间防止 UI 假死
+    io.DeltaTime = 1.0f / 60.0f; // 强制注入帧时间
     
     UpdateMatchState();
-    if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire)) ClearGameState();
-    if (g_is_in_match.load(std::memory_order_acquire) && (g_current_frame % 2 == 0)) ParseGameMemory();
+
+    if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire))
+        ClearGameState();
+
+    if (g_is_in_match.load(std::memory_order_acquire) && (g_current_frame % 2 == 0))
+        ParseGameMemory();
 
     ProcessTextureQueue();
     ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
@@ -2695,7 +2704,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     
     ImGui::Render();
     
-    // 【终极修复：强制屏幕画布绑定 FBO 0】
+    // 【强制恢复屏幕主画板 FBO 0】防止 Unity 画布丢失
     GLint last_fbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2705,19 +2714,24 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     
     glBindFramebuffer(GL_FRAMEBUFFER, last_fbo); 
 
+    // 每 300 帧打印一次心跳，证明画板正常工作
     if (g_current_frame % 300 == 0) {
         LOGI("[*] Render Heartbeat: Frame %d | FBO was %d | Viewport %dx%d", g_current_frame, last_fbo, g_gl_width, g_gl_height);
     }
 }
 
-// 门 1
+// ==============================================
+// 第一扇门：老版 EGL 渲染钩子
+// ==============================================
 unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     RenderImGui_Core(display, surface);
     if (old_eglSwap) return old_eglSwap(display, surface);
     return 1;
 }
 
-// 门 2 (高级通道)
+// ==============================================
+// 第二扇门：新版局部刷新 EGL 渲染钩子 (带 KHR)
+// ==============================================
 unsigned int hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, EGLint* rects, EGLint n_rects) {
     RenderImGui_Core(display, surface);
     if (old_eglSwapWithDamage) return old_eglSwapWithDamage(display, surface, rects, n_rects);
@@ -2740,22 +2754,29 @@ void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
             uptimeMillis = env->GetStaticMethodID(SystemClock, "uptimeMillis", "()J");
             env->DeleteLocalRef(sc);
         }
+
         jclass me = env->FindClass("android/view/MotionEvent");
         if (me) {
             MotionEvent = (jclass)env->NewGlobalRef(me);
             obtainFull = env->GetStaticMethodID(MotionEvent, "obtain", "(JJIFFFFIFFII)Landroid/view/MotionEvent;");
-            if (!obtainFull) obtainBasic = env->GetStaticMethodID(MotionEvent, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
+            if (!obtainFull) {
+                obtainBasic = env->GetStaticMethodID(MotionEvent, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
+            }
             setSource = env->GetMethodID(MotionEvent, "setSource", "(I)V");
             env->DeleteLocalRef(me);
         }
     }
 
     if (!uptimeMillis || (!obtainFull && !obtainBasic)) return;
+
     long time = env->CallStaticLongMethod(SystemClock, uptimeMillis);
     
     jobject eventDown = nullptr;
-    if (obtainFull) eventDown = env->CallStaticObjectMethod(MotionEvent, obtainFull, time, time, 0, (jfloat)x, (jfloat)y, 1.0f, 1.0f, 0, 1.0f, 1.0f, 0, 0);
-    else eventDown = env->CallStaticObjectMethod(MotionEvent, obtainBasic, time, time, 0, (jfloat)x, (jfloat)y, 0);
+    if (obtainFull) {
+        eventDown = env->CallStaticObjectMethod(MotionEvent, obtainFull, time, time, 0, (jfloat)x, (jfloat)y, 1.0f, 1.0f, 0, 1.0f, 1.0f, 0, 0);
+    } else {
+        eventDown = env->CallStaticObjectMethod(MotionEvent, obtainBasic, time, time, 0, (jfloat)x, (jfloat)y, 0);
+    }
 
     if (eventDown) {
         if (setSource) env->CallVoidMethod(eventDown, setSource, 4098 | 8194); 
@@ -2763,18 +2784,24 @@ void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
         env->DeleteLocalRef(eventDown);
     }
 
-    if (g_touch_duration_ms > 0.0f) std::this_thread::sleep_for(std::chrono::microseconds((long long)(g_touch_duration_ms * 1000.0f)));
+    if (g_touch_duration_ms > 0.0f) {
+        std::this_thread::sleep_for(std::chrono::microseconds((long long)(g_touch_duration_ms * 1000.0f)));
+    }
     long timeUp = env->CallStaticLongMethod(SystemClock, uptimeMillis);
 
     jobject eventUp = nullptr;
-    if (obtainFull) eventUp = env->CallStaticObjectMethod(MotionEvent, obtainFull, time, timeUp, 1, (jfloat)x, (jfloat)y, 0.0f, 1.0f, 0, 1.0f, 1.0f, 0, 0);
-    else eventUp = env->CallStaticObjectMethod(MotionEvent, obtainBasic, time, timeUp, 1, (jfloat)x, (jfloat)y, 0);
+    if (obtainFull) {
+        eventUp = env->CallStaticObjectMethod(MotionEvent, obtainFull, time, timeUp, 1, (jfloat)x, (jfloat)y, 0.0f, 1.0f, 0, 1.0f, 1.0f, 0, 0);
+    } else {
+        eventUp = env->CallStaticObjectMethod(MotionEvent, obtainBasic, time, timeUp, 1, (jfloat)x, (jfloat)y, 0);
+    }
 
     if (eventUp) {
         if (setSource) env->CallVoidMethod(eventUp, setSource, 4098 | 8194);
         old_nativeInjectEvent(env, view, eventUp);
         env->DeleteLocalRef(eventUp);
     }
+
     g_total_clicks_executed.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -2782,20 +2809,33 @@ void AutoClickerThread() {
     JNIEnv* env = nullptr;
     bool attached = false;
     while (true) {
-        if (!g_clicker_running.load(std::memory_order_relaxed)) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }
-        if (!g_jvm || !g_view_obj) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }
+        if (!g_clicker_running.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+
+        if (!g_jvm || !g_view_obj) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+
         if (!env) {
             if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
                 g_jvm->AttachCurrentThread(&env, nullptr);
                 attached = true;
             }
         }
+
         if (env && g_view_obj) {
-            for (const auto& cp : g_click_positions) InjectTouchClick(env, g_view_obj, cp.x, cp.y); 
+            for (const auto& cp : g_click_positions) { InjectTouchClick(env, g_view_obj, cp.x, cp.y); }
         }
+
         float interval = g_click_interval_ms;
-        if (interval > 0) std::this_thread::sleep_for(std::chrono::microseconds((long long)(interval * 1000.0f)));
-        else std::this_thread::yield();
+        if (interval > 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds((long long)(interval * 1000.0f)));
+        } else {
+            std::this_thread::yield();
+        }
     }
     if (attached && g_jvm) g_jvm->DetachCurrentThread();
 }
@@ -2845,7 +2885,9 @@ extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) 
                 
                 ImGuiIO& io = ImGui::GetIO(); io.AddMousePosEvent(raw_x * scale_x, raw_y * scale_y);
                 if (action == 0) io.AddMouseButtonEvent(0, true); else if (action == 1) io.AddMouseButtonEvent(0, false);
-                if (action == 0 && !io.WantCaptureMouse) g_click_positions.push_back({raw_x, raw_y});
+                if (action == 0 && !io.WantCaptureMouse) {
+                    g_click_positions.push_back({raw_x, raw_y});
+                }
                 if (io.WantCaptureMouse) return;
             }
         }
@@ -2890,6 +2932,7 @@ void FindAndHookHiddenJNI() {
         }
         if (found_func) break;
     }
+    
     std::thread(AutoClickerThread).detach();
 }
 
@@ -2943,8 +2986,15 @@ void* hook_SendWillRenderCanvases() {
 void* DelayedHookThread(void*) {
     int timeout = 0;
     LOGI("[+] DelayedHookThread: Waiting for engine rendering...");
-    while (!g_engine_rendering.load() && timeout < 30) { sleep(1); timeout++; }
-    if (timeout >= 30) { LOGI("[-] DelayedHookThread: Timeout waiting for rendering!"); return nullptr; }
+    while (!g_engine_rendering.load() && timeout < 30) { 
+        sleep(1); 
+        timeout++;
+    }
+    if (timeout >= 30) {
+        LOGI("[-] DelayedHookThread: Timeout waiting for rendering!");
+        return nullptr; 
+    }
+    
     LOGI("[+] Engine is rendering, sleeping 4s before hidden JNI hook...");
     sleep(4); 
     FindAndHookHiddenJNI();
@@ -2960,73 +3010,77 @@ void* SetupThread(void*) {
         if (fp) {
             char line[512];
             while (fgets(line, sizeof(line), fp)) {
-                if (strstr(line, "libil2cpp.so")) { sscanf(line, "%lx", &g_il2cppTrueBase); break; }
+                if (strstr(line, "libil2cpp.so")) {
+                    sscanf(line, "%lx", &g_il2cppTrueBase); 
+                    break;
+                }
             }
             fclose(fp);
         }
-        if (g_il2cppTrueBase == 0) { sleep(1); retry_count++; }
+        if (g_il2cppTrueBase == 0) {
+            sleep(1);
+            retry_count++;
+        }
     }
     
-    if (g_il2cppTrueBase == 0) { LOGI("[-] SetupThread abort: libil2cpp.so not found after 60s."); return nullptr; }
+    if (g_il2cppTrueBase == 0) {
+        LOGI("[-] SetupThread abort: libil2cpp.so not found after 60s.");
+        return nullptr; 
+    }
+    
     LOGI("[+] Found libil2cpp.so Base: 0x%lx", g_il2cppTrueBase);
     
     LoadConfig();
     EnsureTextureWorkerStarted();
     
     LOGI("[+] Hooking Game Logic (shop_listen & IsGameEnd)...");
-    if (g_off.func_shop_listen != 0) DobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
-    if (g_off.func_set_IsGameEnd != 0) DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
+    if (g_off.func_shop_listen != 0) {
+        DobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
+    }
+    if (g_off.func_set_IsGameEnd != 0) {
+        DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
+    }
     
     // ==========================================
-    // ★ 核心修复区：穿透权限，双门齐封
+    // ★ 干净纯洁的系统级 EGL API 获取方案
     // ==========================================
-    LOGI("[+] Resolving true EGL functions via Dobby from hardware driver...");
-    void* egl_ptr = nullptr;
-    void* egl_damage_ptr = nullptr;
-    char line[1024];
-    FILE* fp = fopen("/proc/self/maps", "r");
-    if (fp) {
-        while (fgets(line, sizeof(line), fp)) {
-            // 扫描内存，寻找真实驱动 (包含 vendor 或者是 libEGL_ )
-            if (strstr(line, "libEGL") && strstr(line, ".so")) {
-                char path[512];
-                if (sscanf(line, "%*s %*s %*s %*s %*s %s", path) == 1) {
-                    const char* base_name = strrchr(path, '/');
-                    base_name = base_name ? base_name + 1 : path;
-                    
-                    // 用 Dobby 强拆符号表
-                    if (!egl_ptr) egl_ptr = DobbySymbolResolver(path, "eglSwapBuffers");
-                    if (!egl_ptr) egl_ptr = DobbySymbolResolver(base_name, "eglSwapBuffers");
+    LOGI("[+] Resolving EGL functions via standard API...");
+    void* egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
+    void* egl_damage_ptr = (void*)eglGetProcAddress("eglSwapBuffersWithDamageKHR");
 
-                    if (!egl_damage_ptr) egl_damage_ptr = DobbySymbolResolver(path, "eglSwapBuffersWithDamageKHR");
-                    if (!egl_damage_ptr) egl_damage_ptr = DobbySymbolResolver(base_name, "eglSwapBuffersWithDamageKHR");
-                }
-            }
-        }
-        fclose(fp);
+    if (!egl_ptr) {
+        LOGI("[-] eglGetProcAddress failed for eglSwapBuffers, trying dlopen...");
+        void* handle = dlopen("libEGL.so", RTLD_LAZY);
+        if (handle) egl_ptr = dlsym(handle, "eglSwapBuffers");
     }
-
-    // 保底：回退到标准的系统 API
-    if (!egl_ptr) egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
-    if (!egl_damage_ptr) egl_damage_ptr = (void*)eglGetProcAddress("eglSwapBuffersWithDamageKHR");
+    
+    if (!egl_damage_ptr) {
+        LOGI("[-] eglGetProcAddress failed for eglSwapBuffersWithDamageKHR, trying dlopen...");
+        void* handle = dlopen("libEGL.so", RTLD_LAZY);
+        if (handle) egl_damage_ptr = dlsym(handle, "eglSwapBuffersWithDamageKHR");
+    }
 
     int hook_cnt = 0;
     if (egl_ptr) {
-        LOGI("[+] Found eglSwapBuffers at %p", egl_ptr);
+        LOGI("[+] Found eglSwapBuffers at %p, Hooking...", egl_ptr);
         DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
         hook_cnt++;
+    } else {
+        LOGI("[-] Could not find eglSwapBuffers!");
     }
+
     if (egl_damage_ptr) {
-        LOGI("[+] Found eglSwapBuffersWithDamageKHR at %p", egl_damage_ptr);
+        LOGI("[+] Found eglSwapBuffersWithDamageKHR at %p, Hooking...", egl_damage_ptr);
         DobbyHook(egl_damage_ptr, (void*)hook_eglSwapWithDamage, (void**)&old_eglSwapWithDamage);
         hook_cnt++;
+    } else {
+        LOGI("[-] Could not find eglSwapBuffersWithDamageKHR!");
     }
 
     if (hook_cnt > 0) {
         LOGI("[+] EGL Hooked Successfully! (%d interfaces protected)", hook_cnt);
     } else {
-        LOGI("[-] SetupThread abort: eglSwapBuffers not found anywhere!");
-        return nullptr;
+        LOGI("[-] SetupThread abort: No EGL functions found! Is the game using Vulkan?");
     }
     // ==========================================
     
