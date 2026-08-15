@@ -39,51 +39,40 @@
 uintptr_t g_il2cppTrueBase = 0;
 bool g_show_menu = true;
 
-// 采用了你最新调试出的精准偏移
 struct Offsets {
-    // 【主线基础寻址】
     uint32_t func_get_Instance = 0x80EF374;
     uint32_t addr2 = 0x10;
     uint32_t addr3 = 0x20;
     uint32_t addra = 0x10;
     uint32_t segmentcsogame = 0x20;
-    
     uint32_t func_quit = 0x6ad90b4;
-    uint32_t my_player_id = 0x100;          // addr2 视角玩家（观战时会变）
-    uint32_t segment_my_player_id = 0xEC;   // segmentcsogame 真实本地玩家 ID
+    uint32_t my_player_id = 0x100;          
+    uint32_t segment_my_player_id = 0xEC;   
     uint32_t next_opponents_list = 0x240;
     uint32_t func_reqbuyhero = 0x46d6e94;
     uint32_t func_shop_listen = 0x722e680;
     uint32_t func_buy_hero_new = 0x7232fe4;
     uint32_t func_set_IsGameEnd = 0x6F489C8;
     
-    // 【牌库字典链 (addr4~9)】
     uint32_t addr4 = 0x230;
     uint32_t addr5 = 0x18;
     uint32_t addr6 = 0x18;
     uint32_t addr7 = 0x10;
-    
     uint32_t addr7_struct_size = 0x20; 
     uint32_t addr7_ptr_offset = 0x10;
-    
     uint32_t addr9 = 0x10;
-    
     uint32_t addr9_struct_size = 0x20;
     uint32_t addr9_ptr_offset = 0x10;
     
-    // 【牌库底层数据 (addr10)】
     uint32_t ph_heroId = 0x10;
     uint32_t ph_remaining = 0x1c; 
     uint32_t ph_total = 0x20;     
     
-    // 【玩家字典链 (addr11~12)】
     uint32_t addr11 = 0x38;
     uint32_t addr12 = 0x18;
-    
     uint32_t addr12_struct_size = 0x08;
     uint32_t addr12_ptr_offset = 0x08;
     
-    // 【玩家基本属性 (addr13)】
     uint32_t addr13 = 0x50;
     uint32_t pi_name = 0x18;
     uint32_t pi_id = 0x20;
@@ -93,31 +82,27 @@ struct Offsets {
     uint32_t pi_lose_streak = 0xe0;
     uint32_t pi_level = 0xf0;
     
-    // 【玩家商店、备战区与场上】
     uint32_t addr14 = 0x108;
     uint32_t addr15 = 0x10;
     uint32_t addr16 = 0x10;
     uint32_t shop_hero_id = 0x14; 
-    
     uint32_t addr17 = 0x388;
     uint32_t addr18 = 0x10;
     uint32_t bench_hero_id = 0x108; 
-    
     uint32_t addr19 = 0x390;
     uint32_t addr20 = 0x10; 
     uint32_t board_hero_id = 0x108; 
     uint32_t board_x = 0x30;
     uint32_t board_y = 0x34;
     
-    // 【海克斯链】
     uint32_t addr21 = 0x128;
     uint32_t addr22 = 0x18;
     uint32_t addr23 = 0x08;
     uint32_t addr23_struct_size = 0x20;
     uint32_t addr23_ptr_offset = 0x10;
-    uint32_t addr26 = 0x68;              // addr23 每条 +0x68 -> addr26
-    uint32_t pi_avatar_rank = 0x2DC;     // addr26 +0x2DC = 玩家头像排位 id
-    uint32_t pi_avatar_player_id = 0x248; // addr26 +0x248 = 玩家 id
+    uint32_t addr26 = 0x68;              
+    uint32_t pi_avatar_rank = 0x2DC;     
+    uint32_t pi_avatar_player_id = 0x248; 
     uint32_t hexctrl = 0x60;
     uint32_t func_get_hex = 0x6e356d4;
 };
@@ -188,7 +173,7 @@ static int g_segment_valid_streak = 0;
 static bool g_need_segment_gap_before_enter = false;
 
 // UI State & Styles
-bool g_isImGuiInit = false; // 声明 ImGui 初始化标志
+bool g_isImGuiInit = false; 
 ImFont* g_mainFont = nullptr;
 float g_autoScale = 1.0f;
 float g_current_rendered_size = 0.0f;
@@ -203,7 +188,6 @@ bool g_menu_orb = false;
 float g_orb_x = 120.0f, g_orb_y = 120.0f;
 float g_orb_r = 34.0f;
 
-// Floating Window Toggles & Settings
 bool g_win_cardpool = true;
 bool g_win_playerdata = true;
 bool g_win_hextech = true;
@@ -212,7 +196,6 @@ float g_alpha_pd = 1.0f;
 float g_alpha_opp = 1.0f;
 float g_alpha_hex = 1.0f;
 
-// Card Pool View Settings
 int g_cp_columns = 6;
 int g_cp_rows = 0; 
 float g_cp_box_size = 65.0f;
@@ -221,7 +204,6 @@ bool g_cp_show_cost[6] = { false, true, true, true, true, true };
 bool g_cp_warning_enable = true;
 int g_cp_warning_thres = 3;
 
-// Player Data View Settings
 float g_pd_line_spacing = 0.0f;
 float g_pd_vert_spacing = 0.0f;
 float g_pd_arrow_spacing = 15.0f;
@@ -229,29 +211,24 @@ float g_pd_font_size = 1.0f;
 bool g_pd_hero_summary_enable = true;
 int g_pd_hero_count_min[6] = {0, 1, 1, 1, 1, 1};
 
-// Opponent View Settings
 bool g_opp_show_board = true;
 bool g_opp_show_shop = true;
 bool g_opp_show_bench = true;
 float g_opp_hex_size = 25.0f;
 float g_opp_scale = 1.0f;
 
-// Hextech View Settings
 float g_hextech_scale = 1.0f;
 
-// My Hero Warning Float Settings
 bool g_win_hero_warn = true;
 int g_hero_warn_thres = 3;
 float g_hero_warn_scale = 1.0f;
 float g_alpha_hero_warn = 1.0f;
 float g_float_hw_x = -1.0f, g_float_hw_y = -1.0f;
 
-// View dimensions for scaling
 int g_cached_view_width = 0;
 int g_cached_view_height = 0;
 int g_gl_width = 0, g_gl_height = 0;
 
-// Auto Clicker Settings
 bool g_auto_clicker_enable = false;
 float g_click_interval_ms = 0.0f;    
 float g_touch_duration_ms = 0.0f;    
@@ -260,28 +237,21 @@ std::vector<ClickPos> g_click_positions = { {540.0f, 960.0f} };
 int g_click_pos_captured = -1;       
 std::atomic<bool> g_clicker_running{false};
 
-// CPS Real-time Monitor
 std::atomic<int> g_total_clicks_executed{0};
 float g_realtime_cps = 0.0f;
 float g_cps_history[100] = {0.0f};
 int g_cps_hist_idx = 0;
 
-// Quit capsule
 float g_quit_x = 80.0f, g_quit_y = 520.0f;
 int g_quit_confirm = 0;
 float g_quit_timer = 0.0f;
 
-// Lock floats capsule
 float g_lock_x = 80.0f, g_lock_y = 460.0f;
 bool g_floats_locked = false;
 
-// Card pool toggle capsule
 float g_cpbtn_x = 80.0f, g_cpbtn_y = 400.0f;
-
-// Clicker toggle capsule
 float g_clickerbtn_x = 80.0f, g_clickerbtn_y = 340.0f;
 
-// Saved float window positions
 float g_float_cp_x = -1.0f, g_float_cp_y = -1.0f;
 float g_float_pd_x = -1.0f, g_float_pd_y = -1.0f;
 float g_float_opp_x = -1.0f, g_float_opp_y = -1.0f;
@@ -326,7 +296,6 @@ uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x
     return 0;
 }
 
-// 【修复：模拟器安全的内存读取，避免段错误】
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
     if (addr < 0x10000 || addr > 0x00007FFFFFFFFFFF) return false;
 
@@ -437,7 +406,6 @@ static void CaptureWindowPos(const char* name, float& x, float& y) {
 }
 
 void SaveConfig() {
-    // 【修复：只有在 ImGui 初始化后才去抓取位置，否则空指针崩溃】
     if (g_isImGuiInit) {
         CaptureWindowPos("##CardPoolFloat", g_float_cp_x, g_float_cp_y);
         CaptureWindowPos("##PlayerDataFloat", g_float_pd_x, g_float_pd_y);
@@ -1966,22 +1934,15 @@ void DrawPlayerDataWindow() {
         ImGui::TextColored(streak_col, "%s", streak_buf); ImGui::SameLine(0, g_pd_line_spacing);
         {
             bool is_next_opp = (main_next_opp_id != -1 && pi.id == main_next_opp_id);
-
             ImVec4 name_col = (pi.id == g_my_player_id)
                 ? ImVec4(0.25f, 1.f, 0.45f, 1.f)
                 : (pi.is_bot ? ImVec4(0.85f, 0.88f, 0.92f, 1.f) : ImVec4(0.35f, 0.95f, 1.f, 1.f));
-
             ImU32 rainbow_col = 0;
             if (is_next_opp) {
                 float t = ImGui::GetTime() * 4.0f;
-                name_col = ImVec4(
-                    0.5f + 0.5f * sinf(t),
-                    0.5f + 0.5f * sinf(t + 2.094f),
-                    0.5f + 0.5f * sinf(t + 4.189f),
-                    1.0f);
+                name_col = ImVec4(0.5f + 0.5f * sinf(t), 0.5f + 0.5f * sinf(t + 2.094f), 0.5f + 0.5f * sinf(t + 4.189f), 1.0f);
                 rainbow_col = ImGui::GetColorU32(name_col);
             }
-
             ImVec2 np = ImGui::GetCursorScreenPos();
             ImU32 nc = ImGui::GetColorU32(name_col);
             ImU32 outline = ImGui::GetColorU32(IM_COL32(0, 0, 0, 200));
@@ -2007,7 +1968,6 @@ void DrawPlayerDataWindow() {
                 ImVec2 p3 = arrow_center + ImVec2(arr_s, arr_s * 0.8f);
                 dl->AddTriangleFilled(p1, p2, p3, rainbow_col);
             }
-            
             ImGui::Dummy(ImVec2(ts.x + g_pd_arrow_spacing * g_autoScale + ImGui::GetFontSize() * 1.4f, ts.y));
         }
         if (g_pd_hero_summary_enable) {
@@ -2224,26 +2184,6 @@ bool ModernToggle(const char* label, bool* v, int idx) {
     ImGui::RenderText(ImVec2(bb.Min.x + w + style.ItemInnerSpacing.x, bb.Min.y + (h - ImGui::GetFontSize()) * 0.5f), label);
     return pressed;
 }
-
-bool ModernAnimatedFolder(const char* label, bool* state) {
-    ImGuiWindow* win = ImGui::GetCurrentWindow(); ImGuiID id = win->GetID(label); ImVec2 pos = win->DC.CursorPos; ImVec2 size(ImGui::GetContentRegionAvail().x, ImGui::GetFrameHeight() * 1.3f);
-    const ImRect bb(pos, pos + size); ImGui::ItemSize(bb); bool hovered = false, held = false; 
-    if (ImGui::ItemAdd(bb, id)) if (ImGui::ButtonBehavior(bb, id, &hovered, &held)) *state = !(*state); 
-    float* p_anim = win->StateStorage.GetFloatRef(id, *state ? 1.0f : 0.0f); float anim = (*p_anim = ImLerp(*p_anim, *state ? 1.0f : 0.0f, 1.0f - expf(-18.0f * ImGui::GetIO().DeltaTime)));
-    float sc = g_autoScale * g_scale;
-    FrostTheme& th = UITheme();
-    ImU32 bg = hovered ? IM_COL32(255, 255, 255, 28) : IM_COL32(255, 255, 255, 14);
-    if (*state) bg = ImGui::GetColorU32(ImVec4(th.primary.x, th.primary.y, th.primary.z, 0.22f));
-    win->DrawList->AddRectFilled(bb.Min, bb.Max, bg, 10.0f * sc);
-    win->DrawList->AddRect(bb.Min, bb.Max, IM_COL32(255, 255, 255, *state ? 45 : 22), 10.0f * sc, 0, 1.0f);
-    float cx = bb.Min.x + 15.0f * sc; float cy = bb.Min.y + size.y * 0.5f; float ang = anim * 1.5708f; float arr = 5.0f * sc;
-    win->DrawList->AddTriangleFilled(ImVec2(cx+cosf(ang)*arr, cy+sinf(ang)*arr), ImVec2(cx+cosf(ang+2.094f)*arr, cy+sinf(ang+2.094f)*arr), ImVec2(cx+cosf(ang-2.094f)*arr, cy+sinf(ang-2.094f)*arr), ImGui::GetColorU32(th.primary));
-    ImFont* font = ImGui::GetFont(); float fSz = ImGui::GetFontSize();
-    win->DrawList->AddText(font, fSz, ImVec2(cx + 25.0f * g_autoScale * g_scale, bb.Min.y + (size.y - fSz)*0.5f), IM_COL32_WHITE, label);
-    if (*state) { ImGui::Indent(15.0f * g_autoScale * g_scale); return true; } return false;
-}
-
-void EndModernAnimatedFolder() { ImGui::Unindent(15.0f * g_autoScale * g_scale); }
 
 void ModernTierSelector(const char* label, bool* tierArray) {
     ImGuiWindow* win = ImGui::GetCurrentWindow(); const ImGuiStyle& style = ImGui::GetStyle();
@@ -2999,7 +2939,7 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     
     ImGuiIO& io = ImGui::GetIO(); 
     io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
-    io.DeltaTime = 1.0f / 60.0f; // 强制注入帧时间，防止动画假死隐身
+    io.DeltaTime = 1.0f / 60.0f; // 强制注入帧时间
     
     UpdateMatchState();
 
@@ -3028,7 +2968,7 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     
     ImGui::Render();
     
-    // 【强制恢复屏幕主画板 FBO 0】
+    // 【强制恢复屏幕主画板 FBO 0】防止 Unity 画布丢失
     GLint last_fbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -3103,16 +3043,36 @@ void* SetupThread(void*) {
         DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
     }
     
-    LOGI("[+] Resolving eglSwapBuffers safely via dlopen...");
+    // ==========================================
+    // ★ 终极修复区：穿透系统外壳，直捣底层真实硬件驱动
+    // ==========================================
+    LOGI("[+] Resolving true eglSwapBuffers from hardware driver...");
     void* egl_ptr = nullptr;
-    void* egl_handle = dlopen("libEGL.so", RTLD_LAZY);
-    if (egl_handle) {
-        egl_ptr = dlsym(egl_handle, "eglSwapBuffers");
-    } else {
-        LOGI("[-] dlopen libEGL.so failed!");
+    char line[1024];
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            // 扫描内存，专门寻找带有 vendor 驱动
+            if (strstr(line, "libEGL") && strstr(line, ".so") && strstr(line, "vendor")) {
+                char path[512];
+                if (sscanf(line, "%*s %*s %*s %*s %*s %s", path) == 1) {
+                    LOGI("[+] Found Vendor EGL Driver in maps: %s", path);
+                    void* handle = dlopen(path, RTLD_LAZY);
+                    if (handle) {
+                        egl_ptr = dlsym(handle, "eglSwapBuffers");
+                        if (egl_ptr) {
+                            LOGI("[+] Got TRUE eglSwapBuffers from %s: %p", path, egl_ptr);
+                            break; 
+                        }
+                    }
+                }
+            }
+        }
+        fclose(fp);
     }
-    
-    if (egl_ptr == nullptr) {
+
+    if (!egl_ptr) {
+        LOGI("[-] Could not find vendor EGL, falling back to eglGetProcAddress");
         egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
     }
 
@@ -3121,9 +3081,10 @@ void* SetupThread(void*) {
         DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
         LOGI("[+] eglSwapBuffers Hooked Successfully!");
     } else {
-        LOGI("[-] SetupThread abort: eglSwapBuffers not found!");
+        LOGI("[-] SetupThread abort: eglSwapBuffers not found anywhere!");
         return nullptr;
     }
+    // ==========================================
     
     LOGI("[+] Starting delayed hook for Unity Canvases...");
     std::thread([]() {
