@@ -2901,7 +2901,6 @@ void* hook_SendWillRenderCanvases() {
     return nullptr;
 }
 
-// 【终极修复：强制屏幕FBO绑定 + DeltaTime注入 + 降级兼容保护】
 void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     extern int g_current_frame; g_current_frame++;
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
@@ -3044,7 +3043,7 @@ void* SetupThread(void*) {
     }
     
     // ==========================================
-    // ★ 终极修复区：穿透系统外壳，直捣底层真实硬件驱动
+    // ★ 终极修复区：穿透系统外壳，无视隔离，直捣底层真实硬件驱动
     // ==========================================
     LOGI("[+] Resolving true eglSwapBuffers from hardware driver...");
     void* egl_ptr = nullptr;
@@ -3052,18 +3051,22 @@ void* SetupThread(void*) {
     FILE* fp = fopen("/proc/self/maps", "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {
-            // 扫描内存，专门寻找带有 vendor 驱动
+            // 扫描内存，寻找 vendor 底层显卡驱动
             if (strstr(line, "libEGL") && strstr(line, ".so") && strstr(line, "vendor")) {
                 char path[512];
                 if (sscanf(line, "%*s %*s %*s %*s %*s %s", path) == 1) {
-                    LOGI("[+] Found Vendor EGL Driver in maps: %s", path);
-                    void* handle = dlopen(path, RTLD_LAZY);
-                    if (handle) {
-                        egl_ptr = dlsym(handle, "eglSwapBuffers");
-                        if (egl_ptr) {
-                            LOGI("[+] Got TRUE eglSwapBuffers from %s: %p", path, egl_ptr);
-                            break; 
-                        }
+                    // 无视 dlopen 隔离，利用 Dobby 内存解析提取真实指针
+                    const char* base_name = strrchr(path, '/');
+                    base_name = base_name ? base_name + 1 : path;
+
+                    egl_ptr = DobbySymbolResolver(path, "eglSwapBuffers");
+                    if (!egl_ptr) {
+                        egl_ptr = DobbySymbolResolver(base_name, "eglSwapBuffers");
+                    }
+
+                    if (egl_ptr) {
+                        LOGI("[+] SUCCESS! Got TRUE eglSwapBuffers via Dobby from: %s (%p)", base_name, egl_ptr);
+                        break; 
                     }
                 }
             }
@@ -3072,12 +3075,12 @@ void* SetupThread(void*) {
     }
 
     if (!egl_ptr) {
-        LOGI("[-] Could not find vendor EGL, falling back to eglGetProcAddress");
+        LOGI("[-] Could not find vendor EGL via Dobby, falling back to system eglGetProcAddress");
         egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
     }
 
     if (egl_ptr != nullptr) {
-        LOGI("[+] Found eglSwapBuffers at %p, Hooking...", egl_ptr);
+        LOGI("[+] Target eglSwapBuffers is at %p, Hooking...", egl_ptr);
         DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
         LOGI("[+] eglSwapBuffers Hooked Successfully!");
     } else {
