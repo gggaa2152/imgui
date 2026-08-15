@@ -17,7 +17,7 @@
 #include <mutex>
 #include <deque>
 #include <chrono>
-#include <fcntl.h> // 【新增】用于模拟器安全的内存校验
+#include <fcntl.h> // 用于模拟器安全的内存校验
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_SIMD
@@ -3077,14 +3077,26 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
 }
 
 void* DelayedHookThread(void*) {
-    while (!g_engine_rendering.load()) { sleep(1); }
-    sleep(4);
+    // 修复：加入超时机制，防止死锁卡死主进程
+    int timeout = 0;
+    while (!g_engine_rendering.load() && timeout < 30) { 
+        sleep(1); 
+        timeout++;
+    }
+    if (timeout >= 30) {
+        LOGI("DelayedHookThread timeout waiting for rendering.");
+        return nullptr; 
+    }
+    
+    sleep(4); // 等待游戏逻辑进一步稳定
     FindAndHookHiddenJNI();
     return nullptr;
 }
 
 void* SetupThread(void*) {
-    while (g_il2cppTrueBase == 0) {
+    // 修复：加入超时退出机制，防止找不到 libil2cpp 时死锁卡死游戏
+    int retry_count = 0;
+    while (g_il2cppTrueBase == 0 && retry_count < 60) { // 最多等 60 秒
         FILE *fp = fopen("/proc/self/maps", "r");
         if (fp) {
             char line[512];
@@ -3095,12 +3107,21 @@ void* SetupThread(void*) {
             }
             fclose(fp);
         }
-        if (g_il2cppTrueBase == 0) sleep(1);
+        if (g_il2cppTrueBase == 0) {
+            sleep(1);
+            retry_count++;
+        }
+    }
+    
+    if (g_il2cppTrueBase == 0) {
+        LOGI("SetupThread abort: libil2cpp.so not found after 60s.");
+        return nullptr; 
     }
     
     LoadConfig();
     EnsureTextureWorkerStarted();
     
+    // 安全 Hook 游戏逻辑
     if (g_off.func_shop_listen != 0) {
         DobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
     }
@@ -3108,43 +3129,60 @@ void* SetupThread(void*) {
         DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
     }
     
+    // 修复：eglSwapBuffers 的解析同样加入超时和回退机制，避免无限死锁
     void* egl_ptr = nullptr;
-    while ((egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers")) == nullptr) { sleep(1); }
-    DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
+    int egl_retry = 0;
+    while ((egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers")) == nullptr && egl_retry < 30) { 
+        sleep(1); 
+        egl_retry++;
+    }
     
-    typedef void* (*il2cpp_domain_get_t)();
-    typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
-    typedef void* (*il2cpp_assembly_get_image_t)(void*);
-    typedef void* (*il2cpp_class_from_name_t)(void*, const char*, const char*);
-    typedef void* (*il2cpp_class_get_method_from_name_t)(void*, const char*, int);
+    if (egl_ptr != nullptr) {
+        // 在 Houdini 环境中，DobbyHook 可能会在这里引发段错误，如果仍然卡死，
+        // 说明你需要使用其他的 hook 框架 (如 xhook) 或者游戏自带的反作弊拦截了 Dobby。
+        DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
+    } else {
+        LOGI("SetupThread abort: eglSwapBuffers not found in libEGL.so");
+        return nullptr;
+    }
+    
+    // 延迟 Hook SendWillRenderCanvases
+    std::thread([]() {
+        sleep(5); // 等待 DobbyHook 和游戏初始化稳定
+        typedef void* (*il2cpp_domain_get_t)();
+        typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
+        typedef void* (*il2cpp_assembly_get_image_t)(void*);
+        typedef void* (*il2cpp_class_from_name_t)(void*, const char*, const char*);
+        typedef void* (*il2cpp_class_get_method_from_name_t)(void*, const char*, int);
 
-    auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
-    auto assembly_open = (il2cpp_domain_assembly_open_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_assembly_open");
-    auto assembly_get_image = (il2cpp_assembly_get_image_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_assembly_get_image");
-    auto class_from_name = (il2cpp_class_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_from_name");
-    auto class_get_method_from_name = (il2cpp_class_get_method_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_get_method_from_name");
+        auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
+        auto assembly_open = (il2cpp_domain_assembly_open_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_assembly_open");
+        auto assembly_get_image = (il2cpp_assembly_get_image_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_assembly_get_image");
+        auto class_from_name = (il2cpp_class_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_from_name");
+        auto class_get_method_from_name = (il2cpp_class_get_method_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_get_method_from_name");
 
-    if (domain_get && assembly_open && assembly_get_image && class_from_name && class_get_method_from_name) {
-        void* domain = domain_get();
-        if (domain) {
-            void* assembly = assembly_open(domain, "UnityEngine.UIModule.dll");
-            if (assembly) {
-                void* image = assembly_get_image(assembly);
-                if (image) {
-                    void* klass = class_from_name(image, "UnityEngine", "Canvas");
-                    if (klass) {
-                        void* method = class_get_method_from_name(klass, "SendWillRenderCanvases", 0);
-                        if (method) {
-                            void* method_ptr = *(void**)method;
-                            if (method_ptr) {
-                                DobbyHook(method_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
+        if (domain_get && assembly_open && assembly_get_image && class_from_name && class_get_method_from_name) {
+            void* domain = domain_get();
+            if (domain) {
+                void* assembly = assembly_open(domain, "UnityEngine.UIModule.dll");
+                if (assembly) {
+                    void* image = assembly_get_image(assembly);
+                    if (image) {
+                        void* klass = class_from_name(image, "UnityEngine", "Canvas");
+                        if (klass) {
+                            void* method = class_get_method_from_name(klass, "SendWillRenderCanvases", 0);
+                            if (method) {
+                                void* method_ptr = *(void**)method;
+                                if (method_ptr) {
+                                    DobbyHook(method_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
+    }).detach();
 
     pthread_t t;
     pthread_create(&t, 0, DelayedHookThread, 0);
