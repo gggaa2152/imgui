@@ -326,12 +326,14 @@ uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x
     return 0;
 }
 
+
 // 【修复：兼容模拟器的 SafeReadMemory】
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
     // 兼容模拟器及真机：放宽地址验证下限至 0x10000
     if (addr < 0x10000 || addr > 0x00007FFFFFFFFFFF) return false;
 
     // 使用 /dev/random 作为黑洞校验目标，如果内存无效 write 会安全地失败
+    // 这层 libc 的 write 调用能被 Houdini 完美拦截和处理，不会引发崩溃
     static int safe_fd = -1;
     if (safe_fd == -1) {
         safe_fd = open("/dev/random", O_WRONLY);
