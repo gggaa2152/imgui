@@ -17,7 +17,7 @@
 #include <mutex>
 #include <deque>
 #include <chrono>
-#include <fcntl.h> // 用于模拟器安全的内存校验
+#include <fcntl.h> // 必须包含此头文件以支持安全的内存探测
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_SIMD
@@ -326,26 +326,18 @@ uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x
     return 0;
 }
 
-
-// 【修复：兼容模拟器的 SafeReadMemory】
+// 【关键修复：安全的内存读取函数，兼容模拟器翻译层】
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
-    // 兼容模拟器及真机：放宽地址验证下限至 0x10000
     if (addr < 0x10000 || addr > 0x00007FFFFFFFFFFF) return false;
-
-    // 使用 /dev/random 作为黑洞校验目标，如果内存无效 write 会安全地失败
-    // 这层 libc 的 write 调用能被 Houdini 完美拦截和处理，不会引发崩溃
     static int safe_fd = -1;
     if (safe_fd == -1) {
         safe_fd = open("/dev/random", O_WRONLY);
     }
-    
     if (safe_fd >= 0) {
         if (write(safe_fd, (void*)addr, size) < 0) {
             return false;
         }
     }
-
-    // 通过安全校验后，直接在进程内拷贝数据
     memcpy(buffer, (void*)addr, size);
     return true;
 }
@@ -776,7 +768,6 @@ void UpdateMatchState() {
         return;
     }
 
-    // 中途注入：segment 已连续有效且上一局 segment 已失效过
     if (++g_segment_valid_streak >= 3) {
         g_dbg_segmentcsogame = segment;
         g_is_in_match.store(true, std::memory_order_release);
@@ -790,7 +781,6 @@ static int NormalizeAvatarRank(int raw) {
     return -1;
 }
 
-// addr26+0x248 读出玩家 id，与玩家列表里已有 id 对上即该玩家
 static int MatchPlayerIndexByAvatarPid(int pid) {
     if (pid < 0) return -1;
     for (size_t i = 0; i < g_players.size(); i++)
@@ -798,21 +788,20 @@ static int MatchPlayerIndexByAvatarPid(int pid) {
     return -1;
 }
 
-// 遍历 addr23 全部条目：每条 +0x68 -> addr26；addr26+0x2DC=头像排位，+0x248=玩家id
 static void ApplyAvatarRanksFromList23() {
     g_dbg_avatar_ranks.clear();
     for (auto& pi : g_players) pi.avatar_rank = 0;
 
     for (uintptr_t entry : g_dbg_list23_addrs) {
         if (!IsValidPtr(entry)) continue;
-        uintptr_t addr26 = SAFE_READ_PTR(entry, g_off.addr26); // +0x68
+        uintptr_t addr26 = SAFE_READ_PTR(entry, g_off.addr26);
         if (!IsValidPtr(addr26)) continue;
 
-        int raw_rank = SAFE_READ_INT(addr26, g_off.pi_avatar_rank); // +0x2DC
+        int raw_rank = SAFE_READ_INT(addr26, g_off.pi_avatar_rank);
         int rank = NormalizeAvatarRank(raw_rank);
         if (rank < 0) continue;
 
-        int pid = SAFE_READ_INT(addr26, g_off.pi_avatar_player_id); // +0x248
+        int pid = SAFE_READ_INT(addr26, g_off.pi_avatar_player_id);
         int pidx = MatchPlayerIndexByAvatarPid(pid);
 
         AvatarRankProbe probe;
@@ -849,7 +838,7 @@ void ParseGameMemory() {
         g_my_player_id = 0;
     uintptr_t next_opp_addr = SAFE_READ_PTR(g_dbg_addr2, g_off.next_opponents_list);
     uintptr_t next_opp_list = SAFE_READ_PTR(next_opp_addr, 0x10);
-    int next_opp_count = SAFE_READ_INT(next_opp_addr, 0x18); // List._size
+    int next_opp_count = SAFE_READ_INT(next_opp_addr, 0x18);
     g_next_opponents = GetIntsInArray(next_opp_list, next_opp_count > 0 && next_opp_count < 16 ? next_opp_count : 8);
 
     // [牌库显示]
@@ -877,7 +866,7 @@ void ParseGameMemory() {
         }
     }
 
-    // ★ 核心修复：【内存全量暴力扫描算法】
+    // [内存全量暴力扫描算法]
     g_dbg_addr11 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr11);
     g_dbg_addr12 = SAFE_READ_PTR(g_dbg_addr11, g_off.addr12);
     
@@ -937,7 +926,7 @@ void ParseGameMemory() {
                 if (g_shop_listen_done.load() && i < g_shop_slots.size())
                     slot_addr = g_shop_slots[i];
                 else if (IsValidPtr(shopItems[i]))
-                    slot_addr = shopItems[i]; // 中途注入：从内存链读取商店格子地址
+                    slot_addr = shopItems[i];
                 if (IsValidPtr(slot_addr)) {
                     extern int g_current_frame;
                     static std::map<uintptr_t, int> last_buy_frame;
@@ -1105,7 +1094,6 @@ void ApplyFrostedTheme() {
     s.Colors[ImGuiCol_Separator] = ImVec4(1.0f, 1.0f, 1.0f, 0.08f);
 }
 
-// 负宽度 = 为右侧 label 预留像素；-1 几乎不留空，会导致「排布列数」等只露出一个字
 static float SliderLabelReserveWidth(const char* label) {
     return ImGui::CalcTextSize(label).x + ImGui::GetStyle().ItemInnerSpacing.x + 6.0f * g_autoScale;
 }
@@ -1138,9 +1126,7 @@ static bool SliderIntFine(const char* label, int* v, int vmin, int vmax) {
     return *v != prev;
 }
 
-void DrawAmbientOrbs() {
-    // 不再绘制全屏灰蒙蒙遮罩，避免遮挡游戏画面
-}
+void DrawAmbientOrbs() { }
 
 void DrawFrostedPanel(ImDrawList* dl, ImVec2 mn, ImVec2 mx, float alpha, float rounding) {
     dl->AddRectFilledMultiColor(mn, mx,
@@ -1154,19 +1140,19 @@ void DrawFrostedPanel(ImDrawList* dl, ImVec2 mn, ImVec2 mx, float alpha, float r
 
 static void DrawSidebarIcon(ImDrawList* dl, ImVec2 c, float s, int id, ImU32 col) {
     switch (id) {
-    case 0: // 浮窗
+    case 0:
         dl->AddRect(ImVec2(c.x - s, c.y - s * 0.75f), ImVec2(c.x + s, c.y + s * 0.75f), col, 2.5f, 0, 1.5f);
         dl->AddLine(ImVec2(c.x - s * 0.5f, c.y - s * 0.75f), ImVec2(c.x - s * 0.5f, c.y + s * 0.75f), col, 1.2f);
         break;
-    case 1: // 拿牌
+    case 1:
         dl->AddRect(ImVec2(c.x - s * 0.65f, c.y - s), ImVec2(c.x + s * 0.65f, c.y + s), col, 2.0f, 0, 1.5f);
         dl->AddLine(ImVec2(c.x - s * 0.2f, c.y - s * 0.55f), ImVec2(c.x + s * 0.35f, c.y - s * 0.55f), col, 1.2f);
         break;
-    case 2: // 监视
+    case 2:
         dl->AddCircle(c, s * 0.55f, col, 16, 1.5f);
         dl->AddLine(ImVec2(c.x + s * 0.35f, c.y + s * 0.35f), ImVec2(c.x + s * 0.85f, c.y + s * 0.85f), col, 1.5f);
         break;
-    default: // 调试
+    default:
         dl->AddCircle(c, s * 0.55f, col, 16, 1.5f);
         for (int i = 0; i < 6; i++) {
             float a = (float)(M_PI * 2.0 * i / 6.0);
@@ -1353,7 +1339,6 @@ void DrawLockCapsule() {
     float capH = txtSz.y + padY * 2.0f;
     ImGui::SetNextWindowPos(ImVec2(g_lock_x, g_lock_y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(capW, capH));
-    // 每帧强制显示置顶：仅靠后绘制无法压过已在最前的牌库浮窗
     ImGuiWindowFlags capFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings
         | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus;
     if (g_floats_locked) capFlags |= ImGuiWindowFlags_NoMove;
@@ -1471,12 +1456,10 @@ void DrawClickerFeedback() {
     
     for (size_t pi = 0; pi < g_click_positions.size(); pi++) {
         ImVec2 center(g_click_positions[pi].x * scale_x, g_click_positions[pi].y * scale_y);
-        // 十字准星
         float cl = 12.0f * sc;
         dl->AddLine(ImVec2(center.x - cl, center.y), ImVec2(center.x + cl, center.y), IM_COL32(255, 200, 50, 200), 2.0f * sc);
         dl->AddLine(ImVec2(center.x, center.y - cl), ImVec2(center.x, center.y + cl), IM_COL32(255, 200, 50, 200), 2.0f * sc);
         
-        // 波纹扩散动画
         float freq = g_click_interval_ms > 0 ? (1000.0f / g_click_interval_ms) : 30.0f;
         freq = std::clamp(freq, 2.0f, 20.0f); 
         
@@ -1501,7 +1484,6 @@ static bool BeginContentFloatWindow(const char* id, bool* open, float* pos_x = n
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::clamp(alpha, 0.1f, 1.0f));
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar
         | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration;
-    // 锁定后：不可拖动、不抢层级；鼠标穿透，避免盖住锁定胶囊导致无法解锁
     if (g_floats_locked)
         flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMouseInputs;
     bool vis = ImGui::Begin(id, open, flags);
@@ -1671,10 +1653,6 @@ void DrawOffsetAdjuster(const char* label, uint32_t* value) {
     ImGui::PopID();
 }
 
-// --------------------------------------------------------
-// MODULE: Hero Image Textures (HeroImages.h + stb_image)
-// --------------------------------------------------------
-
 inline int GetBaseHeroImageId(int rawHeroId) {
     if (rawHeroId < 10) return rawHeroId;
     if (rawHeroId >= 10000) return rawHeroId - (rawHeroId / 10000) * 10000 + 10000;
@@ -1683,7 +1661,6 @@ inline int GetBaseHeroImageId(int rawHeroId) {
     return rawHeroId - (rawHeroId / 10) * 10 + 10;
 }
 
-// 英雄 ID 首位 = 星级，例如 23546 → 2 星
 inline int GetHeroStarLevel(int rawHeroId) {
     if (rawHeroId <= 0) return 0;
     int star = rawHeroId;
@@ -1811,7 +1788,6 @@ static void DrawHeroIcon(ImDrawList* dl, int heroId, ImVec2 pMin, ImVec2 pMax, f
     int baseId = GetBaseHeroImageId(heroId);
     GLuint tex = GetHeroTexture(baseId);
     if (tex != 0) {
-        // GetColorU32 乘上当前 Style.Alpha，透明度滑条对图片同样生效
         dl->AddImageRounded((ImTextureID)(intptr_t)tex, pMin, pMax, ImVec2(0, 0), ImVec2(1, 1),
             ImGui::GetColorU32(IM_COL32(255, 255, 255, 255)), rounding);
         return;
@@ -1822,11 +1798,6 @@ static void DrawHeroIcon(ImDrawList* dl, int heroId, ImVec2 pMin, ImVec2 pMax, f
     dl->AddText(ImVec2(pMin.x + (pMax.x - pMin.x - tSz.x) * 0.5f, pMin.y + (pMax.y - pMin.y - tSz.y) * 0.5f),
         ImGui::GetColorU32(fallbackColor), idBuf);
 }
-
-// --------------------------------------------------------
-// MODULE: Float Windows (Card Pool, Player Data, Opponent, Hextech)
-// --------------------------------------------------------
-
 
 static ImVec4 CostColor(int cost) {
     if (cost == 1) return ImVec4(0.82f, 0.82f, 0.85f, 1.0f);
@@ -1843,7 +1814,6 @@ static int CalcGridRows(int count, int cols) {
 
 static std::map<int, int> BuildHeroCounts(const PlayerInfo& pi) {
     std::map<int, int> counts;
-    // 按星级换算实际卡牌数：1★=1张, 2★=3张, 3★=9张
     auto add = [&](int id) {
         if (id <= 0) return;
         int star = GetHeroStarLevel(id);
@@ -1993,7 +1963,6 @@ void DrawPlayerDataWindow() {
                 ? ImVec4(0.25f, 1.f, 0.45f, 1.f)
                 : (pi.is_bot ? ImVec4(0.85f, 0.88f, 0.92f, 1.f) : ImVec4(0.35f, 0.95f, 1.f, 1.f));
 
-            // 预测对手：名字使用动态彩虹闪烁色
             ImU32 rainbow_col = 0;
             if (is_next_opp) {
                 float t = ImGui::GetTime() * 4.0f;
@@ -2009,7 +1978,6 @@ void DrawPlayerDataWindow() {
             ImU32 nc = ImGui::GetColorU32(name_col);
             ImU32 outline = ImGui::GetColorU32(IM_COL32(0, 0, 0, 200));
             const float o = 1.2f * g_autoScale;
-            // 8方向描边+伪加粗
             dl->AddText(ImVec2(np.x - o, np.y), outline, disp_name_storage.c_str());
             dl->AddText(ImVec2(np.x + o, np.y), outline, disp_name_storage.c_str());
             dl->AddText(ImVec2(np.x, np.y - o), outline, disp_name_storage.c_str());
@@ -2018,14 +1986,12 @@ void DrawPlayerDataWindow() {
             dl->AddText(ImVec2(np.x + o, np.y + o), outline, disp_name_storage.c_str());
             dl->AddText(ImVec2(np.x - o, np.y + o), outline, disp_name_storage.c_str());
             dl->AddText(ImVec2(np.x + o, np.y - o), outline, disp_name_storage.c_str());
-            // 核心字体重叠绘制两次实现加粗
             dl->AddText(ImVec2(np.x + 0.5f, np.y), nc, disp_name_storage.c_str());
             dl->AddText(np, nc, disp_name_storage.c_str());
             
             ImVec2 ts = ImGui::CalcTextSize(disp_name_storage.c_str());
             
             if (is_next_opp) {
-                // 画指向左侧的彩色大箭头
                 float arr_s = ImGui::GetFontSize() * 0.7f;
                 ImVec2 arrow_center = np + ImVec2(ts.x + g_pd_arrow_spacing * g_autoScale + arr_s, ts.y * 0.5f);
                 ImVec2 p1 = arrow_center + ImVec2(-arr_s, 0);
@@ -2125,13 +2091,11 @@ void DrawMyHeroWarningWindow() {
     if (!g_win_hero_warn) return;
     if (!g_is_in_match.load(std::memory_order_relaxed)) return;
 
-    // 找到自己
     PlayerInfo* me = nullptr;
     for (auto& p : g_players) { if (p.id == g_my_player_id) { me = &p; break; } }
     if (!me) return;
 
-    // 收集自己棋盘+备战席的英雄 baseId
-    std::map<int, int> myHeroIds; // baseId -> star level (for display)
+    std::map<int, int> myHeroIds; 
     for (auto& bh : me->board) {
         if (bh.heroId > 0) {
             int base = GetBaseHeroImageId(bh.heroId);
@@ -2149,7 +2113,6 @@ void DrawMyHeroWarningWindow() {
         }
     }
 
-    // 检查牌库中哪些英雄余量低于阈值
     struct WarnHero { int baseId; int remaining; int total; int star; int cost; };
     std::vector<WarnHero> warnings;
     for (auto& kv : myHeroIds) {
@@ -2170,7 +2133,7 @@ void DrawMyHeroWarningWindow() {
     float flash = 0.5f + 0.5f * sinf(ImGui::GetTime() * 6.0f);
     float t = ImGui::GetTime() * 5.0f;
 
-    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), (const char*)u8"\u4f59\u91cf\u9884\u8b66"); // 余量预警
+    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), (const char*)u8"\u4f59\u91cf\u9884\u8b66"); 
 
     float box_sz = 55.0f * sc;
     float spacing = 6.0f * sc;
@@ -2192,16 +2155,10 @@ void DrawMyHeroWarningWindow() {
         ImVec2 pMin(origin.x + c * (box_sz + spacing), origin.y + r * (box_sz + 22.0f * sc + spacing));
         ImVec2 pMax(pMin.x + box_sz, pMin.y + box_sz);
 
-        // 背景
         dl->AddRectFilled(pMin, pMax, ImGui::GetColorU32(IM_COL32(255, 255, 255, 14)), 8.0f);
-
-        // 英雄图标
         DrawHeroIcon(dl, w.baseId, pMin, pMax, 8.0f * sc, IM_COL32(255, 255, 255, 240));
-
-        // 星级
         DrawHeroStars(dl, ImVec2((pMin.x + pMax.x) * 0.5f, pMax.y - 6.0f * sc), w.star, 5.5f * sc);
 
-        // 彩色闪烁边框
         ImU32 warnCol = ImGui::GetColorU32(IM_COL32(
             (int)(127.0f + 127.0f * sinf(t)),
             (int)(127.0f + 127.0f * sinf(t + 2.094f)),
@@ -2213,7 +2170,6 @@ void DrawMyHeroWarningWindow() {
             ImVec2(pMax.x + 2.0f, pMax.y + 2.0f),
             warnCol, 10.0f, 0, 1.5f + 1.0f * flash);
 
-        // 余量文字
         char buf[16];
         snprintf(buf, sizeof(buf), "%d/%d", w.remaining, w.total);
         ImVec2 tSz = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, buf);
@@ -2541,23 +2497,19 @@ void DrawMainMenu() {
 
                         ImGui::Dummy(ImVec2(graphW, graphH));
 
-                        // 背景框
                         dl->AddRectFilled(graphPos, ImVec2(graphPos.x + graphW, graphPos.y + graphH), IM_COL32(10, 16, 28, 220), 6.0f);
                         dl->AddRect(graphPos, ImVec2(graphPos.x + graphW, graphPos.y + graphH), IM_COL32(50, 120, 200, 100), 6.0f, 0, 1.0f);
 
-                        // 参考线
                         for (int i = 1; i < 3; i++) {
                             float y = graphPos.y + graphH * (i / 3.0f);
                             dl->AddLine(ImVec2(graphPos.x, y), ImVec2(graphPos.x + graphW, y), IM_COL32(255, 255, 255, 12), 1.0f);
                         }
 
-                        // 查找最大刻度
                         float max_cps = 50.0f;
                         for (int i = 0; i < 100; i++) {
                             if (g_cps_history[i] > max_cps) max_cps = g_cps_history[i];
                         }
 
-                        // 绘制实时发光曲线
                         for (int i = 0; i < 99; i++) {
                             int idx1 = (g_cps_hist_idx + i) % 100;
                             int idx2 = (g_cps_hist_idx + i + 1) % 100;
@@ -2568,11 +2520,8 @@ void DrawMainMenu() {
                             ImVec2 p1(graphPos.x + (i / 99.0f) * graphW, graphPos.y + graphH * (1.0f - val1 * 0.85f) - 4.0f);
                             ImVec2 p2(graphPos.x + ((i + 1) / 99.0f) * graphW, graphPos.y + graphH * (1.0f - val2 * 0.85f) - 4.0f);
 
-                            // 填充渐变色
                             ImVec2 poly[4] = { p1, p2, ImVec2(p2.x, graphPos.y + graphH - 2), ImVec2(p1.x, graphPos.y + graphH - 2) };
                             dl->AddConvexPolyFilled(poly, 4, IM_COL32(0, 180, 255, 25));
-
-                            // 折线 glow
                             dl->AddLine(p1, p2, IM_COL32(0, 220, 255, 255), 2.0f);
                         }
 
@@ -2786,7 +2735,6 @@ void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
         jclass me = env->FindClass("android/view/MotionEvent");
         if (me) {
             MotionEvent = (jclass)env->NewGlobalRef(me);
-            // obtain(long downTime, long eventTime, int action, float x, float y, float pressure, float size, int metaState, float xPrecision, float yPrecision, int deviceId, int edgeFlags)
             obtainFull = env->GetStaticMethodID(MotionEvent, "obtain", "(JJIFFFFIFFII)Landroid/view/MotionEvent;");
             if (!obtainFull) {
                 obtainBasic = env->GetStaticMethodID(MotionEvent, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
@@ -2800,7 +2748,6 @@ void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
 
     long time = env->CallStaticLongMethod(SystemClock, uptimeMillis);
     
-    // ACTION_DOWN = 0, pressure = 1.0f
     jobject eventDown = nullptr;
     if (obtainFull) {
         eventDown = env->CallStaticObjectMethod(MotionEvent, obtainFull, time, time, 0, (jfloat)x, (jfloat)y, 1.0f, 1.0f, 0, 1.0f, 1.0f, 0, 0);
@@ -2809,21 +2756,17 @@ void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
     }
 
     if (eventDown) {
-        // 在模拟器中，如果 4098 被过滤，可以叠加 SOURCE_MOUSE 或不设置
+        // 在模拟器中，如果 4098(TOUCHSCREEN) 被过滤，这里叠加了 8194(MOUSE)
         if (setSource) env->CallVoidMethod(eventDown, setSource, 4098 | 8194); 
         old_nativeInjectEvent(env, view, eventDown);
-        // 注意：绝不能在此处调用 event.recycle()！
-        // 因为 Unity 引擎会在主线程异步读取 MotionEvent。如果立即 recycle()，会将其 mNativePtr 置 0，导致 Unity 读到全空数据而无反应。
         env->DeleteLocalRef(eventDown);
     }
 
-    // 触摸按下持续时间控制（0ms 为零延迟模式）
     if (g_touch_duration_ms > 0.0f) {
         std::this_thread::sleep_for(std::chrono::microseconds((long long)(g_touch_duration_ms * 1000.0f)));
     }
     long timeUp = env->CallStaticLongMethod(SystemClock, uptimeMillis);
 
-    // ACTION_UP = 1, pressure = 0.0f
     jobject eventUp = nullptr;
     if (obtainFull) {
         eventUp = env->CallStaticObjectMethod(MotionEvent, obtainFull, time, timeUp, 1, (jfloat)x, (jfloat)y, 0.0f, 1.0f, 0, 1.0f, 1.0f, 0, 0);
@@ -2837,7 +2780,6 @@ void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
         env->DeleteLocalRef(eventUp);
     }
 
-    // 记录一次有效成功注入的点击
     g_total_clicks_executed.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -2863,7 +2805,6 @@ void AutoClickerThread() {
         }
 
         if (env && g_view_obj) {
-            // 尽力最快注入
             for (const auto& cp : g_click_positions) { InjectTouchClick(env, g_view_obj, cp.x, cp.y); }
         }
 
@@ -2871,7 +2812,6 @@ void AutoClickerThread() {
         if (interval > 0) {
             std::this_thread::sleep_for(std::chrono::microseconds((long long)(interval * 1000.0f)));
         } else {
-            // 最快模式：不休眠或极短暂让出时间片，防止卡死
             std::this_thread::yield();
         }
     }
@@ -2923,7 +2863,6 @@ extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) 
                 
                 ImGuiIO& io = ImGui::GetIO(); io.AddMousePosEvent(raw_x * scale_x, raw_y * scale_y);
                 if (action == 0) io.AddMouseButtonEvent(0, true); else if (action == 1) io.AddMouseButtonEvent(0, false);
-                // 连点器：捕获 ACTION_DOWN 时的坐标作为点击目标
                 if (action == 0 && !io.WantCaptureMouse) {
                     g_click_positions.push_back({raw_x, raw_y});
                 }
@@ -2972,7 +2911,6 @@ void FindAndHookHiddenJNI() {
         if (found_func) break;
     }
     
-    // 启动连点器后台线程
     std::thread(AutoClickerThread).detach();
 }
 
@@ -3061,7 +2999,6 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     DrawOpponentBoardWindow();
     DrawMyHeroWarningWindow();
     DrawHextechCapsule();
-    // 胶囊最后绘制并置顶，避免被牌库等浮窗挡住无法解锁
     DrawQuitCapsule();
     DrawLockCapsule();
     DrawCardPoolCapsule();
@@ -3076,25 +3013,29 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     old_eglSwap(display, surface);
 }
 
+// 【修复：加入超时机制，防止死锁卡死主进程】
 void* DelayedHookThread(void*) {
-    // 修复：加入超时机制，防止死锁卡死主进程
     int timeout = 0;
+    LOGI("[+] DelayedHookThread: Waiting for engine rendering...");
     while (!g_engine_rendering.load() && timeout < 30) { 
         sleep(1); 
         timeout++;
     }
     if (timeout >= 30) {
-        LOGI("DelayedHookThread timeout waiting for rendering.");
+        LOGI("[-] DelayedHookThread: Timeout waiting for rendering!");
         return nullptr; 
     }
     
+    LOGI("[+] Engine is rendering, sleeping 4s before hidden JNI hook...");
     sleep(4); // 等待游戏逻辑进一步稳定
     FindAndHookHiddenJNI();
+    LOGI("[+] DelayedHookThread: Hidden JNI hooked.");
     return nullptr;
 }
 
 void* SetupThread(void*) {
-    // 修复：加入超时退出机制，防止找不到 libil2cpp 时死锁卡死游戏
+    // 【修复：加入超时退出机制，防止找不到 libil2cpp 时死锁卡死游戏】
+    LOGI("[+] SetupThread Started! Waiting for libil2cpp.so...");
     int retry_count = 0;
     while (g_il2cppTrueBase == 0 && retry_count < 60) { // 最多等 60 秒
         FILE *fp = fopen("/proc/self/maps", "r");
@@ -3114,14 +3055,16 @@ void* SetupThread(void*) {
     }
     
     if (g_il2cppTrueBase == 0) {
-        LOGI("SetupThread abort: libil2cpp.so not found after 60s.");
+        LOGI("[-] SetupThread abort: libil2cpp.so not found after 60s.");
         return nullptr; 
     }
+    
+    LOGI("[+] Found libil2cpp.so Base: 0x%lx", g_il2cppTrueBase);
     
     LoadConfig();
     EnsureTextureWorkerStarted();
     
-    // 安全 Hook 游戏逻辑
+    LOGI("[+] Hooking Game Logic (shop_listen & IsGameEnd)...");
     if (g_off.func_shop_listen != 0) {
         DobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
     }
@@ -3129,26 +3072,37 @@ void* SetupThread(void*) {
         DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
     }
     
-    // 修复：eglSwapBuffers 的解析同样加入超时和回退机制，避免无限死锁
+    // ==========================================
+    // ★ 核心修复区：安全解析 eglSwapBuffers
+    // ==========================================
+    LOGI("[+] Resolving eglSwapBuffers safely via dlopen...");
     void* egl_ptr = nullptr;
-    int egl_retry = 0;
-    while ((egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers")) == nullptr && egl_retry < 30) { 
-        sleep(1); 
-        egl_retry++;
+    void* egl_handle = dlopen("libEGL.so", RTLD_LAZY);
+    if (egl_handle) {
+        egl_ptr = dlsym(egl_handle, "eglSwapBuffers");
+    } else {
+        LOGI("[-] dlopen libEGL.so failed!");
     }
     
+    // 如果原生 dlsym 没找到，再作为备用方案使用系统调用获取
+    if (egl_ptr == nullptr) {
+        egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
+    }
+
     if (egl_ptr != nullptr) {
-        // 在 Houdini 环境中，DobbyHook 可能会在这里引发段错误，如果仍然卡死，
-        // 说明你需要使用其他的 hook 框架 (如 xhook) 或者游戏自带的反作弊拦截了 Dobby。
+        LOGI("[+] Found eglSwapBuffers at %p, Hooking...", egl_ptr);
         DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
+        LOGI("[+] eglSwapBuffers Hooked Successfully!");
     } else {
-        LOGI("SetupThread abort: eglSwapBuffers not found in libEGL.so");
+        LOGI("[-] SetupThread abort: eglSwapBuffers not found!");
         return nullptr;
     }
+    // ==========================================
     
-    // 延迟 Hook SendWillRenderCanvases
+    LOGI("[+] Starting delayed hook for Unity Canvases...");
     std::thread([]() {
         sleep(5); // 等待 DobbyHook 和游戏初始化稳定
+        LOGI("[+] Attempting to hook SendWillRenderCanvases...");
         typedef void* (*il2cpp_domain_get_t)();
         typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
         typedef void* (*il2cpp_assembly_get_image_t)(void*);
@@ -3175,22 +3129,27 @@ void* SetupThread(void*) {
                                 void* method_ptr = *(void**)method;
                                 if (method_ptr) {
                                     DobbyHook(method_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
+                                    LOGI("[+] SendWillRenderCanvases hooked!");
                                 }
                             }
                         }
                     }
                 }
             }
+        } else {
+            LOGI("[-] Missing il2cpp exports for Canvases hook.");
         }
     }).detach();
 
     pthread_t t;
     pthread_create(&t, 0, DelayedHookThread, 0);
     pthread_detach(t);
+    LOGI("[+] SetupThread Finished.");
     return nullptr;
 }
 
 __attribute__((constructor)) void Init() { 
+    LOGI("[+] libMyMenu.so Loaded! Init Constructor Called.");
     pthread_t t; 
     pthread_create(&t, 0, SetupThread, 0); 
     pthread_detach(t); 
