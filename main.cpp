@@ -424,10 +424,6 @@ std::string GetConfigPath() {
 }
 
 static void CaptureWindowPos(const char* name, float& x, float& y) {
-    // [FIX] 守卫：SaveConfig 会在 SetupThread(worker 线程) 里、ImGui 尚未初始化时
-    // 被 LoadConfig 调用。此时 GImGui 上下文为空，直接 FindWindowByName 会解引用
-    // 空/坏指针导致 SIGSEGV（真机时序侥幸不炸，MuMu/Houdini 翻译层必崩）。
-    // 没有上下文时跳过窗口位置捕获即可（globals 已是默认值，功能不受影响）。
     if (ImGui::GetCurrentContext() == nullptr) return;
     ImGuiWindow* w = ImGui::FindWindowByName(name);
     if (w) { x = w->Pos.x; y = w->Pos.y; }
@@ -2984,27 +2980,24 @@ void hook_set_IsGameEnd(void* thisObj, uint8_t isEnd) {
 
 typedef void* (*func_SendWillRenderCanvases_t)();
 func_SendWillRenderCanvases_t orig_SendWillRenderCanvases = nullptr;
-// [FIX] 抽离 ImGui 帧绘制，供 eglSwapBuffers hook（真机首选）与 il2cpp SendWillRenderCanvases
-// hook（MuMu/Houdini 兜底）共用。在 SendWillRenderCanvases 路径下 eglSwapBuffers 可能不被
-// Houdini 调用，故尺寸从当前 GL surface 回退获取（eglGetCurrentSurface）。
-void RenderImGuiFrame() {
-    // [FIX] 重入/并发防护：防止 hook_eglSwap 被异常重入（或未来多路径调用）导致 ImGui
-    // 状态被同时操作而损坏/卡死；并发到达时直接跳过本帧，绝不阻塞或被递归重入。
+
+// [修改这里] 增加 safe_context 参数，解决模拟器上下文拦截 bug
+void RenderImGuiFrame(bool safe_context = false) {
     static std::atomic<bool> s_in_render{false};
     if (s_in_render.exchange(true)) return;
-    // [FIX] 无当前 GL 上下文时直接跳过：规避 MuMu 上 il2cpp 回调线程（UnityMain）无
-    // 上下文时 ImGui_ImplOpenGL3_Init 内 glGetString 返回 NULL 导致 SIGSEGV 的问题。
-    if (eglGetCurrentContext() == EGL_NO_CONTEXT) { s_in_render.store(false); return; }
-    // [MuMu] 统一帧率节流：egl/glFlush/SendWillRenderCanvases 多入口在单帧内可能多次
-    // 触发，限流到 ~30fps，避免 Houdini 转译环境下 GL 调用过载卡顿（放在上下文检查之后，
-    // 无上下文的空帧不会挤占真实渲染名额）。
+    
+    // [修改这里] 如果是从 eglSwap 等明确安全的渲染钩子进来的，即使取不到 context 也放行
+    if (!safe_context && eglGetCurrentContext() == EGL_NO_CONTEXT) { 
+        s_in_render.store(false); 
+        return; 
+    }
+    
     static std::chrono::steady_clock::time_point g_last_render_tp{};
     std::chrono::steady_clock::time_point now_tp = std::chrono::steady_clock::now();
     if (std::chrono::duration_cast<std::chrono::milliseconds>(now_tp - g_last_render_tp).count() < 33) {
         s_in_render.store(false); return;
     }
     g_last_render_tp = now_tp;
-    // 若 eglSwapBuffers 路径未设置过尺寸（Houdini 下 eglSwap 可能不生效），从当前 GL surface 回退
     if (g_gl_width == 0 || g_gl_height == 0) {
         EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
         if (s) {
@@ -3013,13 +3006,16 @@ void RenderImGuiFrame() {
             eglQuerySurface(d, s, EGL_HEIGHT, &g_gl_height);
         }
     }
-    if (g_gl_width == 0 || g_gl_height == 0) { s_in_render.store(false); return; }  // GL 未就绪，跳过本帧并复位防护
+    if (g_gl_width == 0 || g_gl_height == 0) { s_in_render.store(false); return; }  
 
     if (!g_isImGuiInit) {
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
-        ImGui_ImplOpenGL3_Init("#version 300 es");
+        
+        // [修改这里] 降级 OpenGL ES shader 版本为 100，解决模拟器渲染透明/报错问题
+        ImGui_ImplOpenGL3_Init("#version 100"); 
+        
         io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
         SetupImGuiStyle();
         UpdateFontHD(true);
@@ -3046,7 +3042,6 @@ void RenderImGuiFrame() {
     DrawOpponentBoardWindow();
     DrawMyHeroWarningWindow();
     DrawHextechCapsule();
-    // 胶囊最后绘制并置顶，避免被牌库等浮窗挡住无法解锁
     DrawQuitCapsule();
     DrawLockCapsule();
     DrawCardPoolCapsule();
@@ -3085,18 +3080,17 @@ void* hook_SendWillRenderCanvases() {
         g_need_segment_gap_before_enter = true;
         g_Tasks.trigger_game_end.store(true, std::memory_order_release);
     }
-    // [FIX] MuMu/Houdini 下 EGL/GLES 的 ARM stub 被桥接直通宿主、函数体从不执行，
-    // eglSwapBuffers/glFlush 钩子不会触发（maps 已证实）。真正被翻译执行的只有
-    // il2cpp 代码：SendWillRenderCanvases 是每帧稳定回调，挂渲染兜底（RenderImGuiFrame
-    // 内部有 glGetCurrentContext 保护 + 帧率节流，无上下文/过快时安全跳过，不会崩/卡）。
-    RenderImGuiFrame();
+    
+    // [致命错误修正] 已移除：绝不能在 Unity 主线程调用 OpenGL 渲染，否则模拟器必崩！
+    // RenderImGuiFrame(); 
+    
     if (orig_SendWillRenderCanvases) return orig_SendWillRenderCanvases();
     return nullptr;
 }
 
-static std::atomic<bool> g_egl_fired{false};      // eglSwapBuffers 是否真正被调用
-static std::atomic<bool> g_dmg_fired{false};      // eglSwapBuffersWithDamageKHR 是否真正被调用
-static std::atomic<bool> g_glflush_fired{false};  // glFlush 是否真正被调用
+static std::atomic<bool> g_egl_fired{false};      
+static std::atomic<bool> g_dmg_fired{false};      
+static std::atomic<bool> g_glflush_fired{false};  
 
 void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     extern int g_current_frame; g_current_frame++;
@@ -3106,14 +3100,12 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
 
-    // 若 damage 入口已接管（新引擎用 eglSwapBuffersWithDamageKHR），本入口不再重复渲染
-    if (!g_dmg_fired.load()) RenderImGuiFrame();
+    // [修改这里] 传入 true，在原生 GL 交换缓冲时无视 context 检查直接渲染
+    if (!g_dmg_fired.load()) RenderImGuiFrame(true); 
 
     old_eglSwap(display, surface);
 }
 
-// [MuMu] 新引擎（Unity 2020+）在支持 KHR_damage 的驱动上换缓冲走 eglSwapBuffersWithDamageKHR，
-// 这是 MuMu 上 eglSwapBuffers 从未触发的最可能原因：游戏实际调用的交换入口是它。
 typedef EGLBoolean (*eglSwapWithDamage_t)(EGLDisplay, EGLSurface, const EGLint*, EGLint);
 static eglSwapWithDamage_t old_swapWithDamage = nullptr;
 EGLBoolean hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, const EGLint* rects, EGLint nrects) {
@@ -3122,21 +3114,22 @@ EGLBoolean hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, const 
     eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
 
-    if (!g_egl_fired.load()) RenderImGuiFrame();
+    // [修改这里] 传入 true
+    if (!g_egl_fired.load()) RenderImGuiFrame(true); 
 
     if (old_swapWithDamage) return old_swapWithDamage(display, surface, rects, nrects);
     return EGL_TRUE;
 }
 
-// [MuMu] GLES 执行点兜底：glFlush 在渲染线程被调用、GL 上下文必然 current。
-// 若 Houdini 只桥接截获 EGL stub、却翻译执行 libGLESv2 的 stub，此入口就会触发并负责渲染。
 static void (*old_glFlush)() = nullptr;
 void hook_glFlush() {
     if (!g_glflush_fired.exchange(true)) LOGI("JKInternal: glFlush FIRED -> GLES render path active");
     static int ctr = 0; ctr++;
-    // egl/damage 任一接管则不再渲染；否则每 3 次 flush 渲染一次，避免转译慢造成卡顿
     if (g_egl_fired.load() || g_dmg_fired.load() || (ctr % 3) != 0) { if (old_glFlush) old_glFlush(); return; }
-    RenderImGuiFrame();
+    
+    // [修改这里] 传入 true
+    RenderImGuiFrame(true); 
+    
     if (old_glFlush) old_glFlush();
 }
 
@@ -3144,9 +3137,6 @@ void* DelayedHookThread(void*) {
     while (!g_engine_rendering.load()) { sleep(1); }
     sleep(4);
     FindAndHookHiddenJNI();
-    // [DIAG] 打印各渲染入口触发状态：用于判断 MuMu(Houdini) 上哪条路径真正执行。
-    // imGuiInit=1 表示已有渲染路径成功初始化菜单；eglFired/dmgFired/glFlushFired=1
-    // 分别表示对应 hook 入口被游戏实际调用。全 0 说明 stub 全部被桥接截获，需换方案。
     sleep(3);
     __android_log_print(ANDROID_LOG_ERROR, "JKInternal",
         "DIAG: imGuiInit=%d eglFired=%d dmgFired=%d glFlushFired=%d",
@@ -3179,21 +3169,18 @@ void* SetupThread(void*) {
         DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
     }
     
-    // [FIX] MuMu/Houdini 下 libEGL.so 名字或符号解析可能失败；原 while 死循环会卡死整个
-    // SetupThread，导致 eglSwap 永远不被 hook、菜单永远不渲染。改为多候选库名 + 全局搜索回退
-    // + 超时 + 明确日志，杜绝静默卡死。
     void* egl_ptr = nullptr;
     LOGI("JKInternal: resolving eglSwapBuffers ...");
     const char* egl_libs[] = {"libEGL.so", "libEGL.so.1", "libGLESv2.so", "libGLESv3.so", nullptr};
     for (int li = 0; egl_libs[li] && !egl_ptr; li++) {
         for (int attempt = 0; attempt < 25 && !egl_ptr; attempt++) {
             egl_ptr = DobbySymbolResolver(egl_libs[li], "eglSwapBuffers");
-            if (!egl_ptr) usleep(200000);  // 0.2s
+            if (!egl_ptr) usleep(200000); 
         }
         if (egl_ptr) LOGI("JKInternal: eglSwapBuffers resolved via %s", egl_libs[li]);
     }
     if (!egl_ptr) {
-        egl_ptr = DobbySymbolResolver(nullptr, "eglSwapBuffers");  // 全局搜索
+        egl_ptr = DobbySymbolResolver(nullptr, "eglSwapBuffers"); 
         if (egl_ptr) LOGI("JKInternal: eglSwapBuffers resolved via global search");
     }
     if (!egl_ptr) {
@@ -3204,8 +3191,6 @@ void* SetupThread(void*) {
         LOGI("JKInternal: eglSwapBuffers hooked OK -> menu render enabled");
     }
 
-    // [MuMu] eglSwapBuffers 补丁即使装上，游戏也可能从不调用（Houdini bridge 截获 stub /
-    // 或实际走 eglSwapBuffersWithDamageKHR）。多入口兜底：damage 交换 + glFlush，任一触发即渲染。
     void* dmg_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffersWithDamageKHR");
     if (!dmg_ptr) dmg_ptr = DobbySymbolResolver(nullptr, "eglSwapBuffersWithDamageKHR");
     if (dmg_ptr) {
