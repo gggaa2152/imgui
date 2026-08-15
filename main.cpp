@@ -31,11 +31,9 @@
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
 #include <GLES3/gl3.h>
-#include <EGL/egl.h>    
 #include <jni.h>
 #include "dobby.h"
 
-// 统一的日志输出宏，终端过滤词为 JKInternal
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "JKInternal", __VA_ARGS__)
 
 uintptr_t g_il2cppTrueBase = 0;
@@ -2626,9 +2624,6 @@ void DrawMainMenu() {
     ImGui::End();
 }
 
-unsigned int (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
-unsigned int (*old_eglSwapWithDamage)(EGLDisplay, EGLSurface, EGLint*, EGLint) = nullptr;
-
 std::atomic<bool> g_engine_rendering{false};
 int g_current_frame = 0;
 
@@ -2637,8 +2632,10 @@ jobject g_view_obj = nullptr;
 jobject g_context = nullptr;
 void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
 
-// 将 ImGui 的渲染核心逻辑独立出来
-void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
+// ==============================================================
+// ★ 核心变更：独立的渲染核心，提取出来供 Unity 引擎内部函数调用
+// ==============================================================
+void RenderImGui_Core() {
     g_current_frame++;
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
 
@@ -2675,7 +2672,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     
     ImGuiIO& io = ImGui::GetIO(); 
     io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
-    io.DeltaTime = 1.0f / 60.0f; // 强制注入帧时间
+    io.DeltaTime = 1.0f / 60.0f; 
     
     UpdateMatchState();
 
@@ -2686,7 +2683,8 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
         ParseGameMemory();
 
     ProcessTextureQueue();
-    ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
+    ImGui_ImplOpenGL3_NewFrame(); 
+    ImGui::NewFrame();
 
     DrawMainMenu();
     DrawCardPoolWindow();
@@ -2704,40 +2702,23 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     
     ImGui::Render();
     
-    // 【强制恢复屏幕主画板 FBO 0】防止 Unity 画布丢失
     GLint last_fbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     
+    // 强制绑定默认画板 0，确保画面直接输出到屏幕
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, g_gl_width, g_gl_height);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     
+    // 恢复游戏原本的 FBO
     glBindFramebuffer(GL_FRAMEBUFFER, last_fbo); 
 
-    // 每 300 帧打印一次心跳，证明画板正常工作
     if (g_current_frame % 300 == 0) {
-        LOGI("[*] Render Heartbeat: Frame %d | FBO was %d | Viewport %dx%d", g_current_frame, last_fbo, g_gl_width, g_gl_height);
+        LOGI("[*] Internal Render Heartbeat: Frame %d | FBO was %d | Viewport %dx%d", g_current_frame, last_fbo, g_gl_width, g_gl_height);
     }
 }
 
-// ==============================================
-// 第一扇门：老版 EGL 渲染钩子
-// ==============================================
-unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
-    RenderImGui_Core(display, surface);
-    if (old_eglSwap) return old_eglSwap(display, surface);
-    return 1;
-}
-
-// ==============================================
-// 第二扇门：新版局部刷新 EGL 渲染钩子 (带 KHR)
-// ==============================================
-unsigned int hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, EGLint* rects, EGLint n_rects) {
-    RenderImGui_Core(display, surface);
-    if (old_eglSwapWithDamage) return old_eglSwapWithDamage(display, surface, rects, n_rects);
-    return 1;
-}
-
+// 触摸事件注入逻辑保持不变
 void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
     if (!env || !view || !old_nativeInjectEvent) return;
     static jclass SystemClock = nullptr;
@@ -2952,9 +2933,14 @@ void hook_set_IsGameEnd(void* thisObj, uint8_t isEnd) {
     }
 }
 
+// ==============================================================
+// ★ 降维打击：在业务主循环 SendWillRenderCanvases 内直接画图
+// ==============================================================
 typedef void* (*func_SendWillRenderCanvases_t)();
 func_SendWillRenderCanvases_t orig_SendWillRenderCanvases = nullptr;
 void* hook_SendWillRenderCanvases() {
+    
+    // 1. 处理原本在它这儿执行的【自动拿牌逻辑】
     {
         std::lock_guard<std::mutex> lock(g_Tasks.buy_mutex);
         if (!g_Tasks.buy_slots.empty()) {
@@ -2968,6 +2954,8 @@ void* hook_SendWillRenderCanvases() {
             g_Tasks.buy_slots.clear();
         }
     }
+    
+    // 2. 处理【极速退游逻辑】
     if (g_Tasks.trigger_quit.load()) {
         g_Tasks.trigger_quit.store(false);
         typedef void (*func_quit_t)(uintptr_t, int, int);
@@ -2979,24 +2967,28 @@ void* hook_SendWillRenderCanvases() {
         g_need_segment_gap_before_enter = true;
         g_Tasks.trigger_game_end.store(true, std::memory_order_release);
     }
+
+    // 3. ★ 核心魔法：将原本属于 EGL 的作画行为，直接挂载到 Unity 画布渲染前夕执行！
+    // 此时主线程不仅持有业务权限，还持有合法的 OpenGL Context。完美规避 Houdini EGL 隔离。
+    RenderImGui_Core();
+
+    // 4. 调用原函数，把游戏画面铺到底层去
     if (orig_SendWillRenderCanvases) return orig_SendWillRenderCanvases();
     return nullptr;
 }
+// ==============================================================
+
 
 void* DelayedHookThread(void*) {
     int timeout = 0;
-    LOGI("[+] DelayedHookThread: Waiting for engine rendering...");
-    while (!g_engine_rendering.load() && timeout < 30) { 
+    LOGI("[+] DelayedHookThread: Waiting for ImGui Init or timeout...");
+    // 放宽等待，即使渲染没起来，也尝试去 Hook 输入层
+    while (!g_engine_rendering.load() && timeout < 20) { 
         sleep(1); 
         timeout++;
     }
-    if (timeout >= 30) {
-        LOGI("[-] DelayedHookThread: Timeout waiting for rendering!");
-        return nullptr; 
-    }
     
-    LOGI("[+] Engine is rendering, sleeping 4s before hidden JNI hook...");
-    sleep(4); 
+    LOGI("[+] Attempting hidden JNI hook for touches...");
     FindAndHookHiddenJNI();
     LOGI("[+] DelayedHookThread: Hidden JNI hooked.");
     return nullptr;
@@ -3041,95 +3033,51 @@ void* SetupThread(void*) {
         DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
     }
     
-    // ==========================================
-    // ★ 干净纯洁的系统级 EGL API 获取方案
-    // ==========================================
-    LOGI("[+] Resolving EGL functions via standard API...");
-    void* egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
-    void* egl_damage_ptr = (void*)eglGetProcAddress("eglSwapBuffersWithDamageKHR");
-
-    if (!egl_ptr) {
-        LOGI("[-] eglGetProcAddress failed for eglSwapBuffers, trying dlopen...");
-        void* handle = dlopen("libEGL.so", RTLD_LAZY);
-        if (handle) egl_ptr = dlsym(handle, "eglSwapBuffers");
-    }
+    // 【修改点】：直接通过 IL2CPP 反射寻找 Unity 的内部渲染核心 SendWillRenderCanvases
+    // 因为这属于纯业务层，绝不会受到跨架构 Houdini 的干扰！
+    LOGI("[+] Starting hook for Unity Canvases (Internal Render)...");
     
-    if (!egl_damage_ptr) {
-        LOGI("[-] eglGetProcAddress failed for eglSwapBuffersWithDamageKHR, trying dlopen...");
-        void* handle = dlopen("libEGL.so", RTLD_LAZY);
-        if (handle) egl_damage_ptr = dlsym(handle, "eglSwapBuffersWithDamageKHR");
-    }
+    typedef void* (*il2cpp_domain_get_t)();
+    typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
+    typedef void* (*il2cpp_assembly_get_image_t)(void*);
+    typedef void* (*il2cpp_class_from_name_t)(void*, const char*, const char*);
+    typedef void* (*il2cpp_class_get_method_from_name_t)(void*, const char*, int);
 
-    int hook_cnt = 0;
-    if (egl_ptr) {
-        LOGI("[+] Found eglSwapBuffers at %p, Hooking...", egl_ptr);
-        DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
-        hook_cnt++;
-    } else {
-        LOGI("[-] Could not find eglSwapBuffers!");
-    }
+    auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
+    auto assembly_open = (il2cpp_domain_assembly_open_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_assembly_open");
+    auto assembly_get_image = (il2cpp_assembly_get_image_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_assembly_get_image");
+    auto class_from_name = (il2cpp_class_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_from_name");
+    auto class_get_method_from_name = (il2cpp_class_get_method_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_get_method_from_name");
 
-    if (egl_damage_ptr) {
-        LOGI("[+] Found eglSwapBuffersWithDamageKHR at %p, Hooking...", egl_damage_ptr);
-        DobbyHook(egl_damage_ptr, (void*)hook_eglSwapWithDamage, (void**)&old_eglSwapWithDamage);
-        hook_cnt++;
-    } else {
-        LOGI("[-] Could not find eglSwapBuffersWithDamageKHR!");
-    }
-
-    if (hook_cnt > 0) {
-        LOGI("[+] EGL Hooked Successfully! (%d interfaces protected)", hook_cnt);
-    } else {
-        LOGI("[-] SetupThread abort: No EGL functions found! Is the game using Vulkan?");
-    }
-    // ==========================================
-    
-    LOGI("[+] Starting delayed hook for Unity Canvases...");
-    std::thread([]() {
-        sleep(5); 
-        LOGI("[+] Attempting to hook SendWillRenderCanvases...");
-        typedef void* (*il2cpp_domain_get_t)();
-        typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
-        typedef void* (*il2cpp_assembly_get_image_t)(void*);
-        typedef void* (*il2cpp_class_from_name_t)(void*, const char*, const char*);
-        typedef void* (*il2cpp_class_get_method_from_name_t)(void*, const char*, int);
-
-        auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
-        auto assembly_open = (il2cpp_domain_assembly_open_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_assembly_open");
-        auto assembly_get_image = (il2cpp_assembly_get_image_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_assembly_get_image");
-        auto class_from_name = (il2cpp_class_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_from_name");
-        auto class_get_method_from_name = (il2cpp_class_get_method_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_get_method_from_name");
-
-        if (domain_get && assembly_open && assembly_get_image && class_from_name && class_get_method_from_name) {
-            void* domain = domain_get();
-            if (domain) {
-                void* assembly = assembly_open(domain, "UnityEngine.UIModule.dll");
-                if (assembly) {
-                    void* image = assembly_get_image(assembly);
-                    if (image) {
-                        void* klass = class_from_name(image, "UnityEngine", "Canvas");
-                        if (klass) {
-                            void* method = class_get_method_from_name(klass, "SendWillRenderCanvases", 0);
-                            if (method) {
-                                void* method_ptr = *(void**)method;
-                                if (method_ptr) {
-                                    DobbyHook(method_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
-                                    LOGI("[+] SendWillRenderCanvases hooked!");
-                                }
+    if (domain_get && assembly_open && assembly_get_image && class_from_name && class_get_method_from_name) {
+        void* domain = domain_get();
+        if (domain) {
+            void* assembly = assembly_open(domain, "UnityEngine.UIModule.dll");
+            if (assembly) {
+                void* image = assembly_get_image(assembly);
+                if (image) {
+                    void* klass = class_from_name(image, "UnityEngine", "Canvas");
+                    if (klass) {
+                        void* method = class_get_method_from_name(klass, "SendWillRenderCanvases", 0);
+                        if (method) {
+                            void* method_ptr = *(void**)method;
+                            if (method_ptr) {
+                                DobbyHook(method_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
+                                LOGI("[+] SUCCESS! SendWillRenderCanvases hooked as Internal Render Engine!");
                             }
                         }
                     }
                 }
             }
-        } else {
-            LOGI("[-] Missing il2cpp exports for Canvases hook.");
         }
-    }).detach();
+    } else {
+        LOGI("[-] Missing il2cpp exports for Canvases hook.");
+    }
 
     pthread_t t;
     pthread_create(&t, 0, DelayedHookThread, 0);
     pthread_detach(t);
-    LOGI("[+] SetupThread Finished.");
+    LOGI("[+] SetupThread Finished. EGL hooking completely bypassed.");
     return nullptr;
 }
 
