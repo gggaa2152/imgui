@@ -188,7 +188,7 @@ static int g_segment_valid_streak = 0;
 static bool g_need_segment_gap_before_enter = false;
 
 // UI State & Styles
-extern bool g_isImGuiInit; // 声明 ImGui 初始化标志
+bool g_isImGuiInit = false; // 声明 ImGui 初始化标志
 ImFont* g_mainFont = nullptr;
 float g_autoScale = 1.0f;
 float g_current_rendered_size = 0.0f;
@@ -436,10 +436,8 @@ static void CaptureWindowPos(const char* name, float& x, float& y) {
     if (w) { x = w->Pos.x; y = w->Pos.y; }
 }
 
-bool g_isImGuiInit = false;
-
 void SaveConfig() {
-    // 【修复：只有在 ImGui 初始化后才去抓取位置，否则启动即崩溃】
+    // 【修复：只有在 ImGui 初始化后才去抓取位置，否则空指针崩溃】
     if (g_isImGuiInit) {
         CaptureWindowPos("##CardPoolFloat", g_float_cp_x, g_float_cp_y);
         CaptureWindowPos("##PlayerDataFloat", g_float_pd_x, g_float_pd_y);
@@ -843,7 +841,6 @@ void ParseGameMemory() {
     func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
     if (!get_Instance) return;
     
-    // [主线]
     try { g_dbg_addr1 = (uintptr_t)get_Instance(nullptr); } catch(...) { g_dbg_addr1 = 0; }
     g_dbg_addr2 = SAFE_READ_PTR(g_dbg_addr1, g_off.addr2);
     g_dbg_addr3 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr3); 
@@ -859,7 +856,6 @@ void ParseGameMemory() {
     int next_opp_count = SAFE_READ_INT(next_opp_addr, 0x18);
     g_next_opponents = GetIntsInArray(next_opp_list, next_opp_count > 0 && next_opp_count < 16 ? next_opp_count : 8);
 
-    // [牌库显示]
     g_dbg_addr4 = SAFE_READ_PTR(g_dbg_segmentcsogame, g_off.addr4);
     g_dbg_addr5 = SAFE_READ_PTR(g_dbg_addr4, g_off.addr5);
     g_dbg_addr6 = SAFE_READ_PTR(g_dbg_addr5, g_off.addr6);
@@ -884,7 +880,6 @@ void ParseGameMemory() {
         }
     }
 
-    // [内存全量暴力扫描算法]
     g_dbg_addr11 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr11);
     g_dbg_addr12 = SAFE_READ_PTR(g_dbg_addr11, g_off.addr12);
     
@@ -929,7 +924,6 @@ void ParseGameMemory() {
         pi.lose_streak = SAFE_READ_INT(val, g_off.pi_lose_streak);
         pi.level = SAFE_READ_INT(val, g_off.pi_level);
         
-        // 商店
         uintptr_t addr14 = SAFE_READ_PTR(val, g_off.addr14);
         uintptr_t addr15 = SAFE_READ_PTR(addr14, g_off.addr15);
         auto shopItems = GetPointersInArray(addr15, 5);
@@ -938,7 +932,6 @@ void ParseGameMemory() {
             int shop_hero_id = SAFE_READ_INT(addr16, g_off.shop_hero_id);
             pi.shop.push_back(shop_hero_id);
             
-            // 自动拿牌
             if (shop_hero_id > 0 && pi.id == g_my_player_id && g_heroAutoBuyChecked[shop_hero_id]) {
                 uintptr_t slot_addr = 0;
                 if (g_shop_listen_done.load() && i < g_shop_slots.size())
@@ -957,13 +950,11 @@ void ParseGameMemory() {
             }
         }
         
-        // 备战区
         uintptr_t addr17 = SAFE_READ_PTR(val, g_off.addr17);
         uintptr_t addr18 = SAFE_READ_PTR(addr17, g_off.addr18);
         auto benchItems = GetPointersInArray(addr18, 10);
         for (auto b_item : benchItems) pi.bench.push_back(SAFE_READ_INT(b_item, g_off.bench_hero_id));
         
-        // 场上
         uintptr_t addr19 = SAFE_READ_PTR(val, g_off.addr19);
         uintptr_t addr20 = SAFE_READ_PTR(addr19, g_off.addr20);
         auto boardItems = GetPointersInArray(addr20, 30);
@@ -977,7 +968,6 @@ void ParseGameMemory() {
         g_players.push_back(pi);
     }
 
-    // [海克斯预测]
     g_dbg_addr21 = SAFE_READ_PTR(g_dbg_segmentcsogame, g_off.addr21);
     g_dbg_addr22 = SAFE_READ_PTR(g_dbg_addr21, g_off.addr22);
     g_dbg_addr23 = SAFE_READ_PTR(g_dbg_addr22, g_off.addr23);
@@ -2472,7 +2462,6 @@ void DrawMainMenu() {
                 DrawGlassSeparator();
                 DrawSectionTitle((const char*)u8"\u8fde\u70b9\u5668");
                 {
-                    // 更新 CPS 统计数据
                     float now_time = (float)ImGui::GetTime();
                     static float last_cps_calc_time = 0.0f;
                     if (now_time - last_cps_calc_time >= 0.1f) {
@@ -2489,13 +2478,11 @@ void DrawMainMenu() {
                         g_cps_hist_idx = (g_cps_hist_idx + 1) % 100;
                     }
 
-                    // 开关
                     bool was_on = g_auto_clicker_enable;
                     ModernToggle((const char*)u8"\u5f00\u542f\u8fde\u70b9\u5668", &g_auto_clicker_enable, 11);
                     if (g_auto_clicker_enable && !was_on) g_clicker_running.store(true);
                     if (!g_auto_clicker_enable) g_clicker_running.store(false);
 
-                    // 间隔与持续时间
                     SliderFloatFine((const char*)u8"点击间隔(ms)", &g_click_interval_ms, 0.0f, 200.0f, "%.1f ms");
                     SliderFloatFine((const char*)u8"按下持续(ms)", &g_touch_duration_ms, 0.0f, 50.0f, "%.1f ms");
                     
@@ -2505,7 +2492,6 @@ void DrawMainMenu() {
                         ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.f, 1.f), (const char*)u8"设定理论极限: %.0f 次/秒", 1000.0f / std::max(g_click_interval_ms + g_touch_duration_ms, 0.1f));
                     }
 
-                    // 科技感 CPS 曲线画板
                     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"实时实际速率: %.1f 次/秒 (CPS)", g_realtime_cps);
                     {
                         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -2548,7 +2534,6 @@ void DrawMainMenu() {
                         dl->AddText(ImVec2(graphPos.x + 8, graphPos.y + 4), IM_COL32(255, 255, 255, 120), limit_str);
                     }
 
-                    // 多位置连点
                     ImGui::TextColored(ImVec4(1.f, 0.85f, 0.3f, 1.f), (const char*)u8"点击位置数量: %d", (int)g_click_positions.size());
                     if (ImGui::Button((const char*)u8"+ 添加点击位置")) { g_click_positions.push_back({g_click_positions.back().x, g_click_positions.back().y}); }
                     ImGui::SameLine();
@@ -2976,32 +2961,51 @@ void* hook_SendWillRenderCanvases() {
     return nullptr;
 }
 
+// 【终极修复：强制屏幕FBO绑定 + DeltaTime注入 + 降级兼容保护】
 void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     extern int g_current_frame; g_current_frame++;
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
 
-    eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
-    eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    g_gl_width = viewport[2];
+    g_gl_height = viewport[3];
+
+    if (g_gl_width <= 0 || g_gl_height <= 0) {
+        g_gl_width = 1080; g_gl_height = 2400; 
+    }
     
     if (!g_isImGuiInit) {
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
-        ImGui_ImplOpenGL3_Init("#version 300 es");
+        
+        const char* gl_ver = (const char*)glGetString(GL_VERSION);
+        const char* glsl_ver = "#version 300 es";
+        if (gl_ver && strstr(gl_ver, "OpenGL ES 2.")) {
+            glsl_ver = "#version 100";
+        }
+        ImGui_ImplOpenGL3_Init(glsl_ver);
+        
         io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
         SetupImGuiStyle();
         UpdateFontHD(true);
         g_isImGuiInit = true;
+        
+        LOGI("[+] ImGui Initialized with %s, Res: %dx%d", glsl_ver, g_gl_width, g_gl_height);
     }
+    
     if (g_needUpdateFontSafe) { UpdateFontHD(true); g_needUpdateFontSafe = false; }
-    ImGuiIO& io = ImGui::GetIO(); io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
+    
+    ImGuiIO& io = ImGui::GetIO(); 
+    io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
+    io.DeltaTime = 1.0f / 60.0f; // 强制注入帧时间，防止动画假死隐身
     
     UpdateMatchState();
 
     if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire))
         ClearGameState();
 
-    extern int g_current_frame;
     if (g_is_in_match.load(std::memory_order_acquire) && (g_current_frame % 2 == 0))
         ParseGameMemory();
 
@@ -3019,11 +3023,24 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     DrawCardPoolCapsule();
     DrawClickerCapsule();
     DrawClickerFeedback();
+    
     if (g_apply_saved_float_pos) g_apply_saved_float_pos = false;
     
     ImGui::Render();
+    
+    // 【强制恢复屏幕主画板 FBO 0】
+    GLint last_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    
     glViewport(0, 0, g_gl_width, g_gl_height);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, last_fbo); 
+
+    if (g_current_frame % 300 == 0) {
+        LOGI("[*] Render Heartbeat: Frame %d | FBO was %d | Viewport %dx%d", g_current_frame, last_fbo, g_gl_width, g_gl_height);
+    }
     
     old_eglSwap(display, surface);
 }
@@ -3086,9 +3103,6 @@ void* SetupThread(void*) {
         DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
     }
     
-    // ==========================================
-    // ★ 核心修复区：安全解析 eglSwapBuffers
-    // ==========================================
     LOGI("[+] Resolving eglSwapBuffers safely via dlopen...");
     void* egl_ptr = nullptr;
     void* egl_handle = dlopen("libEGL.so", RTLD_LAZY);
@@ -3110,7 +3124,6 @@ void* SetupThread(void*) {
         LOGI("[-] SetupThread abort: eglSwapBuffers not found!");
         return nullptr;
     }
-    // ==========================================
     
     LOGI("[+] Starting delayed hook for Unity Canvases...");
     std::thread([]() {
