@@ -17,7 +17,7 @@
 #include <mutex>
 #include <deque>
 #include <chrono>
-#include <fcntl.h> // 必须包含此头文件以支持安全的内存探测
+#include <fcntl.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_SIMD
@@ -115,9 +115,9 @@ struct Offsets {
     uint32_t addr23 = 0x08;
     uint32_t addr23_struct_size = 0x20;
     uint32_t addr23_ptr_offset = 0x10;
-    uint32_t addr26 = 0x68;              // addr23 每条 +0x68 -> addr26（原先只读第一条当 addr24）
+    uint32_t addr26 = 0x68;              // addr23 每条 +0x68 -> addr26
     uint32_t pi_avatar_rank = 0x2DC;     // addr26 +0x2DC = 玩家头像排位 id
-    uint32_t pi_avatar_player_id = 0x248; // addr26 +0x248 = 玩家 id（与玩家列表 id 对上即该玩家）
+    uint32_t pi_avatar_player_id = 0x248; // addr26 +0x248 = 玩家 id
     uint32_t hexctrl = 0x60;
     uint32_t func_get_hex = 0x6e356d4;
 };
@@ -188,6 +188,7 @@ static int g_segment_valid_streak = 0;
 static bool g_need_segment_gap_before_enter = false;
 
 // UI State & Styles
+extern bool g_isImGuiInit; // 声明 ImGui 初始化标志
 ImFont* g_mainFont = nullptr;
 float g_autoScale = 1.0f;
 float g_current_rendered_size = 0.0f;
@@ -206,7 +207,6 @@ float g_orb_r = 34.0f;
 bool g_win_cardpool = true;
 bool g_win_playerdata = true;
 bool g_win_hextech = true;
-// Per-float opacity (1 = opaque)
 float g_alpha_cp = 1.0f;
 float g_alpha_pd = 1.0f;
 float g_alpha_opp = 1.0f;
@@ -214,10 +214,10 @@ float g_alpha_hex = 1.0f;
 
 // Card Pool View Settings
 int g_cp_columns = 6;
-int g_cp_rows = 0; // 0 = auto (no row cap)
+int g_cp_rows = 0; 
 float g_cp_box_size = 65.0f;
 float g_cp_scale = 1.0f;
-bool g_cp_show_cost[6] = { false, true, true, true, true, true }; // index 1-5
+bool g_cp_show_cost[6] = { false, true, true, true, true, true };
 bool g_cp_warning_enable = true;
 int g_cp_warning_thres = 3;
 
@@ -227,7 +227,7 @@ float g_pd_vert_spacing = 0.0f;
 float g_pd_arrow_spacing = 15.0f;
 float g_pd_font_size = 1.0f;
 bool g_pd_hero_summary_enable = true;
-int g_pd_hero_count_min[6] = {0, 1, 1, 1, 1, 1}; // index 1-5 = per-cost threshold
+int g_pd_hero_count_min[6] = {0, 1, 1, 1, 1, 1};
 
 // Opponent View Settings
 bool g_opp_show_board = true;
@@ -253,11 +253,11 @@ int g_gl_width = 0, g_gl_height = 0;
 
 // Auto Clicker Settings
 bool g_auto_clicker_enable = false;
-float g_click_interval_ms = 0.0f;    // 点击间隔（毫秒），0 = 无延迟尽力最快
-float g_touch_duration_ms = 0.0f;    // 触摸按下持续时间（毫秒），0 = 零延迟
+float g_click_interval_ms = 0.0f;    
+float g_touch_duration_ms = 0.0f;    
 struct ClickPos { float x = 540.0f; float y = 960.0f; };
 std::vector<ClickPos> g_click_positions = { {540.0f, 960.0f} };
-int g_click_pos_captured = -1;       // 自动捕获的目标位置索引，-1 = 未捕获
+int g_click_pos_captured = -1;       
 std::atomic<bool> g_clicker_running{false};
 
 // CPS Real-time Monitor
@@ -266,7 +266,7 @@ float g_realtime_cps = 0.0f;
 float g_cps_history[100] = {0.0f};
 int g_cps_hist_idx = 0;
 
-// Quit capsule (independent float)
+// Quit capsule
 float g_quit_x = 80.0f, g_quit_y = 520.0f;
 int g_quit_confirm = 0;
 float g_quit_timer = 0.0f;
@@ -281,7 +281,7 @@ float g_cpbtn_x = 80.0f, g_cpbtn_y = 400.0f;
 // Clicker toggle capsule
 float g_clickerbtn_x = 80.0f, g_clickerbtn_y = 340.0f;
 
-// Saved float window positions (-1 = unset)
+// Saved float window positions
 float g_float_cp_x = -1.0f, g_float_cp_y = -1.0f;
 float g_float_pd_x = -1.0f, g_float_pd_y = -1.0f;
 float g_float_opp_x = -1.0f, g_float_opp_y = -1.0f;
@@ -326,18 +326,21 @@ uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x
     return 0;
 }
 
-// 【关键修复：安全的内存读取函数，兼容模拟器翻译层】
+// 【修复：模拟器安全的内存读取，避免段错误】
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
     if (addr < 0x10000 || addr > 0x00007FFFFFFFFFFF) return false;
+
     static int safe_fd = -1;
     if (safe_fd == -1) {
         safe_fd = open("/dev/random", O_WRONLY);
     }
+    
     if (safe_fd >= 0) {
         if (write(safe_fd, (void*)addr, size) < 0) {
             return false;
         }
     }
+
     memcpy(buffer, (void*)addr, size);
     return true;
 }
@@ -433,11 +436,16 @@ static void CaptureWindowPos(const char* name, float& x, float& y) {
     if (w) { x = w->Pos.x; y = w->Pos.y; }
 }
 
+bool g_isImGuiInit = false;
+
 void SaveConfig() {
-    CaptureWindowPos("##CardPoolFloat", g_float_cp_x, g_float_cp_y);
-    CaptureWindowPos("##PlayerDataFloat", g_float_pd_x, g_float_pd_y);
-    CaptureWindowPos("##OpponentFloat", g_float_opp_x, g_float_opp_y);
-    CaptureWindowPos("##HextechFloat", g_float_hex_x, g_float_hex_y);
+    // 【修复：只有在 ImGui 初始化后才去抓取位置，否则启动即崩溃】
+    if (g_isImGuiInit) {
+        CaptureWindowPos("##CardPoolFloat", g_float_cp_x, g_float_cp_y);
+        CaptureWindowPos("##PlayerDataFloat", g_float_pd_x, g_float_pd_y);
+        CaptureWindowPos("##OpponentFloat", g_float_opp_x, g_float_opp_y);
+        CaptureWindowPos("##HextechFloat", g_float_hex_x, g_float_hex_y);
+    }
 
     std::ofstream out(GetConfigPath());
     if (out.is_open()) {
@@ -540,6 +548,16 @@ void SaveConfig() {
         for (size_t i = 0; i < g_click_positions.size(); i++) {
             if (i > 0) out << ";";
             out << g_click_positions[i].x << "," << g_click_positions[i].y;
+        }
+        out << "\n";
+        out << "auto_buy_ids=";
+        bool first = true;
+        for (const auto& pair : g_heroAutoBuyChecked) {
+            if (pair.second) {
+                if (!first) out << ",";
+                out << pair.first;
+                first = false;
+            }
         }
         out << "\n";
         out.close();
@@ -2704,7 +2722,6 @@ void DrawMainMenu() {
     ImGui::End();
 }
 
-bool g_isImGuiInit = false;
 void (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
 std::atomic<bool> g_engine_rendering{false};
 int g_current_frame = 0;
@@ -2714,7 +2731,6 @@ jobject g_view_obj = nullptr;
 jobject g_context = nullptr;
 void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
 
-// 【修复：兼容模拟器的 InjectTouchClick】
 void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
     if (!env || !view || !old_nativeInjectEvent) return;
     static jclass SystemClock = nullptr;
@@ -2756,7 +2772,6 @@ void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
     }
 
     if (eventDown) {
-        // 在模拟器中，如果 4098(TOUCHSCREEN) 被过滤，这里叠加了 8194(MOUSE)
         if (setSource) env->CallVoidMethod(eventDown, setSource, 4098 | 8194); 
         old_nativeInjectEvent(env, view, eventDown);
         env->DeleteLocalRef(eventDown);
@@ -3013,7 +3028,6 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     old_eglSwap(display, surface);
 }
 
-// 【修复：加入超时机制，防止死锁卡死主进程】
 void* DelayedHookThread(void*) {
     int timeout = 0;
     LOGI("[+] DelayedHookThread: Waiting for engine rendering...");
@@ -3027,23 +3041,23 @@ void* DelayedHookThread(void*) {
     }
     
     LOGI("[+] Engine is rendering, sleeping 4s before hidden JNI hook...");
-    sleep(4); // 等待游戏逻辑进一步稳定
+    sleep(4); 
     FindAndHookHiddenJNI();
     LOGI("[+] DelayedHookThread: Hidden JNI hooked.");
     return nullptr;
 }
 
 void* SetupThread(void*) {
-    // 【修复：加入超时退出机制，防止找不到 libil2cpp 时死锁卡死游戏】
     LOGI("[+] SetupThread Started! Waiting for libil2cpp.so...");
     int retry_count = 0;
-    while (g_il2cppTrueBase == 0 && retry_count < 60) { // 最多等 60 秒
+    while (g_il2cppTrueBase == 0 && retry_count < 60) {
         FILE *fp = fopen("/proc/self/maps", "r");
         if (fp) {
             char line[512];
             while (fgets(line, sizeof(line), fp)) {
                 if (strstr(line, "libil2cpp.so")) {
-                    sscanf(line, "%lx", &g_il2cppTrueBase); break;
+                    sscanf(line, "%lx", &g_il2cppTrueBase); 
+                    break;
                 }
             }
             fclose(fp);
@@ -3084,7 +3098,6 @@ void* SetupThread(void*) {
         LOGI("[-] dlopen libEGL.so failed!");
     }
     
-    // 如果原生 dlsym 没找到，再作为备用方案使用系统调用获取
     if (egl_ptr == nullptr) {
         egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
     }
@@ -3101,7 +3114,7 @@ void* SetupThread(void*) {
     
     LOGI("[+] Starting delayed hook for Unity Canvases...");
     std::thread([]() {
-        sleep(5); // 等待 DobbyHook 和游戏初始化稳定
+        sleep(5); 
         LOGI("[+] Attempting to hook SendWillRenderCanvases...");
         typedef void* (*il2cpp_domain_get_t)();
         typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
