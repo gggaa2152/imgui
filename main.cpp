@@ -2647,7 +2647,9 @@ void DrawMainMenu() {
     ImGui::End();
 }
 
-void (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
+unsigned int (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
+unsigned int (*old_eglSwapWithDamage)(EGLDisplay, EGLSurface, EGLint*, EGLint) = nullptr;
+
 std::atomic<bool> g_engine_rendering{false};
 int g_current_frame = 0;
 
@@ -2901,8 +2903,9 @@ void* hook_SendWillRenderCanvases() {
     return nullptr;
 }
 
-void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
-    extern int g_current_frame; g_current_frame++;
+// ★ 将核心渲染逻辑提取出来，供两个函数共用
+void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
+    g_current_frame++;
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
 
     GLint viewport[4];
@@ -2980,8 +2983,20 @@ void hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     if (g_current_frame % 300 == 0) {
         LOGI("[*] Render Heartbeat: Frame %d | FBO was %d | Viewport %dx%d", g_current_frame, last_fbo, g_gl_width, g_gl_height);
     }
-    
-    old_eglSwap(display, surface);
+}
+
+// 门 1：老旧的 eglSwapBuffers
+unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
+    RenderImGui_Core(display, surface);
+    if (old_eglSwap) return old_eglSwap(display, surface);
+    return 1;
+}
+
+// 门 2：高级的 eglSwapBuffersWithDamageKHR（安卓15真凶）
+unsigned int hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, EGLint* rects, EGLint n_rects) {
+    RenderImGui_Core(display, surface);
+    if (old_eglSwapWithDamage) return old_eglSwapWithDamage(display, surface, rects, n_rects);
+    return 1;
 }
 
 void* DelayedHookThread(void*) {
@@ -3043,48 +3058,38 @@ void* SetupThread(void*) {
     }
     
     // ==========================================
-    // ★ 终极修复区：穿透系统外壳，无视隔离，直捣底层真实硬件驱动
+    // ★ 终极修复区：利用系统路由，双门齐封
     // ==========================================
-    LOGI("[+] Resolving true eglSwapBuffers from hardware driver...");
-    void* egl_ptr = nullptr;
-    char line[1024];
-    FILE* fp = fopen("/proc/self/maps", "r");
-    if (fp) {
-        while (fgets(line, sizeof(line), fp)) {
-            // 扫描内存，寻找 vendor 底层显卡驱动
-            if (strstr(line, "libEGL") && strstr(line, ".so") && strstr(line, "vendor")) {
-                char path[512];
-                if (sscanf(line, "%*s %*s %*s %*s %*s %s", path) == 1) {
-                    // 无视 dlopen 隔离，利用 Dobby 内存解析提取真实指针
-                    const char* base_name = strrchr(path, '/');
-                    base_name = base_name ? base_name + 1 : path;
-
-                    egl_ptr = DobbySymbolResolver(path, "eglSwapBuffers");
-                    if (!egl_ptr) {
-                        egl_ptr = DobbySymbolResolver(base_name, "eglSwapBuffers");
-                    }
-
-                    if (egl_ptr) {
-                        LOGI("[+] SUCCESS! Got TRUE eglSwapBuffers via Dobby from: %s (%p)", base_name, egl_ptr);
-                        break; 
-                    }
-                }
-            }
-        }
-        fclose(fp);
-    }
-
+    LOGI("[+] Resolving EGL functions via eglGetProcAddress...");
+    void* egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
+    void* egl_damage_ptr = (void*)eglGetProcAddress("eglSwapBuffersWithDamageKHR");
+    
+    // 终极保底：如果 eglGetProcAddress 失效，再用 dlopen 抓外壳
     if (!egl_ptr) {
-        LOGI("[-] Could not find vendor EGL via Dobby, falling back to system eglGetProcAddress");
-        egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
+        void* handle = dlopen("libEGL.so", RTLD_LAZY);
+        if (handle) egl_ptr = dlsym(handle, "eglSwapBuffers");
+    }
+    if (!egl_damage_ptr) {
+        void* handle = dlopen("libEGL.so", RTLD_LAZY);
+        if (handle) egl_damage_ptr = dlsym(handle, "eglSwapBuffersWithDamageKHR");
     }
 
-    if (egl_ptr != nullptr) {
-        LOGI("[+] Target eglSwapBuffers is at %p, Hooking...", egl_ptr);
+    int hook_cnt = 0;
+    if (egl_ptr) {
+        LOGI("[+] Found eglSwapBuffers at %p, Hooking...", egl_ptr);
         DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
-        LOGI("[+] eglSwapBuffers Hooked Successfully!");
+        hook_cnt++;
+    }
+    if (egl_damage_ptr) {
+        LOGI("[+] Found eglSwapBuffersWithDamageKHR at %p, Hooking...", egl_damage_ptr);
+        DobbyHook(egl_damage_ptr, (void*)hook_eglSwapWithDamage, (void**)&old_eglSwapWithDamage);
+        hook_cnt++;
+    }
+
+    if (hook_cnt > 0) {
+        LOGI("[+] EGL Hooked Successfully! (%d functions)", hook_cnt);
     } else {
-        LOGI("[-] SetupThread abort: eglSwapBuffers not found anywhere!");
+        LOGI("[-] SetupThread abort: No EGL functions found to hook!");
         return nullptr;
     }
     // ==========================================
