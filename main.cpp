@@ -426,6 +426,7 @@ std::string GetConfigPath() {
 }
 
 static void CaptureWindowPos(const char* name, float& x, float& y) {
+    if (ImGui::GetCurrentContext() == nullptr) return;
     ImGuiWindow* w = ImGui::FindWindowByName(name);
     if (w) { x = w->Pos.x; y = w->Pos.y; }
 }
@@ -1281,8 +1282,7 @@ void DrawMenuOrb() {
 }
 
 static void RaiseCapsuleWindow(const char* name) {
-    if (ImGuiWindow* w = ImGui::FindWindowByName(name))
-        ImGui::BringWindowToDisplayFront(w);
+    // 禁用 BringWindowToDisplayFront，防止在帧内遍历窗口列表时引起自循环递归/堆栈溢出 (SIGSEGV code -6)
 }
 
 void DrawQuitCapsule() {
@@ -1329,7 +1329,6 @@ void DrawQuitCapsule() {
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
-    RaiseCapsuleWindow("##QuitCapsule");
 }
 
 void DrawLockCapsule() {
@@ -1368,7 +1367,6 @@ void DrawLockCapsule() {
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
-    RaiseCapsuleWindow("##LockCapsule");
 }
 
 void DrawCardPoolCapsule() {
@@ -1406,7 +1404,6 @@ void DrawCardPoolCapsule() {
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
-    RaiseCapsuleWindow("##CardPoolCapsule");
 }
 
 void DrawClickerCapsule() {
@@ -1445,7 +1442,6 @@ void DrawClickerCapsule() {
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
-    RaiseCapsuleWindow("##ClickerCapsule");
 }
 
 void DrawClickerFeedback() {
