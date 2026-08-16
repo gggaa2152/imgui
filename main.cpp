@@ -153,6 +153,9 @@ bool g_menu_orb = false;
 float g_orb_x = 120.0f, g_orb_y = 120.0f;
 float g_orb_r = 34.0f;
 
+std::atomic<bool> g_engine_rendering{false};
+int g_current_frame = 0;
+
 bool g_win_cardpool = true, g_win_playerdata = true, g_win_hextech = true, g_win_hero_warn = true;
 float g_alpha_cp = 1.0f, g_alpha_pd = 1.0f, g_alpha_opp = 1.0f, g_alpha_hex = 1.0f, g_alpha_hero_warn = 1.0f;
 int g_cp_columns = 6, g_cp_rows = 0; 
@@ -371,7 +374,7 @@ void ParseGameMemory() {
             if (hid > 0 && pi.id == g_my_player_id && g_heroAutoBuyChecked[hid]) {
                 uintptr_t s_addr = (g_shop_listen_done.load() && i < g_shop_slots.size()) ? g_shop_slots[i] : shopItems[i];
                 if (IsValidPtr(s_addr)) {
-                    extern int g_current_frame; static std::map<uintptr_t, int> last_buy;
+                    static std::map<uintptr_t, int> last_buy;
                     if (g_current_frame - last_buy[s_addr] > 10) { last_buy[s_addr] = g_current_frame; std::lock_guard<std::mutex> lock(g_Tasks.buy_mutex); g_Tasks.buy_slots.push_back(s_addr); }
                 }
             }
@@ -692,4 +695,3 @@ void* SetupThread(void*) {
 __attribute__((constructor)) void Init() { 
     pthread_t t; pthread_create(&t, 0, SetupThread, 0); pthread_detach(t); 
 }
-
