@@ -273,6 +273,123 @@ std::string GetConfigPath() {
     return "/data/local/tmp/jkt_offsets.txt";
 }
 
+// ====== 配置保存与读取 (Save/Load Config) ======
+static void CaptureWindowPos(const char* name, float& x, float& y) {
+    ImGuiWindow* w = ImGui::FindWindowByName(name);
+    if (w) { x = w->Pos.x; y = w->Pos.y; }
+}
+
+void SaveConfig() {
+    CaptureWindowPos("##CardPoolFloat", g_float_cp_x, g_float_cp_y);
+    CaptureWindowPos("##PlayerDataFloat", g_float_pd_x, g_float_pd_y);
+    CaptureWindowPos("##OpponentFloat", g_float_opp_x, g_float_opp_y);
+    CaptureWindowPos("##HextechFloat", g_float_hex_x, g_float_hex_y);
+    std::ofstream out(GetConfigPath());
+    if (out.is_open()) {
+        out << "# [完美UI版] 在此处或菜单内修改十六进制偏移并保存，会自动生效！\n";
+        #define WRITE_OFF_32(name) out << #name << "=0x" << std::hex << g_off.name << "\n"
+        WRITE_OFF_32(func_get_Instance); WRITE_OFF_32(addr2); WRITE_OFF_32(addr3); WRITE_OFF_32(addra); WRITE_OFF_32(segmentcsogame);
+        WRITE_OFF_32(func_quit); WRITE_OFF_32(my_player_id); WRITE_OFF_32(segment_my_player_id); WRITE_OFF_32(next_opponents_list);
+        WRITE_OFF_32(func_reqbuyhero); WRITE_OFF_32(func_shop_listen); WRITE_OFF_32(func_buy_hero_new); WRITE_OFF_32(func_set_IsGameEnd);
+        WRITE_OFF_32(addr4); WRITE_OFF_32(addr5); WRITE_OFF_32(addr6); WRITE_OFF_32(addr7);
+        WRITE_OFF_32(addr7_struct_size); WRITE_OFF_32(addr7_ptr_offset);
+        WRITE_OFF_32(addr9); WRITE_OFF_32(addr9_struct_size); WRITE_OFF_32(addr9_ptr_offset);
+        WRITE_OFF_32(ph_heroId); WRITE_OFF_32(ph_remaining); WRITE_OFF_32(ph_total);
+        WRITE_OFF_32(addr11); WRITE_OFF_32(addr12); WRITE_OFF_32(addr12_struct_size); WRITE_OFF_32(addr12_ptr_offset);
+        WRITE_OFF_32(addr13); WRITE_OFF_32(pi_name); WRITE_OFF_32(pi_id); WRITE_OFF_32(pi_is_bot); WRITE_OFF_32(pi_money); 
+        WRITE_OFF_32(pi_win_streak); WRITE_OFF_32(pi_lose_streak); WRITE_OFF_32(pi_level);
+        WRITE_OFF_32(addr14); WRITE_OFF_32(addr15); WRITE_OFF_32(addr16); WRITE_OFF_32(shop_hero_id);
+        WRITE_OFF_32(addr17); WRITE_OFF_32(addr18); WRITE_OFF_32(bench_hero_id);
+        WRITE_OFF_32(addr19); WRITE_OFF_32(addr20); WRITE_OFF_32(board_hero_id); WRITE_OFF_32(board_x); WRITE_OFF_32(board_y);
+        WRITE_OFF_32(addr21); WRITE_OFF_32(addr22); WRITE_OFF_32(addr23); WRITE_OFF_32(addr23_struct_size); WRITE_OFF_32(addr23_ptr_offset);
+        WRITE_OFF_32(addr26); WRITE_OFF_32(pi_avatar_rank); WRITE_OFF_32(pi_avatar_player_id); WRITE_OFF_32(hexctrl); WRITE_OFF_32(func_get_hex);
+        out << std::dec;
+        out << "ui_theme=" << g_ui_theme << "\nwin_cardpool=" << (g_win_cardpool ? 1 : 0) << "\nwin_playerdata=" << (g_win_playerdata ? 1 : 0) << "\nwin_hextech=" << (g_win_hextech ? 1 : 0) << "\n";
+        out << "alpha_cp=" << g_alpha_cp << "\nalpha_pd=" << g_alpha_pd << "\nalpha_opp=" << g_alpha_opp << "\nalpha_hex=" << g_alpha_hex << "\nfloats_locked=" << (g_floats_locked ? 1 : 0) << "\n";
+        out << "cp_columns=" << g_cp_columns << "\ncp_rows=" << g_cp_rows << "\ncp_scale=" << g_cp_scale << "\n";
+        for (int i = 1; i <= 5; i++) out << "cp_show_cost" << i << "=" << (g_cp_show_cost[i] ? 1 : 0) << "\n";
+        out << "cp_warning_enable=" << (g_cp_warning_enable ? 1 : 0) << "\ncp_warning_thres=" << g_cp_warning_thres << "\n";
+        out << "pd_line_spacing=" << g_pd_line_spacing << "\npd_vert_spacing=" << g_pd_vert_spacing << "\npd_arrow_spacing=" << g_pd_arrow_spacing << "\npd_font_size=" << g_pd_font_size << "\n";
+        out << "pd_hero_summary_enable=" << (g_pd_hero_summary_enable ? 1 : 0) << "\n";
+        for (int i = 1; i <= 5; i++) out << "pd_hero_count_min" << i << "=" << g_pd_hero_count_min[i] << "\n";
+        out << "opp_scale=" << g_opp_scale << "\nopp_show_board=" << (g_opp_show_board ? 1 : 0) << "\nopp_show_shop=" << (g_opp_show_shop ? 1 : 0) << "\nopp_show_bench=" << (g_opp_show_bench ? 1 : 0) << "\nopp_hex_size=" << g_opp_hex_size << "\n";
+        out << "hextech_scale=" << g_hextech_scale << "\nwin_hero_warn=" << (g_win_hero_warn ? 1 : 0) << "\nhero_warn_thres=" << g_hero_warn_thres << "\nhero_warn_scale=" << g_hero_warn_scale << "\nalpha_hero_warn=" << g_alpha_hero_warn << "\n";
+        out << "float_hw_x=" << g_float_hw_x << "\nfloat_hw_y=" << g_float_hw_y << "\nmenu_x=" << g_menuX << "\nmenu_y=" << g_menuY << "\nmenu_w=" << g_menuW << "\nmenu_h=" << g_menuH << "\nmenu_scale=" << g_scale << "\n";
+        out << "menu_collapsed=" << (g_menu_orb ? 1 : 0) << "\norb_x=" << g_orb_x << "\norb_y=" << g_orb_y << "\nquit_x=" << g_quit_x << "\nquit_y=" << g_quit_y << "\nlock_x=" << g_lock_x << "\nlock_y=" << g_lock_y << "\ncpbtn_x=" << g_cpbtn_x << "\ncpbtn_y=" << g_cpbtn_y << "\nclickerbtn_x=" << g_clickerbtn_x << "\nclickerbtn_y=" << g_clickerbtn_y << "\n";
+        out << "float_cp_x=" << g_float_cp_x << "\nfloat_cp_y=" << g_float_cp_y << "\nfloat_pd_x=" << g_float_pd_x << "\nfloat_pd_y=" << g_float_pd_y << "\nfloat_opp_x=" << g_float_opp_x << "\nfloat_opp_y=" << g_float_opp_y << "\nfloat_hex_x=" << g_float_hex_x << "\nfloat_hex_y=" << g_float_hex_y << "\n";
+        out << "auto_clicker_enable=" << (g_auto_clicker_enable ? 1 : 0) << "\nclick_interval_ms=" << g_click_interval_ms << "\ntouch_duration_ms=" << g_touch_duration_ms << "\nclick_positions=";
+        for (size_t i = 0; i < g_click_positions.size(); i++) { if (i > 0) out << ";"; out << g_click_positions[i].x << "," << g_click_positions[i].y; }
+        out << "\n"; out.close();
+    }
+}
+
+void LoadConfig() {
+    std::ifstream in(GetConfigPath());
+    if (!in.is_open()) { SaveConfig(); return; }
+    std::string line; bool has_full = false;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#' || line[0] == '[') continue;
+        if (line.find("pi_win_streak") != std::string::npos) has_full = true;
+        auto delim = line.find('=');
+        if (delim != std::string::npos) {
+            std::string key = line.substr(0, delim); std::string valStr = line.substr(delim + 1);
+            try {
+                uint32_t val = std::stoul(valStr, nullptr, 16);
+                #define PARSE_OFF_32(name) if (key == #name) g_off.name = val;
+                PARSE_OFF_32(func_get_Instance) PARSE_OFF_32(addr2) PARSE_OFF_32(addr3) PARSE_OFF_32(addra) PARSE_OFF_32(segmentcsogame)
+                PARSE_OFF_32(func_quit) PARSE_OFF_32(my_player_id) PARSE_OFF_32(segment_my_player_id) PARSE_OFF_32(next_opponents_list) PARSE_OFF_32(func_reqbuyhero)
+                PARSE_OFF_32(func_shop_listen) PARSE_OFF_32(func_buy_hero_new) PARSE_OFF_32(func_set_IsGameEnd)
+                PARSE_OFF_32(addr4) PARSE_OFF_32(addr5) PARSE_OFF_32(addr6) PARSE_OFF_32(addr7) PARSE_OFF_32(addr7_struct_size) PARSE_OFF_32(addr7_ptr_offset)
+                PARSE_OFF_32(addr9) PARSE_OFF_32(addr9_struct_size) PARSE_OFF_32(addr9_ptr_offset)
+                PARSE_OFF_32(ph_heroId) PARSE_OFF_32(ph_remaining) PARSE_OFF_32(ph_total)
+                PARSE_OFF_32(addr11) PARSE_OFF_32(addr12) PARSE_OFF_32(addr12_struct_size) PARSE_OFF_32(addr12_ptr_offset)
+                PARSE_OFF_32(addr13) PARSE_OFF_32(pi_name) PARSE_OFF_32(pi_id) PARSE_OFF_32(pi_is_bot) PARSE_OFF_32(pi_money) 
+                PARSE_OFF_32(pi_win_streak) PARSE_OFF_32(pi_lose_streak) PARSE_OFF_32(pi_level)
+                PARSE_OFF_32(addr14) PARSE_OFF_32(addr15) PARSE_OFF_32(addr16) PARSE_OFF_32(shop_hero_id)
+                PARSE_OFF_32(addr17) PARSE_OFF_32(addr18) PARSE_OFF_32(bench_hero_id)
+                PARSE_OFF_32(addr19) PARSE_OFF_32(addr20) PARSE_OFF_32(board_hero_id) PARSE_OFF_32(board_x) PARSE_OFF_32(board_y)
+                PARSE_OFF_32(addr21) PARSE_OFF_32(addr22) PARSE_OFF_32(addr23) PARSE_OFF_32(addr23_struct_size) PARSE_OFF_32(addr23_ptr_offset)
+                PARSE_OFF_32(addr26) PARSE_OFF_32(pi_avatar_rank) PARSE_OFF_32(pi_avatar_player_id) PARSE_OFF_32(hexctrl) PARSE_OFF_32(func_get_hex)
+            } catch (...) {}
+            try {
+                if (key == "ui_theme") g_ui_theme = std::stoi(valStr);
+                else if (key == "win_cardpool") g_win_cardpool = (std::stoi(valStr) != 0); else if (key == "win_playerdata") g_win_playerdata = (std::stoi(valStr) != 0); else if (key == "win_hextech") g_win_hextech = (std::stoi(valStr) != 0);
+                else if (key == "alpha_cp") g_alpha_cp = std::clamp(std::stof(valStr), 0.1f, 1.0f); else if (key == "alpha_pd") g_alpha_pd = std::clamp(std::stof(valStr), 0.1f, 1.0f); else if (key == "alpha_opp") g_alpha_opp = std::clamp(std::stof(valStr), 0.1f, 1.0f); else if (key == "alpha_hex") g_alpha_hex = std::clamp(std::stof(valStr), 0.1f, 1.0f);
+                else if (key == "floats_locked") g_floats_locked = (std::stoi(valStr) != 0);
+                else if (key == "cp_columns") g_cp_columns = std::stoi(valStr); else if (key == "cp_rows") g_cp_rows = std::stoi(valStr); else if (key == "cp_scale") g_cp_scale = std::stof(valStr);
+                else if (key.rfind("cp_show_cost", 0) == 0) { int i = key.back() - '0'; if (i >= 1 && i <= 5) g_cp_show_cost[i] = (std::stoi(valStr) != 0); }
+                else if (key == "cp_warning_enable") g_cp_warning_enable = (std::stoi(valStr) != 0); else if (key == "cp_warning_thres") g_cp_warning_thres = std::stoi(valStr);
+                else if (key == "pd_line_spacing") g_pd_line_spacing = std::stof(valStr); else if (key == "pd_vert_spacing") g_pd_vert_spacing = std::stof(valStr); else if (key == "pd_arrow_spacing") g_pd_arrow_spacing = std::stof(valStr); else if (key == "pd_font_size") g_pd_font_size = std::stof(valStr);
+                else if (key == "pd_hero_summary_enable") g_pd_hero_summary_enable = (std::stoi(valStr) != 0);
+                else if (key.rfind("pd_hero_count_min", 0) == 0) { int i = key.back() - '0'; if (i >= 1 && i <= 5) g_pd_hero_count_min[i] = std::stoi(valStr); }
+                else if (key == "opp_scale") g_opp_scale = std::stof(valStr); else if (key == "opp_show_board") g_opp_show_board = (std::stoi(valStr) != 0); else if (key == "opp_show_shop") g_opp_show_shop = (std::stoi(valStr) != 0); else if (key == "opp_show_bench") g_opp_show_bench = (std::stoi(valStr) != 0); else if (key == "opp_hex_size") g_opp_hex_size = std::stof(valStr);
+                else if (key == "hextech_scale") g_hextech_scale = std::stof(valStr); else if (key == "win_hero_warn") g_win_hero_warn = (std::stoi(valStr) != 0); else if (key == "hero_warn_thres") g_hero_warn_thres = std::stoi(valStr); else if (key == "hero_warn_scale") g_hero_warn_scale = std::stof(valStr); else if (key == "alpha_hero_warn") g_alpha_hero_warn = std::stof(valStr);
+                else if (key == "float_hw_x") g_float_hw_x = std::stof(valStr); else if (key == "float_hw_y") g_float_hw_y = std::stof(valStr);
+                else if (key == "menu_x") g_menuX = std::stof(valStr); else if (key == "menu_y") g_menuY = std::stof(valStr); else if (key == "menu_w") g_menuW = std::stof(valStr); else if (key == "menu_h") g_menuH = std::stof(valStr); else if (key == "menu_scale") g_scale = std::stof(valStr);
+                else if (key == "menu_collapsed") g_menu_orb = (std::stoi(valStr) != 0); else if (key == "orb_x") g_orb_x = std::stof(valStr); else if (key == "orb_y") g_orb_y = std::stof(valStr);
+                else if (key == "quit_x") g_quit_x = std::stof(valStr); else if (key == "quit_y") g_quit_y = std::stof(valStr); else if (key == "lock_x") g_lock_x = std::stof(valStr); else if (key == "lock_y") g_lock_y = std::stof(valStr);
+                else if (key == "cpbtn_x") g_cpbtn_x = std::stof(valStr); else if (key == "cpbtn_y") g_cpbtn_y = std::stof(valStr); else if (key == "clickerbtn_x") g_clickerbtn_x = std::stof(valStr); else if (key == "clickerbtn_y") g_clickerbtn_y = std::stof(valStr);
+                else if (key == "float_cp_x") g_float_cp_x = std::stof(valStr); else if (key == "float_cp_y") g_float_cp_y = std::stof(valStr); else if (key == "float_pd_x") g_float_pd_x = std::stof(valStr); else if (key == "float_pd_y") g_float_pd_y = std::stof(valStr); else if (key == "float_opp_x") g_float_opp_x = std::stof(valStr); else if (key == "float_opp_y") g_float_opp_y = std::stof(valStr); else if (key == "float_hex_x") g_float_hex_x = std::stof(valStr); else if (key == "float_hex_y") g_float_hex_y = std::stof(valStr);
+                else if (key == "auto_clicker_enable") g_auto_clicker_enable = (std::stoi(valStr) != 0); else if (key == "click_interval_ms") g_click_interval_ms = std::stof(valStr); else if (key == "touch_duration_ms") g_touch_duration_ms = std::stof(valStr);
+                else if (key == "click_positions") {
+                    g_click_positions.clear(); std::stringstream ss(valStr); std::string pair;
+                    while (std::getline(ss, pair, ';')) {
+                        if (pair.empty()) continue; std::stringstream ss2(pair); std::string xs, ys;
+                        if (std::getline(ss2, xs, ',') && std::getline(ss2, ys, ',')) { try { g_click_positions.push_back({std::stof(xs), std::stof(ys)}); } catch (...) {} }
+                    }
+                    if (g_click_positions.empty()) g_click_positions.push_back({540.0f, 960.0f});
+                }
+                else if (key == "auto_buy_ids") {
+                    g_heroAutoBuyChecked.clear(); std::stringstream ss(valStr); std::string item;
+                    while (std::getline(ss, item, ',')) { if (!item.empty()) { try { g_heroAutoBuyChecked[std::stoi(item)] = true; } catch (...) {} } }
+                }
+            } catch (...) {}
+        }
+    }
+    in.close(); g_apply_saved_float_pos = true;
+    if (!has_full) SaveConfig();
+}
+
 void ClearGameState() {
     g_poolHeroes.clear(); g_heroesByCost.clear(); g_players.clear(); g_next_opponents.clear();
     g_my_player_id = 0; g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
@@ -386,7 +503,7 @@ void ParseGameMemory() {
 }
 
 // ==============================================================
-// 4. ImGui 字体与 UI 渲染函数
+// 4. ImGui 字体与基础纹理解析
 // ==============================================================
 void UpdateFontHD(bool force = false) {
     ImGuiIO& io = ImGui::GetIO();
@@ -402,7 +519,6 @@ void UpdateFontHD(bool force = false) {
     bool loaded = false;
     for(const char* path : fonts) {
         if (access(path, R_OK) == 0) { 
-            // 【核心修复】：加载中文字符集，解决 ????? 乱码问题
             g_mainFont = io.Fonts->AddFontFromFileTTF(path, targetSize * 1.5f, &configMain, io.Fonts->GetGlyphRangesChineseSimplifiedCommon()); 
             if (g_mainFont) { g_mainFont->Scale = 1.0f / 1.5f; loaded = true; break; }
         }
@@ -411,26 +527,256 @@ void UpdateFontHD(bool force = false) {
     io.Fonts->Build(); ImGui_ImplOpenGL3_CreateDeviceObjects(); g_current_rendered_size = targetSize;
 }
 
-// (此处包含所有 ImGui UI 绘制函数，如 DrawMainMenu, DrawCardPoolWindow，由于篇幅极长，已在之前的回复中完整提供。此处为了代码能编译且不超长，以省略号代表，在你的实际代码中必须保留之前的所有 UI Draw 函数)
+inline int GetBaseHeroImageId(int rawHeroId) {
+    if (rawHeroId < 10) return rawHeroId;
+    if (rawHeroId >= 10000) return rawHeroId - (rawHeroId / 10000) * 10000 + 10000;
+    if (rawHeroId >= 1000) return rawHeroId - (rawHeroId / 1000) * 1000 + 1000;
+    if (rawHeroId >= 100) return rawHeroId - (rawHeroId / 100) * 100 + 100;
+    return rawHeroId - (rawHeroId / 10) * 10 + 10;
+}
+inline int GetHeroStarLevel(int rawHeroId) {
+    if (rawHeroId <= 0) return 0;
+    int star = rawHeroId; while (star >= 10) star /= 10; return std::clamp(star, 1, 3);
+}
+void BuildHeroImageIndex() {
+    std::thread([]() {
+        int found = 0;
+        for (int i = 1; i <= 99999; i++) { int len = 0; if (GetHeroImageBytes(i, &len) != nullptr && len > 0) found++; }
+        g_hero_image_count = found; g_hero_images_ready.store(true);
+    }).detach();
+}
+void TextureDecodingWorkerThread() {
+    while (true) {
+        DecodeRequest req; bool hasReq = false;
+        { std::lock_guard<std::mutex> lock(g_DecodeRequestMutex); if (!g_DecodeRequestQueue.empty()) { req = g_DecodeRequestQueue.front(); g_DecodeRequestQueue.pop_front(); hasReq = true; } }
+        if (hasReq) {
+            int imgLen = 0; const unsigned char* imgData = GetHeroImageBytes(req.id, &imgLen);
+            if (imgData != nullptr && imgLen > 0) {
+                int w, h, channels; unsigned char* data = stbi_load_from_memory(imgData, imgLen, &w, &h, &channels, 4);
+                if (data && w > 0 && h > 0) { std::lock_guard<std::mutex> lock(g_TexMutex); g_HeroTexDecodedQueue.push_back({req.id, {w, h, data}}); } else if (data) stbi_image_free(data);
+            }
+        } else std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+void EnsureTextureWorkerStarted() {
+    if (g_tex_worker_started.exchange(true)) return;
+    std::thread(TextureDecodingWorkerThread).detach(); BuildHeroImageIndex();
+}
+GLuint GetHeroTexture(int heroId) {
+    int baseId = GetBaseHeroImageId(heroId);
+    auto it = g_heroTextureCache.find(baseId); if (it != g_heroTextureCache.end()) return it->second;
+    g_heroTextureCache[baseId] = 0; EnsureTextureWorkerStarted();
+    std::lock_guard<std::mutex> lock(g_DecodeRequestMutex); g_DecodeRequestQueue.push_back({baseId});
+    return 0;
+}
+void ProcessTextureQueue() {
+    std::lock_guard<std::mutex> lock(g_TexMutex); if (g_HeroTexDecodedQueue.empty()) return;
+    GLint last_unpack; glGetIntegerv(GL_UNPACK_ALIGNMENT, &last_unpack); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    for (auto& item : g_HeroTexDecodedQueue) {
+        GLuint tex = 0; glGenTextures(1, &tex);
+        if (tex != 0) {
+            glBindTexture(GL_TEXTURE_2D, tex); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, item.second.w, item.second.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, item.second.pixels);
+        }
+        stbi_image_free(item.second.pixels); g_heroTextureCache[item.first] = tex;
+    }
+    g_HeroTexDecodedQueue.clear(); glPixelStorei(GL_UNPACK_ALIGNMENT, last_unpack);
+}
+static void DrawHeroIcon(ImDrawList* dl, int heroId, ImVec2 pMin, ImVec2 pMax, float rounding, ImU32 fallbackColor) {
+    int baseId = GetBaseHeroImageId(heroId); GLuint tex = GetHeroTexture(baseId);
+    if (tex != 0) { dl->AddImageRounded((ImTextureID)(intptr_t)tex, pMin, pMax, ImVec2(0, 0), ImVec2(1, 1), ImGui::GetColorU32(IM_COL32(255, 255, 255, 255)), rounding); return; }
+    char idBuf[16]; snprintf(idBuf, sizeof(idBuf), "%d", baseId); ImVec2 tSz = ImGui::CalcTextSize(idBuf);
+    dl->AddText(ImVec2(pMin.x + (pMax.x - pMin.x - tSz.x) * 0.5f, pMin.y + (pMax.y - pMin.y - tSz.y) * 0.5f), ImGui::GetColorU32(fallbackColor), idBuf);
+}
+static void DrawStarGlyph(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
+    ImVec2 tip[5];
+    for (int i = 0; i < 5; i++) { float a = - (float)M_PI * 0.5f + i * (2.0f * (float)M_PI / 5.0f); tip[i] = ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r); }
+    for (int i = 0; i < 5; i++) { dl->AddTriangleFilled(c, tip[i], tip[(i + 2) % 5], col); }
+    dl->AddCircleFilled(c, r * 0.28f, col, 12);
+}
+static void DrawHeroStars(ImDrawList* dl, ImVec2 center, int stars, float star_r) {
+    if (stars <= 0 || !dl) return; stars = std::clamp(stars, 1, 3); float gap = star_r * 2.35f; float x0 = center.x - (stars - 1) * gap * 0.5f;
+    ImU32 glow = ImGui::GetColorU32(IM_COL32(255, 200, 0, 90)), outline = ImGui::GetColorU32(IM_COL32(20, 12, 0, 240)), fill = ImGui::GetColorU32(IM_COL32(255, 230, 50, 255));
+    for (int i = 0; i < stars; i++) { ImVec2 c(x0 + i * gap, center.y); DrawStarGlyph(dl, c, star_r + 3.0f, glow); DrawStarGlyph(dl, c, star_r + 1.8f, outline); DrawStarGlyph(dl, c, star_r, fill); }
+}
 
-// 请将之前提供的所有 `Draw...` 函数、`ApplyFrostedTheme`、`ProcessTextureQueue`、`GetHeroTexture` 等复制到这里
-// // ... existing UI drawing code (DrawMainMenu, DrawCardPoolWindow, etc.) ...
-// 为了保证这段代码直接可用，我提供一个能画出主菜单的核心占位：
+// ==============================================================
+// 5. UI 主界面绘制与组件
+// ==============================================================
+struct FrostTheme { ImVec4 primary, primaryHover, accentGlow, orb1, orb2; const char* name; };
+static FrostTheme g_themes[4] = {
+    { ImVec4(0.39f, 0.40f, 0.95f, 1.f), ImVec4(0.31f, 0.27f, 0.90f, 1.f), ImVec4(0.39f, 0.40f, 0.95f, 0.55f), ImVec4(0.39f, 0.40f, 0.95f, 0.22f), ImVec4(0.96f, 0.25f, 0.37f, 0.18f), (const char*)u8"冰晶" },
+    { ImVec4(0.06f, 0.73f, 0.51f, 1.f), ImVec4(0.02f, 0.59f, 0.41f, 1.f), ImVec4(0.06f, 0.73f, 0.51f, 0.55f), ImVec4(0.06f, 0.73f, 0.51f, 0.22f), ImVec4(0.22f, 0.74f, 0.97f, 0.18f), (const char*)u8"翡翠" },
+    { ImVec4(0.66f, 0.33f, 0.97f, 1.f), ImVec4(0.58f, 0.20f, 0.92f, 1.f), ImVec4(0.66f, 0.33f, 0.97f, 0.55f), ImVec4(0.66f, 0.33f, 0.97f, 0.22f), ImVec4(0.96f, 0.25f, 0.37f, 0.18f), (const char*)u8"幻紫" },
+    { ImVec4(0.22f, 0.74f, 0.97f, 1.f), ImVec4(0.01f, 0.52f, 0.78f, 1.f), ImVec4(0.22f, 0.74f, 0.97f, 0.55f), ImVec4(0.22f, 0.74f, 0.97f, 0.22f), ImVec4(0.39f, 0.40f, 0.95f, 0.18f), (const char*)u8"霜天" },
+};
+static FrostTheme& UITheme() { return g_themes[g_ui_theme]; }
+void ApplyFrostedTheme() {
+    ImGuiStyle& s = ImGui::GetStyle(); FrostTheme& t = UITheme(); float sc = g_autoScale;
+    s.WindowRounding = 20.0f * sc; s.ChildRounding = 14.0f * sc; s.FrameRounding = 12.0f * sc; s.PopupRounding = 14.0f * sc;
+    s.WindowBorderSize = 1.0f; s.Colors[ImGuiCol_Text] = ImVec4(0.96f, 0.97f, 0.99f, 1.0f);
+    s.Colors[ImGuiCol_WindowBg] = ImVec4(0.03f, 0.04f, 0.08f, 0.88f); s.Colors[ImGuiCol_Border] = ImVec4(t.primary.x, t.primary.y, t.primary.z, 0.28f);
+    s.Colors[ImGuiCol_Button] = ImVec4(t.primary.x, t.primary.y, t.primary.z, 0.42f); s.Colors[ImGuiCol_ButtonHovered] = ImVec4(t.primary.x, t.primary.y, t.primary.z, 0.62f); s.Colors[ImGuiCol_ButtonActive] = ImVec4(t.primaryHover.x, t.primaryHover.y, t.primaryHover.z, 0.82f);
+}
+static ImVec4 CostColor(int cost) {
+    if (cost == 1) return ImVec4(0.82f, 0.82f, 0.85f, 1.0f); if (cost == 2) return ImVec4(0.35f, 0.95f, 0.50f, 1.0f);
+    if (cost == 3) return ImVec4(0.40f, 0.65f, 1.0f, 1.0f); if (cost == 4) return ImVec4(0.90f, 0.40f, 0.95f, 1.0f); return ImVec4(1.0f, 0.85f, 0.25f, 1.0f);
+}
+
+static bool BeginContentFloatWindow(const char* id, bool* open, float* pos_x, float* pos_y, float alpha) {
+    if (open && !*open) return false;
+    if (pos_x && pos_y && *pos_x >= 0.0f && *pos_y >= 0.0f) { ImGui::SetNextWindowPos(ImVec2(*pos_x, *pos_y), g_apply_saved_float_pos ? ImGuiCond_Always : ImGuiCond_FirstUseEver); }
+    ImGui::SetNextWindowBgAlpha(0.0f); ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0)); ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * g_autoScale, 10.0f * g_autoScale)); ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::clamp(alpha, 0.1f, 1.0f));
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration;
+    if (g_floats_locked) flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMouseInputs;
+    bool vis = ImGui::Begin(id, open, flags);
+    if (!vis) { ImGui::End(); ImGui::PopStyleVar(3); ImGui::PopStyleColor(); return false; }
+    return true;
+}
+static void EndContentFloatWindow(const char* grip_id, float* scale, float min_s = 0.5f, float max_s = 2.5f) {
+    ImGui::PopStyleVar(3); ImGui::PopStyleColor(); ImGui::End();
+}
+
+void DrawMenuOrb() {
+    ImGuiIO& io = ImGui::GetIO(); float r = g_orb_r * g_autoScale; ImVec2 center(g_orb_x, g_orb_y); ImDrawList* fg = ImGui::GetForegroundDrawList(); FrostTheme& th = UITheme();
+    fg->AddCircleFilled(center, r + 3.0f, ImGui::GetColorU32(ImVec4(th.primary.x, th.primary.y, th.primary.z, 0.25f)), 48); fg->AddCircleFilled(center, r, ImGui::GetColorU32(ImVec4(th.primary.x, th.primary.y, th.primary.z, 0.88f)), 48);
+    ImGui::SetNextWindowPos(ImVec2(center.x - r, center.y - r), ImGuiCond_Always); ImGui::SetNextWindowSize(ImVec2(r * 2.0f, r * 2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0)); ImGui::Begin("##JKMenuOrb", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground);
+    static bool s_orb_dragged = false; if (ImGui::InvisibleButton("##orb_btn", ImVec2(r * 2.0f, r * 2.0f))) { if (!s_orb_dragged) g_menu_orb = false; s_orb_dragged = false; }
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) { s_orb_dragged = true; g_orb_x += io.MouseDelta.x; g_orb_y += io.MouseDelta.y; }
+    ImGui::End(); ImGui::PopStyleVar();
+}
+
 void DrawMainMenu() {
-    if (g_menu_orb) { ImGui::Begin("Orb"); if(ImGui::Button("O")) g_menu_orb=false; ImGui::End(); return; }
-    if (ImGui::Begin((const char*)u8"金铲铲助手", &g_show_menu)) {
-        ImGui::Text((const char*)u8"如果看到这段正常的中文，说明字体修复成功！");
-        if(ImGui::Button((const char*)u8"收起为悬浮球")) g_menu_orb = true;
-        ImGui::Text("Player ID: %d", g_my_player_id);
+    ApplyFrostedTheme();
+    if (g_menu_orb) { DrawMenuOrb(); return; }
+    static bool firstMenuOpen = true;
+    if (firstMenuOpen) { ImGui::SetNextWindowPos(ImVec2(g_menuX, g_menuY), ImGuiCond_Always); ImGui::SetNextWindowSize(ImVec2(g_menuW, g_menuH), ImGuiCond_Always); ImGui::SetNextWindowCollapsed(g_menuCollapsed, ImGuiCond_Always); firstMenuOpen = false; }
+    bool menu_visible = true;
+    if (ImGui::Begin((const char*)u8"金铲铲助手", &menu_visible, ImGuiWindowFlags_NoSavedSettings)) {
+        g_menuX = ImGui::GetWindowPos().x; g_menuY = ImGui::GetWindowPos().y; g_menuCollapsed = ImGui::IsWindowCollapsed();
+        if (!menu_visible || g_menuCollapsed) { g_orb_x = g_menuX + 28.0f * g_autoScale; g_orb_y = g_menuY + 28.0f * g_autoScale; g_menu_orb = true; }
+        if (!g_menuCollapsed) {
+            float curW = ImGui::GetWindowSize().x, curH = ImGui::GetWindowSize().y;
+            if (std::abs(curW - g_menuW) > 5.0f || std::abs(curH - g_menuH) > 5.0f) { g_menuW = curW; g_menuH = curH; g_scale = std::clamp(curW / (560.0f * g_autoScale), 0.5f, 2.5f); }
+            ImGui::SetWindowFontScale(g_scale);
+            
+            // 简单排版，方便调用所有的开关
+            if(ImGui::Button((const char*)u8"保存配置")) SaveConfig();
+            ImGui::SameLine();
+            if(ImGui::Button((const char*)u8"收起为悬浮球")) g_menu_orb = true;
+            ImGui::Separator();
+            
+            ImGui::TextColored(ImVec4(0, 1, 0, 1), "当前游戏状态: %s", g_is_in_match.load() ? "对局中" : "未在对局");
+            ImGui::Text("Player ID: %d", g_my_player_id);
+
+            ImGui::Checkbox((const char*)u8"显示牌库", &g_win_cardpool); ImGui::SameLine();
+            ImGui::Checkbox((const char*)u8"显示对局信息", &g_win_playerdata); ImGui::SameLine();
+            ImGui::Checkbox((const char*)u8"显示敌方棋盘", &g_opp_show_board);
+            
+            ImGui::Checkbox((const char*)u8"连点器", &g_auto_clicker_enable);
+            if (g_auto_clicker_enable) { g_clicker_running.store(true); } else { g_clicker_running.store(false); }
+            
+            ImGui::Separator();
+            ImGui::Text((const char*)u8"自动拿牌设置:");
+            for (int cost = 1; cost <= 5; cost++) {
+                ImGui::TextColored(CostColor(cost), "%d费: ", cost); ImGui::SameLine();
+                for (auto& ph : g_poolHeroes) {
+                    if (ph.cost == cost) {
+                        char buf[32]; snprintf(buf, sizeof(buf), "%d##%d", ph.heroId, ph.heroId);
+                        bool is_checked = g_heroAutoBuyChecked[ph.heroId];
+                        if (ImGui::Checkbox(buf, &is_checked)) g_heroAutoBuyChecked[ph.heroId] = is_checked;
+                        ImGui::SameLine();
+                    }
+                }
+                ImGui::NewLine();
+            }
+        }
     }
     ImGui::End();
 }
-// 请在实际使用时，把上面的简易 DrawMainMenu 替换为你原本那几百行的完整华丽 UI 版本。
+
+void DrawCardPoolWindow() {
+    if (!g_win_cardpool || !g_is_in_match.load(std::memory_order_relaxed)) return;
+    if (!BeginContentFloatWindow("##CardPoolFloat", &g_win_cardpool, &g_float_cp_x, &g_float_cp_y, g_alpha_cp)) return;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f)); ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    float sc = g_autoScale * g_cp_scale; float box_size = g_cp_box_size * sc; float spacing = 0.0f; int cols = std::max(1, g_cp_columns);
+    ImDrawList* dl = ImGui::GetWindowDrawList(); ImFont* font = ImGui::GetFont(); float font_size = ImGui::GetFontSize() * sc;
+    ImVec2 base = ImGui::GetCursorScreenPos(); float y_off = 0.0f; float max_w = 0.0f;
+    for (int cost = 1; cost <= 5; cost++) {
+        if (!g_cp_show_cost[cost]) continue;
+        std::vector<PoolHero> filtered; for (auto& ph : g_poolHeroes) if (ph.cost == cost) filtered.push_back(ph);
+        if (filtered.empty()) continue;
+        int rows = (filtered.size() + cols - 1) / cols; float grid_w = cols * box_size; float grid_h = rows * box_size;
+        max_w = std::max(max_w, grid_w); ImVec2 origin(base.x, base.y + y_off);
+        for (size_t i = 0; i < filtered.size(); i++) {
+            auto& ph = filtered[i]; int r = (int)(i / cols), c = (int)(i % cols);
+            ImVec2 pMin(origin.x + c * box_size, origin.y + r * box_size); ImVec2 pMax(pMin.x + box_size, pMin.y + box_size);
+            dl->AddRectFilled(pMin, pMax, ImGui::GetColorU32(IM_COL32(255, 255, 255, 14)), 6.0f); dl->AddRect(pMin, pMax, ImGui::GetColorU32(CostColor(cost)), 6.0f, 0, 2.0f);
+            DrawHeroIcon(dl, ph.heroId, pMin, pMax, 6.0f * sc, IM_COL32(255, 255, 255, 240));
+            char cnt[16]; snprintf(cnt, 16, "%d/%d", ph.remaining, ph.total); ImVec2 t_sz = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, cnt);
+            dl->AddText(font, font_size, ImVec2(pMin.x + (box_size - t_sz.x) * 0.5f, pMin.y + box_size - t_sz.y - 4.0f * sc), ImGui::GetColorU32(CostColor(cost)), cnt);
+        }
+        y_off += grid_h;
+    }
+    if (max_w > 0.0f) ImGui::Dummy(ImVec2(max_w, y_off)); ImGui::PopStyleVar(2);
+    EndContentFloatWindow("cp_grip", &g_cp_scale);
+}
+
+void DrawPlayerDataWindow() {
+    if (!g_win_playerdata || !g_is_in_match.load(std::memory_order_relaxed)) return;
+    if (!BeginContentFloatWindow("##PlayerDataFloat", &g_win_playerdata, &g_float_pd_x, &g_float_pd_y, g_alpha_pd)) return;
+    ImGui::SetWindowFontScale(g_autoScale * g_pd_font_size);
+    for (auto& pi : g_players) {
+        ImVec4 streak_col(0.75f, 0.78f, 0.82f, 1.f); char streak_buf[16];
+        if (pi.win_streak > 0) { streak_col = ImVec4(1.f, 0.45f, 0.45f, 1.f); snprintf(streak_buf, 16, "+%d", pi.win_streak); }
+        else if (pi.lose_streak > 0) { streak_col = ImVec4(0.45f, 0.78f, 1.f, 1.f); snprintf(streak_buf, 16, "-%d", pi.lose_streak); } else snprintf(streak_buf, 16, "0");
+        std::string dname = pi.name.empty() ? "Player " + std::to_string(pi.id) : pi.name; if (pi.is_bot && pi.id != g_my_player_id) dname += " [机]";
+        ImGui::TextColored(ImVec4(1.f, 0.82f, 0.28f, 1.f), "Lv.%d", pi.level); ImGui::SameLine(); ImGui::TextColored(ImVec4(1.f, 0.95f, 0.35f, 1.f), "$%d", pi.money); ImGui::SameLine();
+        ImGui::TextColored(streak_col, "%s", streak_buf); ImGui::SameLine(); ImGui::TextColored((pi.id == g_my_player_id) ? ImVec4(0.25f, 1.f, 0.45f, 1.f) : ImVec4(0.35f, 0.95f, 1.f, 1.f), "%s", dname.c_str());
+    }
+    EndContentFloatWindow("pd_grip", &g_pd_font_size);
+}
+
+void DrawOpponentBoardWindow() {
+    if (!g_is_in_match.load(std::memory_order_relaxed)) return;
+    if (!BeginContentFloatWindow("##OpponentFloat", nullptr, &g_float_opp_x, &g_float_opp_y, g_alpha_opp)) return;
+    float sc = g_autoScale * g_opp_scale; ImGui::SetWindowFontScale(sc);
+    int opp_id = -1; for (size_t i = 0; i + 1 < g_next_opponents.size(); i += 2) { if (g_next_opponents[i] == g_my_player_id) { opp_id = g_next_opponents[i + 1]; break; } else if (g_next_opponents[i + 1] == g_my_player_id) { opp_id = g_next_opponents[i]; break; } }
+    PlayerInfo* opp = nullptr; for (auto& p : g_players) { if (p.id == opp_id) { opp = &p; break; } }
+    if (!opp) ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), (const char*)u8"未匹配对手");
+    else {
+        ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), (const char*)u8"对战: %s", opp->name.empty() ? std::to_string(opp->id).c_str() : opp->name.c_str());
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (g_opp_show_board) {
+            float R = g_opp_hex_size * sc; float W = sqrtf(3.0f) * R; float Y_SPACING = 1.5f * R; float row_shift_base = 1.5f * W; float left_pad = row_shift_base + R; float content_w = 7.0f * W + W * 0.5f;
+            ImVec2 cur = ImGui::GetCursorScreenPos(); ImGui::Dummy(ImVec2(content_w + left_pad + R, R + 3.0f * Y_SPACING + R)); float start_x = cur.x + left_pad + content_w - W * 0.5f;
+            for (int gy = 0; gy < 4; gy++) {
+                for (int gx = 0; gx < 7; gx++) {
+                    float cx = start_x - gx * W - row_shift_base + ((gy % 2 == 1) ? W * 0.5f : 0.0f); float cy = cur.y + R + gy * Y_SPACING; ImVec2 pts[6];
+                    for (int i = 0; i < 6; i++) { float a = (float)(M_PI / 180.0 * (60.0 * i - 30.0)); pts[i] = ImVec2(cx + R * cosf(a), cy + R * sinf(a)); }
+                    dl->AddPolyline(pts, 6, ImGui::GetColorU32(ImVec4(0.45f, 0.82f, 1.f, 1.f)), ImDrawFlags_Closed, 3.0f * sc);
+                    for (auto& bh : opp->board) {
+                        if (bh.x == gx && bh.y == gy) {
+                            dl->AddConvexPolyFilled(pts, 6, ImGui::GetColorU32(ImVec4(0.2f, 0.6f, 0.8f, 0.45f))); float pad = R * 0.18f;
+                            DrawHeroIcon(dl, bh.heroId, ImVec2(cx - R + pad, cy - R + pad), ImVec2(cx + R - pad, cy + R - pad), R * 0.35f, IM_COL32(255, 255, 255, 240));
+                            DrawHeroStars(dl, ImVec2(cx, cy + R * 0.62f), GetHeroStarLevel(bh.heroId), R * 0.28f); break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EndContentFloatWindow("opp_grip", &g_opp_scale);
+}
 
 // ==============================================================
-// 5. OpenGL ES 与 EGL 渲染拦截 (最核心的底层逃逸技术)
+// 6. OpenGL ES 与 EGL 渲染拦截 (最核心的底层逃逸技术)
 // ==============================================================
 unsigned int (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
+unsigned int (*old_eglSwapWithDamage)(EGLDisplay, EGLSurface, EGLint*, EGLint) = nullptr;
 void* (*old_eglGetProcAddress)(const char*) = nullptr;
 int (*old_vkCreateInstance)(void*, void*, void*) = nullptr;
 
@@ -465,7 +811,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
         const char* glsl_ver = "#version 300 es"; if (gl_ver && strstr(gl_ver, "OpenGL ES 2.")) glsl_ver = "#version 100";
         ImGui_ImplOpenGL3_Init(glsl_ver);
         io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
-        UpdateFontHD(true); // 使用带中文的高清字体初始化
+        UpdateFontHD(true); 
         g_isImGuiInit = true;
     }
     if (g_needUpdateFontSafe) { UpdateFontHD(true); g_needUpdateFontSafe = false; }
@@ -479,11 +825,14 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire)) ClearGameState();
     if (g_is_in_match.load(std::memory_order_acquire) && (g_current_frame % 2 == 0)) ParseGameMemory();
 
+    ProcessTextureQueue();
     ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
     
     // 绘制所有界面
     DrawMainMenu(); 
-    // DrawCardPoolWindow(); DrawPlayerDataWindow(); ... (此处调用所有你的浮窗绘制函数)
+    DrawCardPoolWindow(); 
+    DrawPlayerDataWindow(); 
+    DrawOpponentBoardWindow();
 
     ImGui::Render();
     
@@ -492,11 +841,10 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     glViewport(0, 0, g_gl_width, g_gl_height);
 
     // ★ 核心防御点：中途注入时的强力洗版 (Force Reset GL State)
-    // 强制关闭可能遮挡 UI 的测试，确保 ImGui 画在最上层
-    glDisable(GL_DEPTH_TEST);   // 强制无视 Z 轴遮挡（3D模型不再遮挡 UI）
-    glDisable(GL_CULL_FACE);    // 强制不剔除背面
-    glDisable(GL_SCISSOR_TEST); // 强制关闭裁剪框（避免被画在屏幕外或不可见区域）
-    glEnable(GL_BLEND);         // 强制开启透明度混合
+    glDisable(GL_DEPTH_TEST);   
+    glDisable(GL_CULL_FACE);    
+    glDisable(GL_SCISSOR_TEST); 
+    glEnable(GL_BLEND);         
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -518,11 +866,21 @@ unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     return 1;
 }
 
+unsigned int hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, EGLint* rects, EGLint n_rects) {
+    RenderImGui_Core(display, surface);
+    if (old_eglSwapWithDamage) return old_eglSwapWithDamage(display, surface, rects, n_rects);
+    return 1;
+}
+
 void* hook_eglGetProcAddress(const char* procname) {
     void* real_addr = old_eglGetProcAddress ? old_eglGetProcAddress(procname) : nullptr;
-    if (procname && (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0)) {
+    if (procname && strcmp(procname, "eglSwapBuffers") == 0) {
         if (!old_eglSwap && real_addr) old_eglSwap = (unsigned int (*)(EGLDisplay, EGLSurface))real_addr;
         return (void*)hook_eglSwap;
+    }
+    if (procname && strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) {
+        if (!old_eglSwapWithDamage && real_addr) old_eglSwapWithDamage = (unsigned int (*)(EGLDisplay, EGLSurface, EGLint*, EGLint))real_addr;
+        return (void*)hook_eglSwapWithDamage;
     }
     return real_addr;
 }
@@ -532,7 +890,7 @@ int hook_vkCreateInstance(void* pCreateInfo, void* pAllocator, void* pInstance) 
 }
 
 // ==============================================================
-// 6. 游戏逻辑与触摸注入 (挂钩 Unity 层与 JNI 层)
+// 7. 游戏逻辑与触摸注入 (挂钩 Unity 层与 JNI 层)
 // ==============================================================
 uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x3, uintptr_t x4, uintptr_t x5, uintptr_t x6, uintptr_t x7) {
     if (g_is_in_match.load(std::memory_order_relaxed) && !g_shop_listen_done.load() && x0 != 0) {
@@ -581,6 +939,36 @@ void* hook_SendWillRenderCanvases() {
 // JNI 触摸注入逻辑
 JavaVM* g_jvm = nullptr; jobject g_view_obj = nullptr; jobject g_context = nullptr;
 void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
+
+void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
+    if (!env || !view || !old_nativeInjectEvent) return;
+    static jclass SystemClock = nullptr; static jmethodID uptimeMillis = nullptr; static jclass MotionEvent = nullptr; static jmethodID obtainBasic = nullptr; static jmethodID setSource = nullptr;
+    if (!SystemClock) {
+        jclass sc = env->FindClass("android/os/SystemClock"); if (sc) { SystemClock = (jclass)env->NewGlobalRef(sc); uptimeMillis = env->GetStaticMethodID(SystemClock, "uptimeMillis", "()J"); env->DeleteLocalRef(sc); }
+        jclass me = env->FindClass("android/view/MotionEvent"); if (me) { MotionEvent = (jclass)env->NewGlobalRef(me); obtainBasic = env->GetStaticMethodID(MotionEvent, "obtain", "(JJIFFI)Landroid/view/MotionEvent;"); setSource = env->GetMethodID(MotionEvent, "setSource", "(I)V"); env->DeleteLocalRef(me); }
+    }
+    if (!uptimeMillis || !obtainBasic) return;
+    long time = env->CallStaticLongMethod(SystemClock, uptimeMillis);
+    jobject eventDown = env->CallStaticObjectMethod(MotionEvent, obtainBasic, time, time, 0, (jfloat)x, (jfloat)y, 0);
+    if (eventDown) { if (setSource) env->CallVoidMethod(eventDown, setSource, 4098); old_nativeInjectEvent(env, view, eventDown); env->DeleteLocalRef(eventDown); }
+    if (g_touch_duration_ms > 0.0f) std::this_thread::sleep_for(std::chrono::microseconds((long long)(g_touch_duration_ms * 1000.0f)));
+    long timeUp = env->CallStaticLongMethod(SystemClock, uptimeMillis);
+    jobject eventUp = env->CallStaticObjectMethod(MotionEvent, obtainBasic, time, timeUp, 1, (jfloat)x, (jfloat)y, 0);
+    if (eventUp) { if (setSource) env->CallVoidMethod(eventUp, setSource, 4098); old_nativeInjectEvent(env, view, eventUp); env->DeleteLocalRef(eventUp); }
+    g_total_clicks_executed.fetch_add(1, std::memory_order_relaxed);
+}
+
+void AutoClickerThread() {
+    JNIEnv* env = nullptr; bool attached = false;
+    while (true) {
+        if (!g_clicker_running.load(std::memory_order_relaxed) || !g_jvm || !g_view_obj) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }
+        if (!env) { if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED) { g_jvm->AttachCurrentThread(&env, nullptr); attached = true; } }
+        if (env && g_view_obj) { for (const auto& cp : g_click_positions) { InjectTouchClick(env, g_view_obj, cp.x, cp.y); } }
+        float interval = g_click_interval_ms; if (interval > 0) std::this_thread::sleep_for(std::chrono::microseconds((long long)(interval * 1000.0f))); else std::this_thread::yield();
+    }
+    if (attached && g_jvm) g_jvm->DetachCurrentThread();
+}
+
 extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) {
     if (!g_jvm) env->GetJavaVM(&g_jvm);
     if (obj && (!g_view_obj || !env->IsSameObject(g_view_obj, obj))) {
@@ -649,6 +1037,9 @@ void FindAndHookHiddenJNI() {
         }
         if (found_func) break;
     }
+    
+    // 启动连点器后台线程
+    std::thread(AutoClickerThread).detach();
 }
 
 void* DelayedHookThread(void*) {
@@ -659,9 +1050,11 @@ void* DelayedHookThread(void*) {
 }
 
 // ==============================================================
-// 7. 安装所有拦截防线
+// 8. 安装所有拦截防线
 // ==============================================================
 void* SetupThread(void*) {
+    LoadConfig();
+
     // 1. 等待 libil2cpp.so 
     int retry_count = 0;
     while (g_il2cppTrueBase == 0 && retry_count < 60) {
@@ -679,9 +1072,15 @@ void* SetupThread(void*) {
     if (!getproc_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) getproc_ptr = dlsym(h, "eglGetProcAddress"); }
     if (getproc_ptr) DobbyHook(getproc_ptr, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
 
-    void* egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
+    void* egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
+    if (!egl_ptr) egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
     if (!egl_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_ptr = dlsym(h, "eglSwapBuffers"); }
     if (egl_ptr) DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
+
+    void* egl_damage_ptr = (void*)eglGetProcAddress("eglSwapBuffersWithDamageKHR");
+    if (!egl_damage_ptr) egl_damage_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffersWithDamageKHR");
+    if (!egl_damage_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_damage_ptr = dlsym(h, "eglSwapBuffersWithDamageKHR"); }
+    if (egl_damage_ptr) DobbyHook(egl_damage_ptr, (void*)hook_eglSwapWithDamage, (void**)&old_eglSwapWithDamage);
 
     // 3. Hook 游戏逻辑
     if (g_off.func_shop_listen != 0) DobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
@@ -704,4 +1103,3 @@ void* SetupThread(void*) {
 __attribute__((constructor)) void Init() { 
     pthread_t t; pthread_create(&t, 0, SetupThread, 0); pthread_detach(t); 
 }
-
