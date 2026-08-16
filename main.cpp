@@ -32,7 +32,6 @@ std::atomic<bool> g_engine_rendering{false};
 
 // 原始函数指针备份
 unsigned int (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
-unsigned int (*old_eglSwapWithDamage)(EGLDisplay, EGLSurface, EGLint*, EGLint) = nullptr;
 void* (*old_eglGetProcAddress)(const char*) = nullptr;
 int (*old_vkCreateInstance)(void*, void*, void*) = nullptr;
 
@@ -143,11 +142,11 @@ void DrawMainMenu() {
     }
     ImGui::End();
 
-    // 亦可显示 ImGui 官方 Demo Window 验证控件绘制
+    // 显示 Demo Window
     ImGui::ShowDemoWindow(&g_show_menu);
 }
 
-// 核心 ImGui 渲染管线 (带严格的 OpenGL ES 状态恢复与强制去遮挡)
+// 核心 ImGui 渲染管线 (带严格的 OpenGL ES 状态恢复)
 void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     g_current_frame++;
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
@@ -201,7 +200,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
 
     ImGui::Render();
 
-    // 4. 强力复位状态机，防止游戏 3D 深度测试或剪裁遮挡 UI
+    // 4. 复位状态机
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, g_gl_width, g_gl_height);
     glDisable(GL_DEPTH_TEST);
@@ -240,23 +239,12 @@ unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     return 1;
 }
 
-// 局部刷新 Hook (解决游戏中途对局不渲染菜单的关键)
-unsigned int hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, EGLint* rects, EGLint n_rects) {
-    RenderImGui_Core(display, surface);
-    if (old_eglSwapWithDamage) return old_eglSwapWithDamage(display, surface, rects, n_rects);
-    return 1;
-}
-
-// 动态寻址 Hook (截获 Houdini 逃逸指针)
+// 动态寻址 Hook (直接重定向到 hook_eglSwap，不写多余的 eglSwapBuffersWithDamageKHR)
 void* hook_eglGetProcAddress(const char* procname) {
     void* real_addr = old_eglGetProcAddress ? old_eglGetProcAddress(procname) : nullptr;
-    if (procname && strcmp(procname, "eglSwapBuffers") == 0) {
+    if (procname && (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0)) {
         if (!old_eglSwap && real_addr) old_eglSwap = (unsigned int (*)(EGLDisplay, EGLSurface))real_addr;
         return (void*)hook_eglSwap;
-    }
-    if (procname && strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) {
-        if (!old_eglSwapWithDamage && real_addr) old_eglSwapWithDamage = (unsigned int (*)(EGLDisplay, EGLSurface, EGLint*, EGLint))real_addr;
-        return (void*)hook_eglSwapWithDamage;
     }
     return real_addr;
 }
@@ -267,7 +255,7 @@ int hook_vkCreateInstance(void* pCreateInfo, void* pAllocator, void* pInstance) 
     return -9;
 }
 
-// 安装多层 Hook 防线
+// 安装 Hook 防线
 void* SetupThread(void*) {
     LOGI("[+] SetupThread started. Installing render hooks...");
 
@@ -281,16 +269,10 @@ void* SetupThread(void*) {
     if (!getproc_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) getproc_ptr = dlsym(h, "eglGetProcAddress"); }
     if (getproc_ptr) DobbyHook(getproc_ptr, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
 
-    // 3. 拦截基础 eglSwapBuffers 与局部刷新 eglSwapBuffersWithDamageKHR
-    void* egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
-    if (!egl_ptr) egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
+    // 3. 拦截基础 eglSwapBuffers
+    void* egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
     if (!egl_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_ptr = dlsym(h, "eglSwapBuffers"); }
     if (egl_ptr) DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
-
-    void* egl_damage_ptr = (void*)eglGetProcAddress("eglSwapBuffersWithDamageKHR");
-    if (!egl_damage_ptr) egl_damage_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffersWithDamageKHR");
-    if (!egl_damage_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_damage_ptr = dlsym(h, "eglSwapBuffersWithDamageKHR"); }
-    if (egl_damage_ptr) DobbyHook(egl_damage_ptr, (void*)hook_eglSwapWithDamage, (void**)&old_eglSwapWithDamage);
 
     LOGI("[+] Render hooks installed successfully.");
     return nullptr;
