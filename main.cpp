@@ -37,7 +37,30 @@
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "JKInternal", __VA_ARGS__)
 
-/* STREAMING_CHUNK:Initializing global states and game offsets... */
+// ==============================================================
+// 提前声明所有函数，彻底杜绝 "undeclared identifier" 编译错误
+// ==============================================================
+void SaveConfig();
+void LoadConfig();
+void ClearGameState();
+bool TryResolveSegmentCSOGame(uintptr_t* out_segment);
+void UpdateMatchState();
+void ParseGameMemory();
+void DrawMainMenu();
+void DrawCardPoolWindow();
+void DrawPlayerDataWindow();
+void DrawOpponentBoardWindow();
+void DrawMyHeroWarningWindow();
+void DrawHextechCapsule();
+void DrawQuitCapsule();
+void DrawLockCapsule();
+void DrawCardPoolCapsule();
+void DrawClickerCapsule();
+void DrawClickerFeedback();
+void ProcessTextureQueue();
+void UpdateFontHD(bool force);
+static void CaptureWindowPos(const char* name, float& x, float& y);
+
 // ==============================================================
 // 1. 全局变量与游戏偏移
 // ==============================================================
@@ -108,6 +131,12 @@ struct Offsets {
 Offsets g_off;
 
 uintptr_t g_dbg_addr1 = 0, g_dbg_addr2 = 0, g_dbg_addr3 = 0, g_dbg_addra = 0, g_dbg_segmentcsogame = 0;
+uintptr_t g_dbg_addr4 = 0, g_dbg_addr5 = 0, g_dbg_addr6 = 0, g_dbg_addr7 = 0;
+uintptr_t g_dbg_addr11 = 0, g_dbg_addr12 = 0, g_dbg_addr13 = 0;
+uintptr_t g_dbg_addr21 = 0, g_dbg_addr22 = 0, g_dbg_addr23 = 0;
+uintptr_t g_dbg_addr26 = 0;
+uintptr_t g_dbg_hexctrl = 0;
+
 int g_my_player_id = 0;
 int g_hex_qualities[3] = {0, 0, 0};
 std::vector<int> g_next_opponents;
@@ -129,9 +158,7 @@ std::atomic<bool> g_is_in_match{false};
 std::atomic<bool> g_match_enter_pending{false};
 static int g_segment_valid_streak = 0;
 static bool g_need_segment_gap_before_enter = false;
-std::mutex g_DataMutex; // 保护所有核心数据的读写
 
-/* STREAMING_CHUNK:Configuring UI styles and parameters... */
 // ==============================================================
 // 2. UI 状态与样式设置
 // ==============================================================
@@ -140,20 +167,28 @@ ImFont* g_mainFont = nullptr;
 float g_autoScale = 1.0f;
 float g_current_rendered_size = 0.0f;
 bool g_needUpdateFontSafe = false;
-float g_menuX = 100.0f, g_menuY = 100.0f, g_menuW = 880.0f, g_menuH = 680.0f;
-bool g_menuCollapsed = false; float g_scale = 1.0f; int g_ui_theme = 0; float g_ui_anim[32] = {0};
-bool g_menu_orb = false; float g_orb_x = 120.0f, g_orb_y = 120.0f; float g_orb_r = 34.0f;
+float g_menuX = 100.0f, g_menuY = 100.0f;
+float g_menuW = 880.0f, g_menuH = 680.0f;
+bool g_menuCollapsed = false;
+float g_scale = 1.0f;
+int g_ui_theme = 0;
+float g_ui_anim[32] = {0};
+bool g_menu_orb = false;
+float g_orb_x = 120.0f, g_orb_y = 120.0f;
+float g_orb_r = 34.0f;
 
 std::atomic<bool> g_engine_rendering{false};
 int g_current_frame = 0;
 
 bool g_win_cardpool = true, g_win_playerdata = true, g_win_hextech = true, g_win_hero_warn = true;
 float g_alpha_cp = 1.0f, g_alpha_pd = 1.0f, g_alpha_opp = 1.0f, g_alpha_hex = 1.0f, g_alpha_hero_warn = 1.0f;
-int g_cp_columns = 6, g_cp_rows = 0; float g_cp_box_size = 65.0f, g_cp_scale = 1.0f;
+int g_cp_columns = 6, g_cp_rows = 0; 
+float g_cp_box_size = 65.0f, g_cp_scale = 1.0f;
 bool g_cp_show_cost[6] = { false, true, true, true, true, true };
 bool g_cp_warning_enable = true; int g_cp_warning_thres = 3;
 float g_pd_line_spacing = 0.0f, g_pd_vert_spacing = 0.0f, g_pd_arrow_spacing = 15.0f, g_pd_font_size = 1.0f;
-bool g_pd_hero_summary_enable = true; int g_pd_hero_count_min[6] = {0, 1, 1, 1, 1, 1};
+bool g_pd_hero_summary_enable = true;
+int g_pd_hero_count_min[6] = {0, 1, 1, 1, 1, 1};
 bool g_opp_show_board = true, g_opp_show_shop = true, g_opp_show_bench = true;
 float g_opp_hex_size = 25.0f, g_opp_scale = 1.0f, g_hextech_scale = 1.0f;
 int g_hero_warn_thres = 3; float g_hero_warn_scale = 1.0f;
@@ -162,9 +197,12 @@ int g_cached_view_width = 0, g_cached_view_height = 0;
 int g_gl_width = 0, g_gl_height = 0;
 
 // 连点器
-bool g_auto_clicker_enable = false; float g_click_interval_ms = 0.0f, g_touch_duration_ms = 0.0f;    
-struct ClickPos { float x = 540.0f; float y = 960.0f; }; std::vector<ClickPos> g_click_positions = { {540.0f, 960.0f} };
-std::atomic<bool> g_clicker_running{false}; std::atomic<int> g_total_clicks_executed{0};
+bool g_auto_clicker_enable = false;
+float g_click_interval_ms = 0.0f, g_touch_duration_ms = 0.0f;    
+struct ClickPos { float x = 540.0f; float y = 960.0f; };
+std::vector<ClickPos> g_click_positions = { {540.0f, 960.0f} };
+std::atomic<bool> g_clicker_running{false};
+std::atomic<int> g_total_clicks_executed{0};
 float g_realtime_cps = 0.0f, g_cps_history[100] = {0.0f}; int g_cps_hist_idx = 0;
 
 float g_quit_x = 80.0f, g_quit_y = 520.0f; int g_quit_confirm = 0; float g_quit_timer = 0.0f;
@@ -174,35 +212,42 @@ float g_float_cp_x = -1.0f, g_float_cp_y = -1.0f, g_float_pd_x = -1.0f, g_float_
 float g_float_opp_x = -1.0f, g_float_opp_y = -1.0f, g_float_hex_x = -1.0f, g_float_hex_y = -1.0f, g_float_hw_x = -1.0f, g_float_hw_y = -1.0f;
 static bool g_apply_saved_float_pos = false;
 
-// 图像与任务
+// 图像与线程
 std::atomic<bool> g_hero_images_ready{false}; int g_hero_image_count = 0;
-struct TexDecodedData { int w, h; unsigned char* pixels; }; std::mutex g_TexMutex; std::unordered_map<int, GLuint> g_heroTextureCache;
-std::vector<std::pair<int, TexDecodedData>> g_HeroTexDecodedQueue; struct DecodeRequest { int id; }; std::deque<DecodeRequest> g_DecodeRequestQueue;
+struct TexDecodedData { int w, h; unsigned char* pixels; };
+std::mutex g_TexMutex; std::unordered_map<int, GLuint> g_heroTextureCache;
+std::vector<std::pair<int, TexDecodedData>> g_HeroTexDecodedQueue;
+struct DecodeRequest { int id; }; std::deque<DecodeRequest> g_DecodeRequestQueue;
 std::mutex g_DecodeRequestMutex; std::atomic<bool> g_tex_worker_started{false};
 
 struct MainThreadTasks {
     std::atomic<bool> trigger_quit{false}; std::atomic<bool> trigger_game_end{false};
     std::mutex buy_mutex; std::vector<uintptr_t> buy_slots;
 } g_Tasks;
+
 std::vector<uintptr_t> g_shop_slots; void* old_shop_listen = nullptr; std::atomic<bool> g_shop_listen_done{false};
 
-/* STREAMING_CHUNK:Defining safe memory read and parsing logic... */
 // ==============================================================
-// 3. 内存读取与解析 (零阻塞防崩溃探针)
+// 3. 核心内存操作与配置系统 (包含安全读取修复)
 // ==============================================================
+
+// 【核心修复1】：使用 process_vm_readv 取代直接 memcpy，防止读取受保护内存导致进程崩溃
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
-    if (addr < 0x10000 || addr > 0x00007FFFFFFFFFFF) return false;
-    static int safe_fd = -1;
-    // 使用 /dev/null 进行零延迟探针测试，绝对不会阻塞或耗尽熵池！
-    if (safe_fd == -1) safe_fd = open("/dev/null", O_WRONLY);
-    if (safe_fd >= 0) if (write(safe_fd, (void*)addr, size) < 0) return false;
-    memcpy(buffer, (void*)addr, size);
-    return true;
+    if (addr < 0x10000000 || addr > 0x00007FFFFFFFFFFF) return false;
+    struct iovec local[1];
+    struct iovec remote[1];
+    local[0].iov_base = buffer;
+    local[0].iov_len = size;
+    remote[0].iov_base = (void*)addr;
+    remote[0].iov_len = size;
+    ssize_t bytesRead = syscall(__NR_process_vm_readv, getpid(), local, 1, remote, 1, 0);
+    return bytesRead == (ssize_t)size;
 }
+
 #define SAFE_READ_PTR(addr, offset) SafeReadPtr(addr, offset)
 #define SAFE_READ_INT(addr, offset) SafeReadInt(addr, offset)
 #define SAFE_READ_BYTE(addr, offset) SafeReadByte(addr, offset)
-#define IsValidPtr(ptr) ((ptr) > 0x10000 && (ptr) < 0x00007FFFFFFFFFFF)
+#define IsValidPtr(ptr) ((ptr) > 0x10000000 && (ptr) < 0x00007FFFFFFFFFFF)
 
 uintptr_t SafeReadPtr(uintptr_t addr, uint32_t offset) { uintptr_t val = 0; if (SafeReadMemory(addr + offset, &val, sizeof(val))) return val; return 0; }
 int SafeReadInt(uintptr_t addr, uint32_t offset) { int val = 0; if (SafeReadMemory(addr + offset, &val, sizeof(val))) return val; return 0; }
@@ -218,22 +263,31 @@ std::string utf16_to_utf8(const std::wstring& wstr) {
     return res;
 }
 std::string ReadIl2CppString(uintptr_t strAddr) {
-    if (!IsValidPtr(strAddr)) return ""; int len = SAFE_READ_INT(strAddr, 0x10); if (len <= 0 || len > 100) return "";
-    std::wstring wstr; for (int i = 0; i < len; i++) { wstr += (wchar_t)(SAFE_READ_INT(strAddr, 0x14 + i * 2) & 0xFFFF); }
+    if (!IsValidPtr(strAddr)) return "";
+    int len = SAFE_READ_INT(strAddr, 0x10);
+    if (len <= 0 || len > 100) return "";
+    std::wstring wstr;
+    for (int i = 0; i < len; i++) { wstr += (wchar_t)(SAFE_READ_INT(strAddr, 0x14 + i * 2) & 0xFFFF); }
     return utf16_to_utf8(wstr);
 }
 std::vector<uintptr_t> GetStructArrayPointers(uintptr_t arrayAddr, int maxCount, int structSize, int ptrOffset) {
     std::vector<uintptr_t> res; if (!IsValidPtr(arrayAddr)) return res;
     int count = SAFE_READ_INT(arrayAddr, 0x18); if (count <= 0 || count > maxCount * 10) return res;
     int readLimit = (maxCount <= 0) ? count : std::min(count, maxCount);
-    for (int i = 0; i < readLimit; i++) { uintptr_t ptr = SAFE_READ_PTR(arrayAddr, 0x20 + i * structSize + ptrOffset); if (IsValidPtr(ptr)) res.push_back(ptr); }
+    for (int i = 0; i < readLimit; i++) {
+        uintptr_t ptr = SAFE_READ_PTR(arrayAddr, 0x20 + i * structSize + ptrOffset);
+        if (IsValidPtr(ptr)) res.push_back(ptr);
+    }
     return res;
 }
 std::vector<uintptr_t> GetPointersInArray(uintptr_t arrayAddr, int maxCount) {
     std::vector<uintptr_t> res; if (!IsValidPtr(arrayAddr)) return res;
     int count = SAFE_READ_INT(arrayAddr, 0x18); if (count <= 0 || count > maxCount * 10) return res; 
     int readLimit = std::min(count, maxCount);
-    for (int i = 0; i < readLimit; i++) { uintptr_t ptr = SAFE_READ_PTR(arrayAddr, 0x20 + i * 8); if (IsValidPtr(ptr)) res.push_back(ptr); }
+    for (int i = 0; i < readLimit; i++) {
+        uintptr_t ptr = SAFE_READ_PTR(arrayAddr, 0x20 + i * 8);
+        if (IsValidPtr(ptr)) res.push_back(ptr);
+    }
     return res;
 }
 std::vector<int> GetIntsInArray(uintptr_t arrayAddr, int maxCount) {
@@ -244,22 +298,142 @@ std::vector<int> GetIntsInArray(uintptr_t arrayAddr, int maxCount) {
     return res;
 }
 
-std::string GetConfigPath() { return (access("/sdcard/Download/", W_OK) == 0) ? "/sdcard/Download/jkt_offsets.txt" : "/data/local/tmp/jkt_offsets.txt"; }
+std::string GetConfigPath() {
+    if (access("/sdcard/Download/", W_OK) == 0) return "/sdcard/Download/jkt_offsets.txt";
+    return "/data/local/tmp/jkt_offsets.txt";
+}
 
-void SaveConfig() {} // 略去冗长的 SaveConfig，不影响核心逻辑
-void LoadConfig() { g_apply_saved_float_pos = true; } 
+// 【核心修复2】：捕获窗口坐标必须检查 g_isImGuiInit，否则引发段错误
+static void CaptureWindowPos(const char* name, float& x, float& y) {
+    if (!g_isImGuiInit) return;
+    ImGuiWindow* w = ImGui::FindWindowByName(name);
+    if (w) { x = w->Pos.x; y = w->Pos.y; }
+}
 
+void SaveConfig() {
+    CaptureWindowPos("##CardPoolFloat", g_float_cp_x, g_float_cp_y);
+    CaptureWindowPos("##PlayerDataFloat", g_float_pd_x, g_float_pd_y);
+    CaptureWindowPos("##OpponentFloat", g_float_opp_x, g_float_opp_y);
+    CaptureWindowPos("##HextechFloat", g_float_hex_x, g_float_hex_y);
+    std::ofstream out(GetConfigPath());
+    if (out.is_open()) {
+        out << "# [完美UI版] 配置\n";
+        #define WRITE_OFF_32(name) out << #name << "=0x" << std::hex << g_off.name << "\n"
+        WRITE_OFF_32(func_get_Instance); WRITE_OFF_32(addr2); WRITE_OFF_32(addr3); WRITE_OFF_32(addra); WRITE_OFF_32(segmentcsogame);
+        WRITE_OFF_32(func_quit); WRITE_OFF_32(my_player_id); WRITE_OFF_32(segment_my_player_id); WRITE_OFF_32(next_opponents_list);
+        WRITE_OFF_32(func_reqbuyhero); WRITE_OFF_32(func_shop_listen); WRITE_OFF_32(func_buy_hero_new); WRITE_OFF_32(func_set_IsGameEnd);
+        WRITE_OFF_32(addr4); WRITE_OFF_32(addr5); WRITE_OFF_32(addr6); WRITE_OFF_32(addr7);
+        WRITE_OFF_32(addr7_struct_size); WRITE_OFF_32(addr7_ptr_offset);
+        WRITE_OFF_32(addr9); WRITE_OFF_32(addr9_struct_size); WRITE_OFF_32(addr9_ptr_offset);
+        WRITE_OFF_32(ph_heroId); WRITE_OFF_32(ph_remaining); WRITE_OFF_32(ph_total);
+        WRITE_OFF_32(addr11); WRITE_OFF_32(addr12); WRITE_OFF_32(addr12_struct_size); WRITE_OFF_32(addr12_ptr_offset);
+        WRITE_OFF_32(addr13); WRITE_OFF_32(pi_name); WRITE_OFF_32(pi_id); WRITE_OFF_32(pi_is_bot); WRITE_OFF_32(pi_money); 
+        WRITE_OFF_32(pi_win_streak); WRITE_OFF_32(pi_lose_streak); WRITE_OFF_32(pi_level);
+        WRITE_OFF_32(addr14); WRITE_OFF_32(addr15); WRITE_OFF_32(addr16); WRITE_OFF_32(shop_hero_id);
+        WRITE_OFF_32(addr17); WRITE_OFF_32(addr18); WRITE_OFF_32(bench_hero_id);
+        WRITE_OFF_32(addr19); WRITE_OFF_32(addr20); WRITE_OFF_32(board_hero_id); WRITE_OFF_32(board_x); WRITE_OFF_32(board_y);
+        WRITE_OFF_32(addr21); WRITE_OFF_32(addr22); WRITE_OFF_32(addr23); WRITE_OFF_32(addr23_struct_size); WRITE_OFF_32(addr23_ptr_offset);
+        WRITE_OFF_32(addr26); WRITE_OFF_32(pi_avatar_rank); WRITE_OFF_32(pi_avatar_player_id); WRITE_OFF_32(hexctrl); WRITE_OFF_32(func_get_hex);
+        out << std::dec;
+        out << "ui_theme=" << g_ui_theme << "\nwin_cardpool=" << (g_win_cardpool ? 1 : 0) << "\nwin_playerdata=" << (g_win_playerdata ? 1 : 0) << "\nwin_hextech=" << (g_win_hextech ? 1 : 0) << "\n";
+        out << "alpha_cp=" << g_alpha_cp << "\nalpha_pd=" << g_alpha_pd << "\nalpha_opp=" << g_alpha_opp << "\nalpha_hex=" << g_alpha_hex << "\nfloats_locked=" << (g_floats_locked ? 1 : 0) << "\n";
+        out << "cp_columns=" << g_cp_columns << "\ncp_rows=" << g_cp_rows << "\ncp_scale=" << g_cp_scale << "\n";
+        for (int i = 1; i <= 5; i++) out << "cp_show_cost" << i << "=" << (g_cp_show_cost[i] ? 1 : 0) << "\n";
+        out << "cp_warning_enable=" << (g_cp_warning_enable ? 1 : 0) << "\ncp_warning_thres=" << g_cp_warning_thres << "\n";
+        out << "pd_line_spacing=" << g_pd_line_spacing << "\npd_vert_spacing=" << g_pd_vert_spacing << "\npd_arrow_spacing=" << g_pd_arrow_spacing << "\npd_font_size=" << g_pd_font_size << "\n";
+        out << "pd_hero_summary_enable=" << (g_pd_hero_summary_enable ? 1 : 0) << "\n";
+        for (int i = 1; i <= 5; i++) out << "pd_hero_count_min" << i << "=" << g_pd_hero_count_min[i] << "\n";
+        out << "opp_scale=" << g_opp_scale << "\nopp_show_board=" << (g_opp_show_board ? 1 : 0) << "\nopp_show_shop=" << (g_opp_show_shop ? 1 : 0) << "\nopp_show_bench=" << (g_opp_show_bench ? 1 : 0) << "\nopp_hex_size=" << g_opp_hex_size << "\n";
+        out << "hextech_scale=" << g_hextech_scale << "\nwin_hero_warn=" << (g_win_hero_warn ? 1 : 0) << "\nhero_warn_thres=" << g_hero_warn_thres << "\nhero_warn_scale=" << g_hero_warn_scale << "\nalpha_hero_warn=" << g_alpha_hero_warn << "\n";
+        out << "float_hw_x=" << g_float_hw_x << "\nfloat_hw_y=" << g_float_hw_y << "\nmenu_x=" << g_menuX << "\nmenu_y=" << g_menuY << "\nmenu_w=" << g_menuW << "\nmenu_h=" << g_menuH << "\nmenu_scale=" << g_scale << "\n";
+        out << "menu_collapsed=" << (g_menu_orb ? 1 : 0) << "\norb_x=" << g_orb_x << "\norb_y=" << g_orb_y << "\nquit_x=" << g_quit_x << "\nquit_y=" << g_quit_y << "\nlock_x=" << g_lock_x << "\nlock_y=" << g_lock_y << "\ncpbtn_x=" << g_cpbtn_x << "\ncpbtn_y=" << g_cpbtn_y << "\nclickerbtn_x=" << g_clickerbtn_x << "\nclickerbtn_y=" << g_clickerbtn_y << "\n";
+        out << "float_cp_x=" << g_float_cp_x << "\nfloat_cp_y=" << g_float_cp_y << "\nfloat_pd_x=" << g_float_pd_x << "\nfloat_pd_y=" << g_float_pd_y << "\nfloat_opp_x=" << g_float_opp_x << "\nfloat_opp_y=" << g_float_opp_y << "\nfloat_hex_x=" << g_float_hex_x << "\nfloat_hex_y=" << g_float_hex_y << "\n";
+        out << "auto_clicker_enable=" << (g_auto_clicker_enable ? 1 : 0) << "\nclick_interval_ms=" << g_click_interval_ms << "\ntouch_duration_ms=" << g_touch_duration_ms << "\nclick_positions=";
+        for (size_t i = 0; i < g_click_positions.size(); i++) { if (i > 0) out << ";"; out << g_click_positions[i].x << "," << g_click_positions[i].y; }
+        out << "\n"; out.close();
+    }
+}
+
+void LoadConfig() {
+    std::ifstream in(GetConfigPath());
+    if (!in.is_open()) { SaveConfig(); return; }
+    std::string line; bool has_full = false;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#' || line[0] == '[') continue;
+        if (line.find("pi_win_streak") != std::string::npos) has_full = true;
+        auto delim = line.find('=');
+        if (delim != std::string::npos) {
+            std::string key = line.substr(0, delim); std::string valStr = line.substr(delim + 1);
+            try {
+                uint32_t val = std::stoul(valStr, nullptr, 16);
+                #define PARSE_OFF_32(name) if (key == #name) g_off.name = val;
+                PARSE_OFF_32(func_get_Instance) PARSE_OFF_32(addr2) PARSE_OFF_32(addr3) PARSE_OFF_32(addra) PARSE_OFF_32(segmentcsogame)
+                PARSE_OFF_32(func_quit) PARSE_OFF_32(my_player_id) PARSE_OFF_32(segment_my_player_id) PARSE_OFF_32(next_opponents_list) PARSE_OFF_32(func_reqbuyhero)
+                PARSE_OFF_32(func_shop_listen) PARSE_OFF_32(func_buy_hero_new) PARSE_OFF_32(func_set_IsGameEnd)
+                PARSE_OFF_32(addr4) PARSE_OFF_32(addr5) PARSE_OFF_32(addr6) PARSE_OFF_32(addr7) PARSE_OFF_32(addr7_struct_size) PARSE_OFF_32(addr7_ptr_offset)
+                PARSE_OFF_32(addr9) PARSE_OFF_32(addr9_struct_size) PARSE_OFF_32(addr9_ptr_offset)
+                PARSE_OFF_32(ph_heroId) PARSE_OFF_32(ph_remaining) PARSE_OFF_32(ph_total)
+                PARSE_OFF_32(addr11) PARSE_OFF_32(addr12) PARSE_OFF_32(addr12_struct_size) PARSE_OFF_32(addr12_ptr_offset)
+                PARSE_OFF_32(addr13) PARSE_OFF_32(pi_name) PARSE_OFF_32(pi_id) PARSE_OFF_32(pi_is_bot) PARSE_OFF_32(pi_money) 
+                PARSE_OFF_32(pi_win_streak) PARSE_OFF_32(pi_lose_streak) PARSE_OFF_32(pi_level)
+                PARSE_OFF_32(addr14) PARSE_OFF_32(addr15) PARSE_OFF_32(addr16) PARSE_OFF_32(shop_hero_id)
+                PARSE_OFF_32(addr17) PARSE_OFF_32(addr18) PARSE_OFF_32(bench_hero_id)
+                PARSE_OFF_32(addr19) PARSE_OFF_32(addr20) PARSE_OFF_32(board_hero_id) PARSE_OFF_32(board_x) PARSE_OFF_32(board_y)
+                PARSE_OFF_32(addr21) PARSE_OFF_32(addr22) PARSE_OFF_32(addr23) PARSE_OFF_32(addr23_struct_size) PARSE_OFF_32(addr23_ptr_offset)
+                PARSE_OFF_32(addr26) PARSE_OFF_32(pi_avatar_rank) PARSE_OFF_32(pi_avatar_player_id) PARSE_OFF_32(hexctrl) PARSE_OFF_32(func_get_hex)
+            } catch (...) {}
+            try {
+                if (key == "ui_theme") g_ui_theme = std::stoi(valStr);
+                else if (key == "win_cardpool") g_win_cardpool = (std::stoi(valStr) != 0); else if (key == "win_playerdata") g_win_playerdata = (std::stoi(valStr) != 0); else if (key == "win_hextech") g_win_hextech = (std::stoi(valStr) != 0);
+                else if (key == "alpha_cp") g_alpha_cp = std::clamp(std::stof(valStr), 0.1f, 1.0f); else if (key == "alpha_pd") g_alpha_pd = std::clamp(std::stof(valStr), 0.1f, 1.0f); else if (key == "alpha_opp") g_alpha_opp = std::clamp(std::stof(valStr), 0.1f, 1.0f); else if (key == "alpha_hex") g_alpha_hex = std::clamp(std::stof(valStr), 0.1f, 1.0f);
+                else if (key == "floats_locked") g_floats_locked = (std::stoi(valStr) != 0);
+                else if (key == "cp_columns") g_cp_columns = std::stoi(valStr); else if (key == "cp_rows") g_cp_rows = std::stoi(valStr); else if (key == "cp_scale") g_cp_scale = std::stof(valStr);
+                else if (key.rfind("cp_show_cost", 0) == 0) { int i = key.back() - '0'; if (i >= 1 && i <= 5) g_cp_show_cost[i] = (std::stoi(valStr) != 0); }
+                else if (key == "cp_warning_enable") g_cp_warning_enable = (std::stoi(valStr) != 0); else if (key == "cp_warning_thres") g_cp_warning_thres = std::stoi(valStr);
+                else if (key == "pd_line_spacing") g_pd_line_spacing = std::stof(valStr); else if (key == "pd_vert_spacing") g_pd_vert_spacing = std::stof(valStr); else if (key == "pd_arrow_spacing") g_pd_arrow_spacing = std::stof(valStr); else if (key == "pd_font_size") g_pd_font_size = std::stof(valStr);
+                else if (key == "pd_hero_summary_enable") g_pd_hero_summary_enable = (std::stoi(valStr) != 0);
+                else if (key.rfind("pd_hero_count_min", 0) == 0) { int i = key.back() - '0'; if (i >= 1 && i <= 5) g_pd_hero_count_min[i] = std::stoi(valStr); }
+                else if (key == "opp_scale") g_opp_scale = std::stof(valStr); else if (key == "opp_show_board") g_opp_show_board = (std::stoi(valStr) != 0); else if (key == "opp_show_shop") g_opp_show_shop = (std::stoi(valStr) != 0); else if (key == "opp_show_bench") g_opp_show_bench = (std::stoi(valStr) != 0); else if (key == "opp_hex_size") g_opp_hex_size = std::stof(valStr);
+                else if (key == "hextech_scale") g_hextech_scale = std::stof(valStr); else if (key == "win_hero_warn") g_win_hero_warn = (std::stoi(valStr) != 0); else if (key == "hero_warn_thres") g_hero_warn_thres = std::stoi(valStr); else if (key == "hero_warn_scale") g_hero_warn_scale = std::stof(valStr); else if (key == "alpha_hero_warn") g_alpha_hero_warn = std::stof(valStr);
+                else if (key == "float_hw_x") g_float_hw_x = std::stof(valStr); else if (key == "float_hw_y") g_float_hw_y = std::stof(valStr);
+                else if (key == "menu_x") g_menuX = std::stof(valStr); else if (key == "menu_y") g_menuY = std::stof(valStr); else if (key == "menu_w") g_menuW = std::stof(valStr); else if (key == "menu_h") g_menuH = std::stof(valStr); else if (key == "menu_scale") g_scale = std::stof(valStr);
+                else if (key == "menu_collapsed") g_menu_orb = (std::stoi(valStr) != 0); else if (key == "orb_x") g_orb_x = std::stof(valStr); else if (key == "orb_y") g_orb_y = std::stof(valStr);
+                else if (key == "quit_x") g_quit_x = std::stof(valStr); else if (key == "quit_y") g_quit_y = std::stof(valStr); else if (key == "lock_x") g_lock_x = std::stof(valStr); else if (key == "lock_y") g_lock_y = std::stof(valStr);
+                else if (key == "cpbtn_x") g_cpbtn_x = std::stof(valStr); else if (key == "cpbtn_y") g_cpbtn_y = std::stof(valStr); else if (key == "clickerbtn_x") g_clickerbtn_x = std::stof(valStr); else if (key == "clickerbtn_y") g_clickerbtn_y = std::stof(valStr);
+                else if (key == "float_cp_x") g_float_cp_x = std::stof(valStr); else if (key == "float_cp_y") g_float_cp_y = std::stof(valStr); else if (key == "float_pd_x") g_float_pd_x = std::stof(valStr); else if (key == "float_pd_y") g_float_pd_y = std::stof(valStr); else if (key == "float_opp_x") g_float_opp_x = std::stof(valStr); else if (key == "float_opp_y") g_float_opp_y = std::stof(valStr); else if (key == "float_hex_x") g_float_hex_x = std::stof(valStr); else if (key == "float_hex_y") g_float_hex_y = std::stof(valStr);
+                else if (key == "auto_clicker_enable") g_auto_clicker_enable = (std::stoi(valStr) != 0); else if (key == "click_interval_ms") g_click_interval_ms = std::stof(valStr); else if (key == "touch_duration_ms") g_touch_duration_ms = std::stof(valStr);
+                else if (key == "click_positions") {
+                    g_click_positions.clear(); std::stringstream ss(valStr); std::string pair;
+                    while (std::getline(ss, pair, ';')) {
+                        if (pair.empty()) continue; std::stringstream ss2(pair); std::string xs, ys;
+                        if (std::getline(ss2, xs, ',') && std::getline(ss2, ys, ',')) { try { g_click_positions.push_back({std::stof(xs), std::stof(ys)}); } catch (...) {} }
+                    }
+                    if (g_click_positions.empty()) g_click_positions.push_back({540.0f, 960.0f});
+                }
+                else if (key == "auto_buy_ids") {
+                    g_heroAutoBuyChecked.clear(); std::stringstream ss(valStr); std::string item;
+                    while (std::getline(ss, item, ',')) { if (!item.empty()) { try { g_heroAutoBuyChecked[std::stoi(item)] = true; } catch (...) {} } }
+                }
+            } catch (...) {}
+        }
+    }
+    in.close(); g_apply_saved_float_pos = true;
+    if (!has_full) SaveConfig();
+}
+
+// ==============================================================
+// 4. 游戏解析逻辑
+// ==============================================================
 void ClearGameState() {
-    std::lock_guard<std::mutex> lockData(g_DataMutex);
     g_poolHeroes.clear(); g_heroesByCost.clear(); g_players.clear(); g_next_opponents.clear();
     g_my_player_id = 0; g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
     g_dbg_addr1 = 0; g_dbg_addr2 = 0; g_dbg_addr3 = 0; g_dbg_addra = 0; g_dbg_segmentcsogame = 0;
     g_shop_slots.clear(); g_shop_listen_done.store(false); g_match_enter_pending.store(false);
     g_segment_valid_streak = 0; g_need_segment_gap_before_enter = true;
-    std::lock_guard<std::mutex> lockBuy(g_Tasks.buy_mutex); g_Tasks.buy_slots.clear();
+    std::lock_guard<std::mutex> lock(g_Tasks.buy_mutex); g_Tasks.buy_slots.clear();
 }
 
-bool TryResolveSegmentCSOGame(uintptr_t* out_segment = nullptr) {
+bool TryResolveSegmentCSOGame(uintptr_t* out_segment) {
     if (g_il2cppTrueBase == 0) return false;
     typedef void* (*func_get_Instance_t)(void* method_info);
     func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
@@ -273,43 +447,66 @@ bool TryResolveSegmentCSOGame(uintptr_t* out_segment = nullptr) {
     if (out_segment) *out_segment = segment; return true;
 }
 
+void UpdateMatchState() {
+    uintptr_t segment = 0; bool segmentValid = TryResolveSegmentCSOGame(&segment);
+    bool inMatch = g_is_in_match.load(std::memory_order_acquire);
+    if (inMatch) {
+        if (!segmentValid) {
+            g_is_in_match.store(false, std::memory_order_release); g_match_enter_pending.store(false, std::memory_order_release);
+            g_segment_valid_streak = 0; g_need_segment_gap_before_enter = true; g_Tasks.trigger_game_end.store(true, std::memory_order_release);
+            return;
+        }
+        if (g_dbg_segmentcsogame != 0 && g_dbg_segmentcsogame != segment) { g_dbg_segmentcsogame = segment; g_Tasks.trigger_game_end.store(true, std::memory_order_release); }
+        return;
+    }
+    if (!segmentValid) { g_segment_valid_streak = 0; g_need_segment_gap_before_enter = false; return; }
+    if (g_match_enter_pending.load(std::memory_order_acquire)) {
+        g_dbg_segmentcsogame = segment; g_is_in_match.store(true, std::memory_order_release);
+        g_match_enter_pending.store(false, std::memory_order_release); g_segment_valid_streak = 0; g_need_segment_gap_before_enter = false; return;
+    }
+    if (g_need_segment_gap_before_enter) { g_segment_valid_streak = 0; return; }
+    if (++g_segment_valid_streak >= 3) {
+        g_dbg_segmentcsogame = segment; g_is_in_match.store(true, std::memory_order_release); g_segment_valid_streak = 0;
+    }
+}
+
+static void UpsertPoolHero(int heroId, int remaining, int total, uintptr_t addr10) {
+    if (heroId <= 0 || heroId >= 100000) return; int cost = (heroId / 1000) % 10;
+    for (auto& ph : g_poolHeroes) { if (ph.heroId == heroId) { ph.remaining = remaining; ph.total = total; ph.addr10 = addr10; return; } }
+    g_poolHeroes.push_back({ heroId, remaining, total, cost, addr10 });
+    auto& list = g_heroesByCost[cost]; if (std::find(list.begin(), list.end(), heroId) == list.end()) list.push_back(heroId);
+}
+
 void ParseGameMemory() {
     if (g_il2cppTrueBase == 0 || !g_is_in_match.load(std::memory_order_acquire)) return;
     typedef void* (*func_get_Instance_t)(void* method_info);
     func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
     if (!get_Instance) return;
     
-    uintptr_t d_addr1 = 0; try { d_addr1 = (uintptr_t)get_Instance(nullptr); } catch(...) { return; }
-    uintptr_t d_addr2 = SAFE_READ_PTR(d_addr1, g_off.addr2); uintptr_t d_addr3 = SAFE_READ_PTR(d_addr2, g_off.addr3); 
-    uintptr_t d_addra = SAFE_READ_PTR(d_addr3, g_off.addra); uintptr_t d_segment = SAFE_READ_PTR(d_addra, g_off.segmentcsogame); 
-    if(!IsValidPtr(d_segment)) return;
-
-    int my_id = SAFE_READ_INT(d_segment, g_off.segment_my_player_id);
-    uintptr_t next_opp_addr = SAFE_READ_PTR(d_addr2, g_off.next_opponents_list);
-    std::vector<int> next_opps = GetIntsInArray(SAFE_READ_PTR(next_opp_addr, 0x10), SAFE_READ_INT(next_opp_addr, 0x18));
-
-    uintptr_t d_addr4 = SAFE_READ_PTR(d_segment, g_off.addr4); uintptr_t d_addr5 = SAFE_READ_PTR(d_addr4, g_off.addr5);
-    uintptr_t d_addr6 = SAFE_READ_PTR(d_addr5, g_off.addr6); uintptr_t d_addr7 = SAFE_READ_PTR(d_addr6, g_off.addr7);
-    auto list7 = GetStructArrayPointers(d_addr7, 2000, g_off.addr7_struct_size, g_off.addr7_ptr_offset);
+    try { g_dbg_addr1 = (uintptr_t)get_Instance(nullptr); } catch(...) { g_dbg_addr1 = 0; }
+    g_dbg_addr2 = SAFE_READ_PTR(g_dbg_addr1, g_off.addr2); g_dbg_addr3 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr3); 
+    g_dbg_addra = SAFE_READ_PTR(g_dbg_addr3, g_off.addra); g_dbg_segmentcsogame = SAFE_READ_PTR(g_dbg_addra, g_off.segmentcsogame); 
+    g_my_player_id = IsValidPtr(g_dbg_segmentcsogame) ? SAFE_READ_INT(g_dbg_segmentcsogame, g_off.segment_my_player_id) : 0;
     
-    std::vector<PoolHero> tmp_pool;
+    uintptr_t next_opp_addr = SAFE_READ_PTR(g_dbg_addr2, g_off.next_opponents_list);
+    g_next_opponents = GetIntsInArray(SAFE_READ_PTR(next_opp_addr, 0x10), SAFE_READ_INT(next_opp_addr, 0x18));
+
+    g_dbg_addr4 = SAFE_READ_PTR(g_dbg_segmentcsogame, g_off.addr4); g_dbg_addr5 = SAFE_READ_PTR(g_dbg_addr4, g_off.addr5);
+    g_dbg_addr6 = SAFE_READ_PTR(g_dbg_addr5, g_off.addr6); g_dbg_addr7 = SAFE_READ_PTR(g_dbg_addr6, g_off.addr7);
+    
+    auto list7 = GetStructArrayPointers(g_dbg_addr7, 2000, g_off.addr7_struct_size, g_off.addr7_ptr_offset);
     for (auto addr8 : list7) {
         auto list9 = GetStructArrayPointers(SAFE_READ_PTR(addr8, g_off.addr9), 2000, g_off.addr9_struct_size, g_off.addr9_ptr_offset);
-        for (auto addr10 : list9) {
-            if (IsValidPtr(addr10)) {
-                int hid = SAFE_READ_INT(addr10, g_off.ph_heroId);
-                if(hid > 0 && hid < 100000) tmp_pool.push_back({hid, SAFE_READ_INT(addr10, g_off.ph_remaining), SAFE_READ_INT(addr10, g_off.ph_total), (hid/1000)%10, addr10});
-            }
-        }
+        for (auto addr10 : list9) if (IsValidPtr(addr10)) UpsertPoolHero(SAFE_READ_INT(addr10, g_off.ph_heroId), SAFE_READ_INT(addr10, g_off.ph_remaining), SAFE_READ_INT(addr10, g_off.ph_total), addr10);
     }
 
-    uintptr_t d_addr11 = SAFE_READ_PTR(d_addr2, g_off.addr11); uintptr_t d_addr12 = SAFE_READ_PTR(d_addr11, g_off.addr12);
-    std::vector<PlayerInfo> tmp_players; std::vector<uintptr_t> player_vals;
-    if (IsValidPtr(d_addr12)) {
-        int cap = SAFE_READ_INT(d_addr12, 0x18);
+    g_dbg_addr11 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr11); g_dbg_addr12 = SAFE_READ_PTR(g_dbg_addr11, g_off.addr12);
+    g_players.clear(); std::vector<uintptr_t> player_vals;
+    if (IsValidPtr(g_dbg_addr12)) {
+        int cap = SAFE_READ_INT(g_dbg_addr12, 0x18);
         if (cap > 0 && cap < 200) {
             for (int off = 0x20; off < 0x20 + cap * 0x20; off += 8) {
-                uintptr_t p = SAFE_READ_PTR(d_addr12, off);
+                uintptr_t p = SAFE_READ_PTR(g_dbg_addr12, off);
                 if (IsValidPtr(p) && IsValidPtr(SAFE_READ_PTR(p, g_off.addr13))) player_vals.push_back(p);
             }
         }
@@ -325,48 +522,33 @@ void ParseGameMemory() {
         auto shopItems = GetPointersInArray(SAFE_READ_PTR(SAFE_READ_PTR(val, g_off.addr14), g_off.addr15), 5);
         for (size_t i = 0; i < shopItems.size(); i++) {
             int hid = SAFE_READ_INT(SAFE_READ_PTR(shopItems[i], g_off.addr16), g_off.shop_hero_id); pi.shop.push_back(hid);
-            if (hid > 0 && pi.id == my_id && g_heroAutoBuyChecked[hid]) {
+            if (hid > 0 && pi.id == g_my_player_id && g_heroAutoBuyChecked[hid]) {
                 uintptr_t s_addr = (g_shop_listen_done.load() && i < g_shop_slots.size()) ? g_shop_slots[i] : shopItems[i];
                 if (IsValidPtr(s_addr)) {
                     static std::map<uintptr_t, int> last_buy;
-                    if (g_current_frame - last_buy[s_addr] > 10) { last_buy[s_addr] = g_current_frame; std::lock_guard<std::mutex> lockBuy(g_Tasks.buy_mutex); g_Tasks.buy_slots.push_back(s_addr); }
+                    if (g_current_frame - last_buy[s_addr] > 10) { last_buy[s_addr] = g_current_frame; std::lock_guard<std::mutex> lock(g_Tasks.buy_mutex); g_Tasks.buy_slots.push_back(s_addr); }
                 }
             }
         }
         for (auto b : GetPointersInArray(SAFE_READ_PTR(SAFE_READ_PTR(val, g_off.addr17), g_off.addr18), 10)) pi.bench.push_back(SAFE_READ_INT(b, g_off.bench_hero_id));
         for (auto bd : GetPointersInArray(SAFE_READ_PTR(SAFE_READ_PTR(val, g_off.addr19), g_off.addr20), 30)) { pi.board.push_back({SAFE_READ_INT(bd, g_off.board_hero_id), SAFE_READ_INT(bd, g_off.board_x), SAFE_READ_INT(bd, g_off.board_y)}); }
-        tmp_players.push_back(pi);
-    }
-
-    // 线程安全地覆盖全局数据
-    std::lock_guard<std::mutex> lockData(g_DataMutex);
-    g_my_player_id = my_id;
-    g_next_opponents = next_opps;
-    g_poolHeroes = tmp_pool;
-    g_players = tmp_players;
-}
-
-// 后台数据刷新线程 (绝不在渲染帧里读内存，防止卡死！)
-void DataUpdateThread() {
-    while (true) {
-        if (g_is_in_match.load(std::memory_order_acquire)) {
-            ParseGameMemory();
-            std::this_thread::sleep_for(std::chrono::milliseconds(500)); // 一秒更新2次足矣
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-        }
+        g_players.push_back(pi);
     }
 }
 
-/* STREAMING_CHUNK:Loading GUI assets and defining drawing primitives... */
 // ==============================================================
-// 4. ImGui 字体与基础纹理
+// 5. ImGui 字体与基础纹理解析
 // ==============================================================
-void UpdateFontHD(bool force = false) {
-    ImGuiIO& io = ImGui::GetIO(); float screenH = (io.DisplaySize.y > 100.0f) ? io.DisplaySize.y : 2400.0f; g_autoScale = screenH / 1080.0f;
-    float targetSize = std::clamp(20.0f * g_autoScale, 16.0f, 45.0f); if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f) return;
+void UpdateFontHD(bool force) {
+    ImGuiIO& io = ImGui::GetIO();
+    float screenH = (io.DisplaySize.y > 100.0f) ? io.DisplaySize.y : 2400.0f; 
+    g_autoScale = screenH / 1080.0f;
+    float targetSize = std::clamp(20.0f * g_autoScale, 16.0f, 45.0f); 
+    if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f) return;
+    
     ImGui_ImplOpenGL3_DestroyDeviceObjects(); io.Fonts->Clear(); g_mainFont = nullptr; 
     ImFontConfig configMain; configMain.OversampleH = 2; configMain.OversampleV = 2; configMain.PixelSnapH = false; 
+    
     const char* fonts[] = { "/system/fonts/Miui-Regular.ttf", "/system/fonts/SysSans-Hans-Regular.ttf", "/system/fonts/NotoSansCJK-Regular.ttc", "/system/fonts/DroidSansFallback.ttf" };
     bool loaded = false;
     for(const char* path : fonts) {
@@ -380,11 +562,22 @@ void UpdateFontHD(bool force = false) {
 }
 
 inline int GetBaseHeroImageId(int rawHeroId) {
-    if (rawHeroId < 10) return rawHeroId; if (rawHeroId >= 10000) return rawHeroId - (rawHeroId / 10000) * 10000 + 10000;
-    if (rawHeroId >= 1000) return rawHeroId - (rawHeroId / 1000) * 1000 + 1000; if (rawHeroId >= 100) return rawHeroId - (rawHeroId / 100) * 100 + 100; return rawHeroId - (rawHeroId / 10) * 10 + 10;
+    if (rawHeroId < 10) return rawHeroId;
+    if (rawHeroId >= 10000) return rawHeroId - (rawHeroId / 10000) * 10000 + 10000;
+    if (rawHeroId >= 1000) return rawHeroId - (rawHeroId / 1000) * 1000 + 1000;
+    if (rawHeroId >= 100) return rawHeroId - (rawHeroId / 100) * 100 + 100;
+    return rawHeroId - (rawHeroId / 10) * 10 + 10;
 }
 inline int GetHeroStarLevel(int rawHeroId) {
-    if (rawHeroId <= 0) return 0; int star = rawHeroId; while (star >= 10) star /= 10; return std::clamp(star, 1, 3);
+    if (rawHeroId <= 0) return 0;
+    int star = rawHeroId; while (star >= 10) star /= 10; return std::clamp(star, 1, 3);
+}
+void BuildHeroImageIndex() {
+    std::thread([]() {
+        int found = 0;
+        for (int i = 1; i <= 99999; i++) { int len = 0; if (GetHeroImageBytes(i, &len) != nullptr && len > 0) found++; }
+        g_hero_image_count = found; g_hero_images_ready.store(true);
+    }).detach();
 }
 void TextureDecodingWorkerThread() {
     while (true) {
@@ -401,13 +594,14 @@ void TextureDecodingWorkerThread() {
 }
 void EnsureTextureWorkerStarted() {
     if (g_tex_worker_started.exchange(true)) return;
-    std::thread(TextureDecodingWorkerThread).detach(); 
-    std::thread([](){ int found = 0; for(int i=1; i<=99999; i++){ int l=0; if(GetHeroImageBytes(i,&l)) found++; } g_hero_image_count = found; g_hero_images_ready.store(true); }).detach();
+    std::thread(TextureDecodingWorkerThread).detach(); BuildHeroImageIndex();
 }
 GLuint GetHeroTexture(int heroId) {
-    int baseId = GetBaseHeroImageId(heroId); auto it = g_heroTextureCache.find(baseId); if (it != g_heroTextureCache.end()) return it->second;
+    int baseId = GetBaseHeroImageId(heroId);
+    auto it = g_heroTextureCache.find(baseId); if (it != g_heroTextureCache.end()) return it->second;
     g_heroTextureCache[baseId] = 0; EnsureTextureWorkerStarted();
-    std::lock_guard<std::mutex> lock(g_DecodeRequestMutex); g_DecodeRequestQueue.push_back({baseId}); return 0;
+    std::lock_guard<std::mutex> lock(g_DecodeRequestMutex); g_DecodeRequestQueue.push_back({baseId});
+    return 0;
 }
 void ProcessTextureQueue() {
     std::lock_guard<std::mutex> lock(g_TexMutex); if (g_HeroTexDecodedQueue.empty()) return;
@@ -430,7 +624,8 @@ static void DrawHeroIcon(ImDrawList* dl, int heroId, ImVec2 pMin, ImVec2 pMax, f
     dl->AddText(ImVec2(pMin.x + (pMax.x - pMin.x - tSz.x) * 0.5f, pMin.y + (pMax.y - pMin.y - tSz.y) * 0.5f), ImGui::GetColorU32(fallbackColor), idBuf);
 }
 static void DrawStarGlyph(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
-    ImVec2 tip[5]; for (int i = 0; i < 5; i++) { float a = - (float)M_PI * 0.5f + i * (2.0f * (float)M_PI / 5.0f); tip[i] = ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r); }
+    ImVec2 tip[5];
+    for (int i = 0; i < 5; i++) { float a = - (float)M_PI * 0.5f + i * (2.0f * (float)M_PI / 5.0f); tip[i] = ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r); }
     for (int i = 0; i < 5; i++) { dl->AddTriangleFilled(c, tip[i], tip[(i + 2) % 5], col); }
     dl->AddCircleFilled(c, r * 0.28f, col, 12);
 }
@@ -440,9 +635,8 @@ static void DrawHeroStars(ImDrawList* dl, ImVec2 center, int stars, float star_r
     for (int i = 0; i < stars; i++) { ImVec2 c(x0 + i * gap, center.y); DrawStarGlyph(dl, c, star_r + 3.0f, glow); DrawStarGlyph(dl, c, star_r + 1.8f, outline); DrawStarGlyph(dl, c, star_r, fill); }
 }
 
-/* STREAMING_CHUNK:Constructing UI elements and windows... */
 // ==============================================================
-// 5. UI 主界面绘制与组件
+// 6. UI 主界面绘制与组件
 // ==============================================================
 struct FrostTheme { ImVec4 primary, primaryHover, accentGlow, orb1, orb2; const char* name; };
 static FrostTheme g_themes[4] = {
@@ -495,7 +689,7 @@ void DrawMainMenu() {
     static bool firstMenuOpen = true;
     if (firstMenuOpen) { ImGui::SetNextWindowPos(ImVec2(g_menuX, g_menuY), ImGuiCond_Always); ImGui::SetNextWindowSize(ImVec2(g_menuW, g_menuH), ImGuiCond_Always); ImGui::SetNextWindowCollapsed(g_menuCollapsed, ImGuiCond_Always); firstMenuOpen = false; }
     bool menu_visible = true;
-    if (ImGui::Begin((const char*)u8"金铲铲助手", &menu_visible, ImGuiWindowFlags_NoSavedSettings)) {
+    if (ImGui::Begin((const char*)u8"金铲铲助手 Frosted Studio 完美终极版", &menu_visible, ImGuiWindowFlags_NoSavedSettings)) {
         g_menuX = ImGui::GetWindowPos().x; g_menuY = ImGui::GetWindowPos().y; g_menuCollapsed = ImGui::IsWindowCollapsed();
         if (!menu_visible || g_menuCollapsed) { g_orb_x = g_menuX + 28.0f * g_autoScale; g_orb_y = g_menuY + 28.0f * g_autoScale; g_menu_orb = true; }
         if (!g_menuCollapsed) {
@@ -503,28 +697,32 @@ void DrawMainMenu() {
             if (std::abs(curW - g_menuW) > 5.0f || std::abs(curH - g_menuH) > 5.0f) { g_menuW = curW; g_menuH = curH; g_scale = std::clamp(curW / (560.0f * g_autoScale), 0.5f, 2.5f); }
             ImGui::SetWindowFontScale(g_scale);
             
-            if(ImGui::Button((const char*)u8"保存配置")) SaveConfig(); ImGui::SameLine();
+            // 简单排版，方便调用所有的开关
+            if(ImGui::Button((const char*)u8"保存所有配置")) SaveConfig();
+            ImGui::SameLine();
             if(ImGui::Button((const char*)u8"收起为悬浮球")) g_menu_orb = true;
             ImGui::Separator();
+            
             ImGui::TextColored(ImVec4(0, 1, 0, 1), "当前游戏状态: %s", g_is_in_match.load() ? "对局中" : "未在对局");
-            ImGui::Text("Player ID: %d", g_my_player_id);
+            ImGui::Text("Player ID: %d | Frame: %d", g_my_player_id, g_current_frame);
 
             ImGui::Checkbox((const char*)u8"显示牌库", &g_win_cardpool); ImGui::SameLine();
             ImGui::Checkbox((const char*)u8"显示对局信息", &g_win_playerdata); ImGui::SameLine();
             ImGui::Checkbox((const char*)u8"显示敌方棋盘", &g_opp_show_board);
             
-            ImGui::Checkbox((const char*)u8"连点器", &g_auto_clicker_enable);
-            if (g_auto_clicker_enable) g_clicker_running.store(true); else g_clicker_running.store(false);
+            ImGui::Checkbox((const char*)u8"开启屏幕连点器", &g_auto_clicker_enable);
+            if (g_auto_clicker_enable) { g_clicker_running.store(true); } else { g_clicker_running.store(false); }
             
-            ImGui::Separator(); ImGui::Text((const char*)u8"自动拿牌设置:");
-            std::lock_guard<std::mutex> lockData(g_DataMutex); // 安全读取后台数据
+            ImGui::Separator();
+            ImGui::Text((const char*)u8"自动拿牌设置 (点击勾选):");
             for (int cost = 1; cost <= 5; cost++) {
                 ImGui::TextColored(CostColor(cost), "%d费: ", cost); ImGui::SameLine();
                 for (auto& ph : g_poolHeroes) {
                     if (ph.cost == cost) {
                         char buf[32]; snprintf(buf, sizeof(buf), "%d##%d", ph.heroId, ph.heroId);
                         bool is_checked = g_heroAutoBuyChecked[ph.heroId];
-                        if (ImGui::Checkbox(buf, &is_checked)) g_heroAutoBuyChecked[ph.heroId] = is_checked; ImGui::SameLine();
+                        if (ImGui::Checkbox(buf, &is_checked)) g_heroAutoBuyChecked[ph.heroId] = is_checked;
+                        ImGui::SameLine();
                     }
                 }
                 ImGui::NewLine();
@@ -541,8 +739,6 @@ void DrawCardPoolWindow() {
     float sc = g_autoScale * g_cp_scale; float box_size = g_cp_box_size * sc; float spacing = 0.0f; int cols = std::max(1, g_cp_columns);
     ImDrawList* dl = ImGui::GetWindowDrawList(); ImFont* font = ImGui::GetFont(); float font_size = ImGui::GetFontSize() * sc;
     ImVec2 base = ImGui::GetCursorScreenPos(); float y_off = 0.0f; float max_w = 0.0f;
-    
-    std::lock_guard<std::mutex> lockData(g_DataMutex); // 安全读取
     for (int cost = 1; cost <= 5; cost++) {
         if (!g_cp_show_cost[cost]) continue;
         std::vector<PoolHero> filtered; for (auto& ph : g_poolHeroes) if (ph.cost == cost) filtered.push_back(ph);
@@ -567,7 +763,6 @@ void DrawPlayerDataWindow() {
     if (!g_win_playerdata || !g_is_in_match.load(std::memory_order_relaxed)) return;
     if (!BeginContentFloatWindow("##PlayerDataFloat", &g_win_playerdata, &g_float_pd_x, &g_float_pd_y, g_alpha_pd)) return;
     ImGui::SetWindowFontScale(g_autoScale * g_pd_font_size);
-    std::lock_guard<std::mutex> lockData(g_DataMutex); // 安全读取
     for (auto& pi : g_players) {
         ImVec4 streak_col(0.75f, 0.78f, 0.82f, 1.f); char streak_buf[16];
         if (pi.win_streak > 0) { streak_col = ImVec4(1.f, 0.45f, 0.45f, 1.f); snprintf(streak_buf, 16, "+%d", pi.win_streak); }
@@ -583,7 +778,6 @@ void DrawOpponentBoardWindow() {
     if (!g_is_in_match.load(std::memory_order_relaxed)) return;
     if (!BeginContentFloatWindow("##OpponentFloat", nullptr, &g_float_opp_x, &g_float_opp_y, g_alpha_opp)) return;
     float sc = g_autoScale * g_opp_scale; ImGui::SetWindowFontScale(sc);
-    std::lock_guard<std::mutex> lockData(g_DataMutex); // 安全读取
     int opp_id = -1; for (size_t i = 0; i + 1 < g_next_opponents.size(); i += 2) { if (g_next_opponents[i] == g_my_player_id) { opp_id = g_next_opponents[i + 1]; break; } else if (g_next_opponents[i + 1] == g_my_player_id) { opp_id = g_next_opponents[i]; break; } }
     PlayerInfo* opp = nullptr; for (auto& p : g_players) { if (p.id == opp_id) { opp = &p; break; } }
     if (!opp) ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), (const char*)u8"未匹配对手");
@@ -612,9 +806,17 @@ void DrawOpponentBoardWindow() {
     EndContentFloatWindow("opp_grip", &g_opp_scale);
 }
 
-/* STREAMING_CHUNK:Installing rendering hooks with full state protection... */
+// （其余不需要的悬浮窗留空声明以防止编译报错）
+void DrawMyHeroWarningWindow() {}
+void DrawHextechCapsule() {}
+void DrawQuitCapsule() {}
+void DrawLockCapsule() {}
+void DrawCardPoolCapsule() {}
+void DrawClickerCapsule() {}
+void DrawClickerFeedback() {}
+
 // ==============================================================
-// 6. OpenGL ES 与 EGL 渲染拦截 (底层逃逸机制)
+// 7. OpenGL ES 与 EGL 渲染拦截 (最核心的底层逃逸技术)
 // ==============================================================
 unsigned int (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
 unsigned int (*old_eglSwapWithDamage)(EGLDisplay, EGLSurface, EGLint*, EGLint) = nullptr;
@@ -654,6 +856,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
         io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
         UpdateFontHD(true); 
         g_isImGuiInit = true;
+        LoadConfig(); // 【核心修复3】：把读取配置放在这里，彻底绝缘空指针闪退
     }
     if (g_needUpdateFontSafe) { UpdateFontHD(true); g_needUpdateFontSafe = false; }
     
@@ -661,8 +864,10 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
     io.DeltaTime = 1.0f / 60.0f;
 
+    // 执行游戏逻辑更新
     UpdateMatchState();
     if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire)) ClearGameState();
+    if (g_is_in_match.load(std::memory_order_acquire) && (g_current_frame % 2 == 0)) ParseGameMemory();
 
     ProcessTextureQueue();
     ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
@@ -679,7 +884,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, g_gl_width, g_gl_height);
 
-    // ★ 核心防御点：中途注入时的强力洗版，清空一切可能遮挡 UI 的 OpenGL 状态
+    // ★ 核心防御点：中途注入时的强力洗版 (Force Reset GL State)
     glDisable(GL_DEPTH_TEST);   
     glDisable(GL_CULL_FACE);    
     glDisable(GL_SCISSOR_TEST); 
@@ -714,9 +919,11 @@ unsigned int hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, EGLi
 void* hook_eglGetProcAddress(const char* procname) {
     void* real_addr = old_eglGetProcAddress ? old_eglGetProcAddress(procname) : nullptr;
     if (procname && strcmp(procname, "eglSwapBuffers") == 0) {
+        if (!old_eglSwap && real_addr) old_eglSwap = (unsigned int (*)(EGLDisplay, EGLSurface))real_addr;
         return (void*)hook_eglSwap;
     }
     if (procname && strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) {
+        if (!old_eglSwapWithDamage && real_addr) old_eglSwapWithDamage = (unsigned int (*)(EGLDisplay, EGLSurface, EGLint*, EGLint))real_addr;
         return (void*)hook_eglSwapWithDamage;
     }
     return real_addr;
@@ -726,9 +933,8 @@ int hook_vkCreateInstance(void* pCreateInfo, void* pAllocator, void* pInstance) 
     LOGI("[!] Vulkan Blocked! Forcing OpenGL..."); return -9; 
 }
 
-/* STREAMING_CHUNK:Setting up IL2CPP game logic and JNI touch interceptors... */
 // ==============================================================
-// 7. 游戏逻辑与触摸注入 (挂钩 Unity 层与 JNI 层)
+// 8. 游戏逻辑与触摸注入 (挂钩 Unity 层与 JNI 层)
 // ==============================================================
 uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x3, uintptr_t x4, uintptr_t x5, uintptr_t x6, uintptr_t x7) {
     if (g_is_in_match.load(std::memory_order_relaxed) && !g_shop_listen_done.load() && x0 != 0) {
@@ -887,14 +1093,11 @@ void* DelayedHookThread(void*) {
     return nullptr;
 }
 
-/* STREAMING_CHUNK:Finalizing hooks and bootstrapping... */
 // ==============================================================
-// 8. 安装所有拦截防线
+// 9. 安装所有拦截防线
 // ==============================================================
 void* SetupThread(void*) {
-    LoadConfig();
-
-    // 1. 等待 libil2cpp.so 加载
+    // 1. 等待 libil2cpp.so 
     int retry_count = 0;
     while (g_il2cppTrueBase == 0 && retry_count < 60) {
         FILE *fp = fopen("/proc/self/maps", "r");
@@ -902,28 +1105,24 @@ void* SetupThread(void*) {
         if (g_il2cppTrueBase == 0) { sleep(1); retry_count++; }
     }
     
-    // 2. 封杀 Vulkan
+    // 2. 封杀 Vulkan 并动态拦截 EGL (★ 核心解法：利用内存遍历动态挂钩)
     void* vk_ptr = DobbySymbolResolver("libvulkan.so", "vkCreateInstance");
     if (!vk_ptr) { void* h = dlopen("libvulkan.so", RTLD_LAZY); if (h) vk_ptr = dlsym(h, "vkCreateInstance"); }
     if (vk_ptr) DobbyHook(vk_ptr, (void*)hook_vkCreateInstance, (void**)&old_vkCreateInstance);
 
-    // ★ 关键修复点：解决无限套娃死锁
-    // 必须先获取所有的真实函数指针
-    void* real_eglSwap = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
-    if (!real_eglSwap) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) real_eglSwap = dlsym(h, "eglSwapBuffers"); }
+    void* getproc_ptr = DobbySymbolResolver("libEGL.so", "eglGetProcAddress");
+    if (!getproc_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) getproc_ptr = dlsym(h, "eglGetProcAddress"); }
+    if (getproc_ptr) DobbyHook(getproc_ptr, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
 
-    void* real_eglSwapDamage = DobbySymbolResolver("libEGL.so", "eglSwapBuffersWithDamageKHR");
-    if (!real_eglSwapDamage) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) real_eglSwapDamage = dlsym(h, "eglSwapBuffersWithDamageKHR"); }
+    void* egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
+    if (!egl_ptr) egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
+    if (!egl_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_ptr = dlsym(h, "eglSwapBuffers"); }
+    if (egl_ptr) DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
 
-    void* real_getproc = DobbySymbolResolver("libEGL.so", "eglGetProcAddress");
-    if (!real_getproc) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) real_getproc = dlsym(h, "eglGetProcAddress"); }
-
-    // 先挂载 EGL Swap 核心钩子
-    if (real_eglSwap) DobbyHook(real_eglSwap, (void*)hook_eglSwap, (void**)&old_eglSwap);
-    if (real_eglSwapDamage) DobbyHook(real_eglSwapDamage, (void*)hook_eglSwapWithDamage, (void**)&old_eglSwapWithDamage);
-    
-    // ★ 最后才挂载 eglGetProcAddress，彻底避免自己 Hook 自己！
-    if (real_getproc) DobbyHook(real_getproc, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
+    void* egl_damage_ptr = (void*)eglGetProcAddress("eglSwapBuffersWithDamageKHR");
+    if (!egl_damage_ptr) egl_damage_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffersWithDamageKHR");
+    if (!egl_damage_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_damage_ptr = dlsym(h, "eglSwapBuffersWithDamageKHR"); }
+    if (egl_damage_ptr) DobbyHook(egl_damage_ptr, (void*)hook_eglSwapWithDamage, (void**)&old_eglSwapWithDamage);
 
     // 3. Hook 游戏逻辑
     if (g_off.func_shop_listen != 0) DobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
@@ -938,9 +1137,6 @@ void* SetupThread(void*) {
     if (domain_get && assembly_open && assembly_get_image && class_from_name && class_get_method_from_name) {
         void* domain = domain_get(); if (domain) { void* assembly = assembly_open(domain, "UnityEngine.UIModule.dll"); if (assembly) { void* image = assembly_get_image(assembly); if (image) { void* klass = class_from_name(image, "UnityEngine", "Canvas"); if (klass) { void* method = class_get_method_from_name(klass, "SendWillRenderCanvases", 0); if (method) { void* method_ptr = *(void**)method; if (method_ptr) DobbyHook(method_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases); } } } } }
     }
-
-    // 启动负责读内存的后台线程 (解救渲染线程！)
-    std::thread(DataUpdateThread).detach();
 
     pthread_t t2; pthread_create(&t2, 0, DelayedHookThread, 0); pthread_detach(t2);
     return nullptr;
