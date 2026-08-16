@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <android/log.h>
 #include <dlfcn.h>
+#include <dirent.h>
 #include <string.h>
 #include <vector>
 #include <unordered_map>
@@ -37,9 +38,6 @@
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "JKInternal", __VA_ARGS__)
 
-// ==============================================================
-// 提前声明所有函数，彻底杜绝 "undeclared identifier" 编译错误
-// ==============================================================
 void SaveConfig();
 void LoadConfig();
 void ClearGameState();
@@ -50,20 +48,10 @@ void DrawMainMenu();
 void DrawCardPoolWindow();
 void DrawPlayerDataWindow();
 void DrawOpponentBoardWindow();
-void DrawMyHeroWarningWindow();
-void DrawHextechCapsule();
-void DrawQuitCapsule();
-void DrawLockCapsule();
-void DrawCardPoolCapsule();
-void DrawClickerCapsule();
-void DrawClickerFeedback();
 void ProcessTextureQueue();
 void UpdateFontHD(bool force);
 static void CaptureWindowPos(const char* name, float& x, float& y);
 
-// ==============================================================
-// 1. 全局变量与游戏偏移
-// ==============================================================
 uintptr_t g_il2cppTrueBase = 0;
 bool g_show_menu = true;
 
@@ -159,9 +147,6 @@ std::atomic<bool> g_match_enter_pending{false};
 static int g_segment_valid_streak = 0;
 static bool g_need_segment_gap_before_enter = false;
 
-// ==============================================================
-// 2. UI 状态与样式设置
-// ==============================================================
 bool g_isImGuiInit = false; 
 ImFont* g_mainFont = nullptr;
 float g_autoScale = 1.0f;
@@ -196,7 +181,6 @@ int g_hero_warn_thres = 3; float g_hero_warn_scale = 1.0f;
 int g_cached_view_width = 0, g_cached_view_height = 0;
 int g_gl_width = 0, g_gl_height = 0;
 
-// 连点器
 bool g_auto_clicker_enable = false;
 float g_click_interval_ms = 0.0f, g_touch_duration_ms = 0.0f;    
 struct ClickPos { float x = 540.0f; float y = 960.0f; };
@@ -212,7 +196,6 @@ float g_float_cp_x = -1.0f, g_float_cp_y = -1.0f, g_float_pd_x = -1.0f, g_float_
 float g_float_opp_x = -1.0f, g_float_opp_y = -1.0f, g_float_hex_x = -1.0f, g_float_hex_y = -1.0f, g_float_hw_x = -1.0f, g_float_hw_y = -1.0f;
 static bool g_apply_saved_float_pos = false;
 
-// 图像与线程
 std::atomic<bool> g_hero_images_ready{false}; int g_hero_image_count = 0;
 struct TexDecodedData { int w, h; unsigned char* pixels; };
 std::mutex g_TexMutex; std::unordered_map<int, GLuint> g_heroTextureCache;
@@ -227,11 +210,6 @@ struct MainThreadTasks {
 
 std::vector<uintptr_t> g_shop_slots; void* old_shop_listen = nullptr; std::atomic<bool> g_shop_listen_done{false};
 
-// ==============================================================
-// 3. 核心内存操作与配置系统 (包含安全读取修复)
-// ==============================================================
-
-// 【核心修复1】：使用 process_vm_readv 取代直接 memcpy，防止读取受保护内存导致进程崩溃
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
     if (addr < 0x10000000 || addr > 0x00007FFFFFFFFFFF) return false;
     struct iovec local[1];
@@ -270,6 +248,7 @@ std::string ReadIl2CppString(uintptr_t strAddr) {
     for (int i = 0; i < len; i++) { wstr += (wchar_t)(SAFE_READ_INT(strAddr, 0x14 + i * 2) & 0xFFFF); }
     return utf16_to_utf8(wstr);
 }
+
 std::vector<uintptr_t> GetStructArrayPointers(uintptr_t arrayAddr, int maxCount, int structSize, int ptrOffset) {
     std::vector<uintptr_t> res; if (!IsValidPtr(arrayAddr)) return res;
     int count = SAFE_READ_INT(arrayAddr, 0x18); if (count <= 0 || count > maxCount * 10) return res;
@@ -303,7 +282,6 @@ std::string GetConfigPath() {
     return "/data/local/tmp/jkt_offsets.txt";
 }
 
-// 【核心修复2】：捕获窗口坐标必须检查 g_isImGuiInit，否则引发段错误
 static void CaptureWindowPos(const char* name, float& x, float& y) {
     if (!g_isImGuiInit) return;
     ImGuiWindow* w = ImGui::FindWindowByName(name);
@@ -317,7 +295,7 @@ void SaveConfig() {
     CaptureWindowPos("##HextechFloat", g_float_hex_x, g_float_hex_y);
     std::ofstream out(GetConfigPath());
     if (out.is_open()) {
-        out << "# [完美UI版] 配置\n";
+        out << "# [金铲铲助手配置]\n";
         #define WRITE_OFF_32(name) out << #name << "=0x" << std::hex << g_off.name << "\n"
         WRITE_OFF_32(func_get_Instance); WRITE_OFF_32(addr2); WRITE_OFF_32(addr3); WRITE_OFF_32(addra); WRITE_OFF_32(segmentcsogame);
         WRITE_OFF_32(func_quit); WRITE_OFF_32(my_player_id); WRITE_OFF_32(segment_my_player_id); WRITE_OFF_32(next_opponents_list);
@@ -421,9 +399,6 @@ void LoadConfig() {
     if (!has_full) SaveConfig();
 }
 
-// ==============================================================
-// 4. 游戏解析逻辑
-// ==============================================================
 void ClearGameState() {
     g_poolHeroes.clear(); g_heroesByCost.clear(); g_players.clear(); g_next_opponents.clear();
     g_my_player_id = 0; g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
@@ -536,9 +511,45 @@ void ParseGameMemory() {
     }
 }
 
-// ==============================================================
-// 5. ImGui 字体与基础纹理解析
-// ==============================================================
+std::string FindChineseFontPath() {
+    const char* known_paths[] = {
+        "/system/fonts/NotoSansCJK-Regular.ttc",
+        "/system/fonts/NotoSansSC-Regular.otf",
+        "/system/fonts/NotoSansTC-Regular.otf",
+        "/system/fonts/DroidSansFallback.ttf",
+        "/system/fonts/SysSans-Hans-Regular.ttf",
+        "/system/fonts/Miui-Regular.ttf",
+        "/system/fonts/SourceHanSansCN-Regular.otf",
+        "/system/fonts/FZLanTingHei-R-GBK.ttf",
+        "/system/fonts/HarmonyOS_Sans_SC.ttf",
+        "/system/fonts/OplusSC-Regular.ttf",
+        "/system/fonts/VivoSansSC-Regular.ttf"
+    };
+    for (const char* path : known_paths) {
+        if (access(path, R_OK) == 0) return path;
+    }
+    DIR* dir = opendir("/system/fonts");
+    if (dir) {
+        struct dirent* ent;
+        while ((ent = readdir(dir)) != NULL) {
+            std::string name = ent->d_name;
+            if (name.find(".ttf") != std::string::npos || name.find(".otf") != std::string::npos || name.find(".ttc") != std::string::npos) {
+                if (name.find("SC") != std::string::npos || name.find("CJK") != std::string::npos ||
+                    name.find("Hans") != std::string::npos || name.find("Fallback") != std::string::npos ||
+                    name.find("Chinese") != std::string::npos) {
+                    std::string full_path = "/system/fonts/" + name;
+                    if (access(full_path.c_str(), R_OK) == 0) {
+                        closedir(dir);
+                        return full_path;
+                    }
+                }
+            }
+        }
+        closedir(dir);
+    }
+    return "";
+}
+
 void UpdateFontHD(bool force) {
     ImGuiIO& io = ImGui::GetIO();
     float screenH = (io.DisplaySize.y > 100.0f) ? io.DisplaySize.y : 2400.0f; 
@@ -549,16 +560,24 @@ void UpdateFontHD(bool force) {
     ImGui_ImplOpenGL3_DestroyDeviceObjects(); io.Fonts->Clear(); g_mainFont = nullptr; 
     ImFontConfig configMain; configMain.OversampleH = 2; configMain.OversampleV = 2; configMain.PixelSnapH = false; 
     
-    const char* fonts[] = { "/system/fonts/Miui-Regular.ttf", "/system/fonts/SysSans-Hans-Regular.ttf", "/system/fonts/NotoSansCJK-Regular.ttc", "/system/fonts/DroidSansFallback.ttf" };
-    bool loaded = false;
-    for(const char* path : fonts) {
-        if (access(path, R_OK) == 0) { 
-            g_mainFont = io.Fonts->AddFontFromFileTTF(path, targetSize * 1.5f, &configMain, io.Fonts->GetGlyphRangesChineseSimplifiedCommon()); 
-            if (g_mainFont) { g_mainFont->Scale = 1.0f / 1.5f; loaded = true; break; }
+    std::string fontPath = FindChineseFontPath();
+    if (!fontPath.empty()) {
+        g_mainFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), targetSize * 1.5f, &configMain, io.Fonts->GetGlyphRangesChineseSimplifiedCommon()); 
+        if (g_mainFont) { 
+            g_mainFont->Scale = 1.0f / 1.5f; 
+            LOGI("[+] Successfully loaded Chinese font: %s", fontPath.c_str());
         }
     }
-    if(!loaded || !g_mainFont) { g_mainFont = io.Fonts->AddFontDefault(); if (g_mainFont) g_mainFont->Scale = 1.0f / 1.5f; }
-    io.Fonts->Build(); ImGui_ImplOpenGL3_CreateDeviceObjects(); g_current_rendered_size = targetSize;
+    
+    if (!g_mainFont) { 
+        LOGI("[-] System Chinese font not found, falling back to default font");
+        g_mainFont = io.Fonts->AddFontDefault(); 
+        if (g_mainFont) g_mainFont->Scale = 1.0f / 1.5f; 
+    }
+    
+    io.Fonts->Build(); 
+    ImGui_ImplOpenGL3_CreateDeviceObjects(); 
+    g_current_rendered_size = targetSize;
 }
 
 inline int GetBaseHeroImageId(int rawHeroId) {
@@ -635,9 +654,6 @@ static void DrawHeroStars(ImDrawList* dl, ImVec2 center, int stars, float star_r
     for (int i = 0; i < stars; i++) { ImVec2 c(x0 + i * gap, center.y); DrawStarGlyph(dl, c, star_r + 3.0f, glow); DrawStarGlyph(dl, c, star_r + 1.8f, outline); DrawStarGlyph(dl, c, star_r, fill); }
 }
 
-// ==============================================================
-// 6. UI 主界面绘制与组件
-// ==============================================================
 struct FrostTheme { ImVec4 primary, primaryHover, accentGlow, orb1, orb2; const char* name; };
 static FrostTheme g_themes[4] = {
     { ImVec4(0.39f, 0.40f, 0.95f, 1.f), ImVec4(0.31f, 0.27f, 0.90f, 1.f), ImVec4(0.39f, 0.40f, 0.95f, 0.55f), ImVec4(0.39f, 0.40f, 0.95f, 0.22f), ImVec4(0.96f, 0.25f, 0.37f, 0.18f), (const char*)u8"冰晶" },
@@ -689,7 +705,7 @@ void DrawMainMenu() {
     static bool firstMenuOpen = true;
     if (firstMenuOpen) { ImGui::SetNextWindowPos(ImVec2(g_menuX, g_menuY), ImGuiCond_Always); ImGui::SetNextWindowSize(ImVec2(g_menuW, g_menuH), ImGuiCond_Always); ImGui::SetNextWindowCollapsed(g_menuCollapsed, ImGuiCond_Always); firstMenuOpen = false; }
     bool menu_visible = true;
-    if (ImGui::Begin((const char*)u8"金铲铲助手 Frosted Studio 完美终极版", &menu_visible, ImGuiWindowFlags_NoSavedSettings)) {
+    if (ImGui::Begin((const char*)u8"金铲铲助手 Frosted Studio 完美版", &menu_visible, ImGuiWindowFlags_NoSavedSettings)) {
         g_menuX = ImGui::GetWindowPos().x; g_menuY = ImGui::GetWindowPos().y; g_menuCollapsed = ImGui::IsWindowCollapsed();
         if (!menu_visible || g_menuCollapsed) { g_orb_x = g_menuX + 28.0f * g_autoScale; g_orb_y = g_menuY + 28.0f * g_autoScale; g_menu_orb = true; }
         if (!g_menuCollapsed) {
@@ -697,8 +713,7 @@ void DrawMainMenu() {
             if (std::abs(curW - g_menuW) > 5.0f || std::abs(curH - g_menuH) > 5.0f) { g_menuW = curW; g_menuH = curH; g_scale = std::clamp(curW / (560.0f * g_autoScale), 0.5f, 2.5f); }
             ImGui::SetWindowFontScale(g_scale);
             
-            // 简单排版，方便调用所有的开关
-            if(ImGui::Button((const char*)u8"保存所有配置")) SaveConfig();
+            if(ImGui::Button((const char*)u8"保存配置")) SaveConfig();
             ImGui::SameLine();
             if(ImGui::Button((const char*)u8"收起为悬浮球")) g_menu_orb = true;
             ImGui::Separator();
@@ -710,11 +725,11 @@ void DrawMainMenu() {
             ImGui::Checkbox((const char*)u8"显示对局信息", &g_win_playerdata); ImGui::SameLine();
             ImGui::Checkbox((const char*)u8"显示敌方棋盘", &g_opp_show_board);
             
-            ImGui::Checkbox((const char*)u8"开启屏幕连点器", &g_auto_clicker_enable);
+            ImGui::Checkbox((const char*)u8"开启连点器", &g_auto_clicker_enable);
             if (g_auto_clicker_enable) { g_clicker_running.store(true); } else { g_clicker_running.store(false); }
             
             ImGui::Separator();
-            ImGui::Text((const char*)u8"自动拿牌设置 (点击勾选):");
+            ImGui::Text((const char*)u8"自动拿牌设置:");
             for (int cost = 1; cost <= 5; cost++) {
                 ImGui::TextColored(CostColor(cost), "%d费: ", cost); ImGui::SameLine();
                 for (auto& ph : g_poolHeroes) {
@@ -736,7 +751,7 @@ void DrawCardPoolWindow() {
     if (!g_win_cardpool || !g_is_in_match.load(std::memory_order_relaxed)) return;
     if (!BeginContentFloatWindow("##CardPoolFloat", &g_win_cardpool, &g_float_cp_x, &g_float_cp_y, g_alpha_cp)) return;
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f)); ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    float sc = g_autoScale * g_cp_scale; float box_size = g_cp_box_size * sc; float spacing = 0.0f; int cols = std::max(1, g_cp_columns);
+    float sc = g_autoScale * g_cp_scale; float box_size = g_cp_box_size * sc; int cols = std::max(1, g_cp_columns);
     ImDrawList* dl = ImGui::GetWindowDrawList(); ImFont* font = ImGui::GetFont(); float font_size = ImGui::GetFontSize() * sc;
     ImVec2 base = ImGui::GetCursorScreenPos(); float y_off = 0.0f; float max_w = 0.0f;
     for (int cost = 1; cost <= 5; cost++) {
@@ -806,18 +821,6 @@ void DrawOpponentBoardWindow() {
     EndContentFloatWindow("opp_grip", &g_opp_scale);
 }
 
-// （其余不需要的悬浮窗留空声明以防止编译报错）
-void DrawMyHeroWarningWindow() {}
-void DrawHextechCapsule() {}
-void DrawQuitCapsule() {}
-void DrawLockCapsule() {}
-void DrawCardPoolCapsule() {}
-void DrawClickerCapsule() {}
-void DrawClickerFeedback() {}
-
-// ==============================================================
-// 7. OpenGL ES 与 EGL 渲染拦截 (最核心的底层逃逸技术)
-// ==============================================================
 unsigned int (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
 unsigned int (*old_eglSwapWithDamage)(EGLDisplay, EGLSurface, EGLint*, EGLint) = nullptr;
 void* (*old_eglGetProcAddress)(const char*) = nullptr;
@@ -831,7 +834,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
     if (g_gl_width <= 0 || g_gl_height <= 0) { g_gl_width = 1080; g_gl_height = 2400; }
 
-    // 备份 Unity 状态
+    // 备份 Unity 原始 OpenGL 状态
     GLint last_active_texture; glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
     glActiveTexture(GL_TEXTURE0);
     GLint last_program; glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
@@ -856,7 +859,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
         io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
         UpdateFontHD(true); 
         g_isImGuiInit = true;
-        LoadConfig(); // 【核心修复3】：把读取配置放在这里，彻底绝缘空指针闪退
+        LoadConfig(); 
     }
     if (g_needUpdateFontSafe) { UpdateFontHD(true); g_needUpdateFontSafe = false; }
     
@@ -864,7 +867,6 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
     io.DeltaTime = 1.0f / 60.0f;
 
-    // 执行游戏逻辑更新
     UpdateMatchState();
     if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire)) ClearGameState();
     if (g_is_in_match.load(std::memory_order_acquire) && (g_current_frame % 2 == 0)) ParseGameMemory();
@@ -872,7 +874,6 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     ProcessTextureQueue();
     ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
     
-    // 绘制所有界面
     DrawMainMenu(); 
     DrawCardPoolWindow(); 
     DrawPlayerDataWindow(); 
@@ -880,11 +881,10 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
 
     ImGui::Render();
     
-    // 强行把画板绑定回屏幕
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, g_gl_width, g_gl_height);
 
-    // ★ 核心防御点：中途注入时的强力洗版 (Force Reset GL State)
+    // 强力重置与洗版（保证中途注入菜单必定在最上层显示）
     glDisable(GL_DEPTH_TEST);   
     glDisable(GL_CULL_FACE);    
     glDisable(GL_SCISSOR_TEST); 
@@ -893,7 +893,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
 
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     
-    // 彻底恢复 Unity 状态
+    // 恢复 Unity 原始状态
     glUseProgram(last_program); glBindTexture(GL_TEXTURE_2D, last_texture); glActiveTexture(last_active_texture);
     glBindVertexArray(last_vertex_array); glBindBuffer(GL_ARRAY_BUFFER, last_array_buffer); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, last_element_array_buffer);
     glBindFramebuffer(GL_FRAMEBUFFER, last_fbo); glViewport(last_viewport[0], last_viewport[1], last_viewport[2], last_viewport[3]);
@@ -933,9 +933,6 @@ int hook_vkCreateInstance(void* pCreateInfo, void* pAllocator, void* pInstance) 
     LOGI("[!] Vulkan Blocked! Forcing OpenGL..."); return -9; 
 }
 
-// ==============================================================
-// 8. 游戏逻辑与触摸注入 (挂钩 Unity 层与 JNI 层)
-// ==============================================================
 uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x3, uintptr_t x4, uintptr_t x5, uintptr_t x6, uintptr_t x7) {
     if (g_is_in_match.load(std::memory_order_relaxed) && !g_shop_listen_done.load() && x0 != 0) {
         if (std::find(g_shop_slots.begin(), g_shop_slots.end(), x0) == g_shop_slots.end()) {
@@ -980,7 +977,6 @@ void* hook_SendWillRenderCanvases() {
     return nullptr;
 }
 
-// JNI 触摸注入逻辑
 JavaVM* g_jvm = nullptr; jobject g_view_obj = nullptr; jobject g_context = nullptr;
 void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
 
@@ -1081,8 +1077,6 @@ void FindAndHookHiddenJNI() {
         }
         if (found_func) break;
     }
-    
-    // 启动连点器后台线程
     std::thread(AutoClickerThread).detach();
 }
 
@@ -1093,11 +1087,7 @@ void* DelayedHookThread(void*) {
     return nullptr;
 }
 
-// ==============================================================
-// 9. 安装所有拦截防线
-// ==============================================================
 void* SetupThread(void*) {
-    // 1. 等待 libil2cpp.so 
     int retry_count = 0;
     while (g_il2cppTrueBase == 0 && retry_count < 60) {
         FILE *fp = fopen("/proc/self/maps", "r");
@@ -1105,7 +1095,7 @@ void* SetupThread(void*) {
         if (g_il2cppTrueBase == 0) { sleep(1); retry_count++; }
     }
     
-    // 2. 封杀 Vulkan 并动态拦截 EGL (★ 核心解法：利用内存遍历动态挂钩)
+    // 1. 封杀 Vulkan 并动态拦截 EGL
     void* vk_ptr = DobbySymbolResolver("libvulkan.so", "vkCreateInstance");
     if (!vk_ptr) { void* h = dlopen("libvulkan.so", RTLD_LAZY); if (h) vk_ptr = dlsym(h, "vkCreateInstance"); }
     if (vk_ptr) DobbyHook(vk_ptr, (void*)hook_vkCreateInstance, (void**)&old_vkCreateInstance);
@@ -1124,7 +1114,7 @@ void* SetupThread(void*) {
     if (!egl_damage_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_damage_ptr = dlsym(h, "eglSwapBuffersWithDamageKHR"); }
     if (egl_damage_ptr) DobbyHook(egl_damage_ptr, (void*)hook_eglSwapWithDamage, (void**)&old_eglSwapWithDamage);
 
-    // 3. Hook 游戏逻辑
+    // 2. Hook 游戏逻辑
     if (g_off.func_shop_listen != 0) DobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
     if (g_off.func_set_IsGameEnd != 0) DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
 
