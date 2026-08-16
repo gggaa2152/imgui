@@ -1600,19 +1600,27 @@ bool FrostSidebarBtn(const char* label, bool selected, int id) {
 
 void SetupImGuiStyle() { ApplyFrostedTheme(); }
 
-std::vector<std::string> GetCandidateFontPaths() {
-    std::vector<std::string> paths = {
-        "/system/fonts/DroidSansFallback.ttf",          // 标准 TrueType，stb_truetype 100% 完美支持（无问号）
-        "/system/fonts/NotoSansSC-Regular.ttf",
-        "/system/fonts/SysSans-Hans-Regular.ttf",
-        "/system/fonts/Miui-Regular.ttf",
-        "/system/fonts/SourceHanSansCN-Regular.ttf",
-        "/system/fonts/HarmonyOS_Sans_SC.ttf",
-        "/system/fonts/OplusSC-Regular.ttf",
-        "/system/fonts/VivoSansSC-Regular.ttf",
-        "/system/fonts/NotoSansCJK-Regular.ttc",
-        "/system/fonts/NotoSansSC-Regular.otf",
-        "/system/fonts/NotoSansSC-VF.ttf"
+struct FontCandidate {
+    std::string path;
+    int fontNo;
+};
+
+std::vector<FontCandidate> GetCandidateFonts() {
+    std::vector<FontCandidate> candidates = {
+        {"/system/fonts/NotoSansCJK-Regular.ttc", 2},  // Android / 模拟器标准 TTC (索引 2 为简体中文 SC)
+        {"/system/fonts/NotoSansCJK-Regular.ttc", 0},
+        {"/system/fonts/DroidSansFallback.ttf", 0},
+        {"/system/fonts/NotoSansSC-Regular.otf", 0},
+        {"/system/fonts/NotoSansSC-Regular.ttf", 0},
+        {"/system/fonts/NotoSansHans-Regular.otf", 0},
+        {"/system/fonts/NotoSansHans-Regular.ttf", 0},
+        {"/system/fonts/SysSans-Hans-Regular.ttf", 0},
+        {"/system/fonts/Miui-Regular.ttf", 0},
+        {"/system/fonts/SourceHanSansCN-Regular.otf", 0},
+        {"/system/fonts/SourceHanSansCN-Regular.ttf", 0},
+        {"/system/fonts/HarmonyOS_Sans_SC.ttf", 0},
+        {"/system/fonts/OplusSC-Regular.ttf", 0},
+        {"/system/fonts/VivoSansSC-Regular.ttf", 0}
     };
     
     DIR* dir = opendir("/system/fonts");
@@ -1620,20 +1628,27 @@ std::vector<std::string> GetCandidateFontPaths() {
         struct dirent* ent;
         while ((ent = readdir(dir)) != NULL) {
             std::string name = ent->d_name;
-            if (name.find("Fallback") != std::string::npos ||
-                name.find("Hans") != std::string::npos ||
-                name.find("SC") != std::string::npos ||
-                name.find("CJK") != std::string::npos ||
-                name.find("Chinese") != std::string::npos) {
-                std::string full_path = "/system/fonts/" + name;
-                if (std::find(paths.begin(), paths.end(), full_path) == paths.end()) {
-                    paths.push_back(full_path);
+            if (name.find(".ttf") != std::string::npos || name.find(".otf") != std::string::npos || name.find(".ttc") != std::string::npos) {
+                if (name.find("SC") != std::string::npos || name.find("CJK") != std::string::npos ||
+                    name.find("Hans") != std::string::npos || name.find("Fallback") != std::string::npos ||
+                    name.find("Chinese") != std::string::npos) {
+                    std::string full_path = "/system/fonts/" + name;
+                    bool exists = false;
+                    for (const auto& c : candidates) {
+                        if (c.path == full_path) { exists = true; break; }
+                    }
+                    if (!exists) {
+                        candidates.push_back({full_path, 0});
+                        if (name.find(".ttc") != std::string::npos) {
+                            candidates.push_back({full_path, 2});
+                        }
+                    }
                 }
             }
         }
         closedir(dir);
     }
-    return paths;
+    return candidates;
 }
 
 void UpdateFontHD(bool force = false) {
@@ -1643,22 +1658,25 @@ void UpdateFontHD(bool force = false) {
     float targetSize = std::clamp(22.0f * g_autoScale, 18.0f, 48.0f);
     if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f && g_mainFont != nullptr) return;
 
+    if (g_isImGuiInit) {
+        ImGui_ImplOpenGL3_DestroyDeviceObjects();
+    }
+
     io.Fonts->Clear();
     g_mainFont = nullptr;
 
-    // 采用 1:1 采样率以确保完整收录 7000+ 常用汉字与符号，不爆显存
     ImFontConfig configMain;
     configMain.OversampleH = 1;
     configMain.OversampleV = 1;
     configMain.PixelSnapH = true;
 
-    auto candidatePaths = GetCandidateFontPaths();
-    for (const auto& path : candidatePaths) {
-        if (access(path.c_str(), R_OK) == 0) {
-            // 使用 ChineseFull 覆盖全部汉字与常用标点符号，杜绝任何生僻字/符号出现问号
-            g_mainFont = io.Fonts->AddFontFromFileTTF(path.c_str(), targetSize, &configMain, io.Fonts->GetGlyphRangesChineseFull());
+    auto candidates = GetCandidateFonts();
+    for (const auto& c : candidates) {
+        if (access(c.path.c_str(), R_OK) == 0) {
+            configMain.FontNo = c.fontNo;
+            g_mainFont = io.Fonts->AddFontFromFileTTF(c.path.c_str(), targetSize, &configMain, io.Fonts->GetGlyphRangesChineseFull());
             if (g_mainFont) {
-                LOGI("[+] Loaded Chinese Font successfully from: %s (size: %.1f)", path.c_str(), targetSize);
+                LOGI("[+] Loaded Chinese Font successfully from: %s (FontNo: %d, size: %.1f)", c.path.c_str(), c.fontNo, targetSize);
                 break;
             }
         }
@@ -1674,6 +1692,9 @@ void UpdateFontHD(bool force = false) {
     }
 
     io.Fonts->Build();
+    if (g_isImGuiInit) {
+        ImGui_ImplOpenGL3_CreateDeviceObjects();
+    }
     g_current_rendered_size = targetSize;
 }
 
@@ -3134,10 +3155,10 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
         const char* glsl_ver = "#version 300 es";
         if (gl_ver && strstr(gl_ver, "OpenGL ES 2.")) glsl_ver = "#version 100";
 
-        ImGui_ImplOpenGL3_Init(glsl_ver);
         io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
         UpdateFontHD(true);
         SetupImGuiStyle();
+        ImGui_ImplOpenGL3_Init(glsl_ver);
         g_isImGuiInit = true;
         LOGI("[+] GLES ImGui Initialized. Resolution: %dx%d", g_gl_width, g_gl_height);
     }
