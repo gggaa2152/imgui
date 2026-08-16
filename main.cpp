@@ -1697,7 +1697,7 @@ void UpdateFontHD(bool force = false) {
     io.Fonts->Build();
     ImGui_ImplOpenGL3_CreateDeviceObjects();
     g_current_rendered_size = targetSize;
-    LOGI("[+] Font atlas built and uploaded to GPU. TexWidth=%d TexHeight=%d", io.Fonts->TexWidth, io.Fonts->TexHeight);
+    LOGI("[+] Font atlas built and uploaded to GPU.");
 }
 
 void DrawOffsetAdjuster(const char* label, uint32_t* value) {
