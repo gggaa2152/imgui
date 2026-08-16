@@ -2336,9 +2336,9 @@ void DrawMainMenu() {
 
     static bool firstMenuOpen = true;
     if (firstMenuOpen) {
-        ImGui::SetNextWindowPos(ImVec2(g_menuX, g_menuY), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(g_menuW, g_menuH), ImGuiCond_Always);
-        ImGui::SetNextWindowCollapsed(g_menuCollapsed, ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(80.0f * g_autoScale, 80.0f * g_autoScale), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(600.0f * g_autoScale, 450.0f * g_autoScale), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
         firstMenuOpen = false;
     }
 
@@ -3104,7 +3104,11 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
     eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
-    if (g_gl_width <= 0 || g_gl_height <= 0) return;
+    if (g_gl_width <= 0 || g_gl_height <= 0) { g_gl_width = 1080; g_gl_height = 2400; }
+
+    if (g_current_frame % 120 == 0) {
+        LOGI("[*] GLES Render Heartbeat | Frame: %d | Resolution: %dx%d", g_current_frame, g_gl_width, g_gl_height);
+    }
 
     // 备份 OpenGL 状态（避免查询不支持的 GLES 枚举）
     GLint last_active_texture = 0; glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
@@ -3206,9 +3210,7 @@ unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     static bool in_render = false;
     if (!in_render) {
         in_render = true;
-        if (display != EGL_NO_DISPLAY && surface != EGL_NO_SURFACE && eglGetCurrentContext() != EGL_NO_CONTEXT) {
-            RenderImGui_Core_GLES(display, surface);
-        }
+        RenderImGui_Core_GLES(display, surface);
         in_render = false;
     }
     if (old_eglSwap) return old_eglSwap(display, surface);
