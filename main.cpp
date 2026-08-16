@@ -3104,23 +3104,23 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
     eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
-    if (g_gl_width <= 0 || g_gl_height <= 0) { g_gl_width = 1080; g_gl_height = 2400; }
+    if (g_gl_width <= 0 || g_gl_height <= 0) return;
 
     // 备份 OpenGL 状态
-    GLint last_active_texture; glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
+    GLint last_active_texture = 0; glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
     glActiveTexture(GL_TEXTURE0);
-    GLint last_program; glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
-    GLint last_texture; glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
-    GLint last_array_buffer; glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
-    GLint last_element_array_buffer; glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
-    GLint last_vertex_array; glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
-    GLint last_viewport[4]; glGetIntegerv(GL_VIEWPORT, last_viewport);
-    GLint last_scissor_box[4]; glGetIntegerv(GL_SCISSOR_BOX, last_scissor_box);
+    GLint last_program = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
+    GLint last_texture = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
+    GLint last_array_buffer = 0; glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
+    GLint last_element_array_buffer = 0; glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
+    GLint last_vertex_array = 0; glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
+    GLint last_viewport[4] = {0}; glGetIntegerv(GL_VIEWPORT, last_viewport);
+    GLint last_scissor_box[4] = {0}; glGetIntegerv(GL_SCISSOR_BOX, last_scissor_box);
     GLboolean last_enable_blend = glIsEnabled(GL_BLEND);
     GLboolean last_enable_cull_face = glIsEnabled(GL_CULL_FACE);
     GLboolean last_enable_depth_test = glIsEnabled(GL_DEPTH_TEST);
     GLboolean last_enable_scissor_test = glIsEnabled(GL_SCISSOR_TEST);
-    GLint last_fbo; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
+    GLint last_fbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
 
     if (!g_isImGuiInit) {
         ImGui::CreateContext();
@@ -3144,13 +3144,16 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
     io.DeltaTime = 1.0f / 60.0f;
 
-    UpdateMatchState();
+    // 预留前 60 帧缓冲，等待游戏引擎完全加载 il2cpp 单例后再开始读取游戏数据，防止启动加载期空指针闪退
+    if (g_current_frame > 60 && g_il2cppTrueBase != 0) {
+        UpdateMatchState();
 
-    if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire))
-        ClearGameState();
+        if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire))
+            ClearGameState();
 
-    if (g_is_in_match.load(std::memory_order_acquire) && (g_current_frame % 2 == 0))
-        ParseGameMemory();
+        if (g_is_in_match.load(std::memory_order_acquire) && (g_current_frame % 2 == 0))
+            ParseGameMemory();
+    }
 
     ProcessTextureQueue();
 
@@ -3202,18 +3205,25 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 }
 
 unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
-    RenderImGui_Core_GLES(display, surface);
+    static bool in_render = false;
+    if (!in_render) {
+        in_render = true;
+        if (display != EGL_NO_DISPLAY && surface != EGL_NO_SURFACE && eglGetCurrentContext() != EGL_NO_CONTEXT) {
+            RenderImGui_Core_GLES(display, surface);
+        }
+        in_render = false;
+    }
     if (old_eglSwap) return old_eglSwap(display, surface);
     return 1;
 }
 
 void* hook_eglGetProcAddress(const char* procname) {
-    void* real_addr = old_eglGetProcAddress ? old_eglGetProcAddress(procname) : nullptr;
-    if (procname && (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0)) {
-        if (!old_eglSwap && real_addr) old_eglSwap = (unsigned int (*)(EGLDisplay, EGLSurface))real_addr;
+    if (!procname) return nullptr;
+    if (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) {
         return (void*)hook_eglSwap;
     }
-    return real_addr;
+    if (old_eglGetProcAddress) return old_eglGetProcAddress(procname);
+    return nullptr;
 }
 
 VkResult hook_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) {
@@ -3323,18 +3333,18 @@ void* SetupThread(void*) {
     }
 
     // 3. 尝试对 OpenGL / EGL 通道进行挂钩
-    void* getproc_ptr = DobbySymbolResolver("libEGL.so", "eglGetProcAddress");
-    if (!getproc_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) getproc_ptr = dlsym(h, "eglGetProcAddress"); }
-    if (getproc_ptr) {
-        DobbyHook(getproc_ptr, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
-        LOGI("[+] EGL GetProcAddress Hook Set.");
-    }
-
     void* egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
     if (!egl_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_ptr = dlsym(h, "eglSwapBuffers"); }
     if (egl_ptr) {
         DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
         LOGI("[+] EGL SwapBuffers Hook Set.");
+    }
+
+    void* getproc_ptr = DobbySymbolResolver("libEGL.so", "eglGetProcAddress");
+    if (!getproc_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) getproc_ptr = dlsym(h, "eglGetProcAddress"); }
+    if (getproc_ptr) {
+        DobbyHook(getproc_ptr, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
+        LOGI("[+] EGL GetProcAddress Hook Set.");
     }
 
     // 4. 3 秒后寻找 libunity.so 并 Hook nativeInjectEvent，绑定手指/鼠标输入与启动连点器
