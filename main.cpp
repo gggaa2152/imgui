@@ -1612,20 +1612,13 @@ ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size
     cfg.FontNo = fontNo;
     ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
     if (f) {
-        // Verify the font actually has Chinese glyphs by checking if it built OK
         if (io.Fonts->Build()) {
-            // Check if the Chinese character '中' (U+4E2D) has a real glyph (not the fallback '?')
-            const ImFontGlyph* g = f->FindGlyph((ImWchar)0x4E2D);
-            if (g && g->Codepoint == 0x4E2D && (g->X1 - g->X0) > 1.0f) {
-                LOGI("[+] Font VERIFIED with Chinese glyphs: %s (FontNo: %d)", path, fontNo);
-                return f;
-            }
-            LOGI("[!] Font loaded but has NO Chinese glyphs: %s (FontNo: %d)", path, fontNo);
-        } else {
-            LOGI("[!] Font atlas Build() failed: %s (FontNo: %d)", path, fontNo);
+            LOGI("[+] Font OK: %s (FontNo: %d)", path, fontNo);
+            return f;
         }
+        LOGI("[!] Font Build() failed: %s (FontNo: %d)", path, fontNo);
     } else {
-        LOGI("[!] AddFontFromFileTTF returned NULL: %s (FontNo: %d)", path, fontNo);
+        LOGI("[!] AddFontFromFileTTF NULL: %s (FontNo: %d)", path, fontNo);
     }
     io.Fonts->Clear();
     return nullptr;
