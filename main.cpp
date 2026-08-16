@@ -1601,55 +1601,34 @@ bool FrostSidebarBtn(const char* label, bool selected, int id) {
 
 void SetupImGuiStyle() { ApplyFrostedTheme(); }
 
-struct FontCandidate {
-    std::string path;
-    int fontNo;
-};
-
-std::vector<FontCandidate> GetCandidateFonts() {
-    std::vector<FontCandidate> candidates = {
-        {"/system/fonts/NotoSansCJK-Regular.ttc", 2},  // Android / 模拟器标准 TTC (索引 2 为简体中文 SC)
-        {"/system/fonts/NotoSansCJK-Regular.ttc", 0},
-        {"/system/fonts/DroidSansFallback.ttf", 0},
-        {"/system/fonts/NotoSansSC-Regular.otf", 0},
-        {"/system/fonts/NotoSansSC-Regular.ttf", 0},
-        {"/system/fonts/NotoSansHans-Regular.otf", 0},
-        {"/system/fonts/NotoSansHans-Regular.ttf", 0},
-        {"/system/fonts/SysSans-Hans-Regular.ttf", 0},
-        {"/system/fonts/Miui-Regular.ttf", 0},
-        {"/system/fonts/SourceHanSansCN-Regular.otf", 0},
-        {"/system/fonts/SourceHanSansCN-Regular.ttf", 0},
-        {"/system/fonts/HarmonyOS_Sans_SC.ttf", 0},
-        {"/system/fonts/OplusSC-Regular.ttf", 0},
-        {"/system/fonts/VivoSansSC-Regular.ttf", 0}
-    };
-    
-    DIR* dir = opendir("/system/fonts");
-    if (dir) {
-        struct dirent* ent;
-        while ((ent = readdir(dir)) != NULL) {
-            std::string name = ent->d_name;
-            if (name.find(".ttf") != std::string::npos || name.find(".otf") != std::string::npos || name.find(".ttc") != std::string::npos) {
-                if (name.find("SC") != std::string::npos || name.find("CJK") != std::string::npos ||
-                    name.find("Hans") != std::string::npos || name.find("Fallback") != std::string::npos ||
-                    name.find("Chinese") != std::string::npos) {
-                    std::string full_path = "/system/fonts/" + name;
-                    bool exists = false;
-                    for (const auto& c : candidates) {
-                        if (c.path == full_path) { exists = true; break; }
-                    }
-                    if (!exists) {
-                        candidates.push_back({full_path, 0});
-                        if (name.find(".ttc") != std::string::npos) {
-                            candidates.push_back({full_path, 2});
-                        }
-                    }
-                }
+// 暴力扫描 /system/fonts/ 目录，尝试所有字体文件直到找到能加载中文的
+// 原因: MuMu 12 (Android 12+) 的中文字体都是 CFF/OTF 格式，stb_truetype 只支持 TrueType 轮廓
+// 所以需要暴力尝试所有 .ttf 文件，找到真正的 TrueType 格式字体
+ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size) {
+    ImFontConfig cfg;
+    cfg.OversampleH = 1;
+    cfg.OversampleV = 1;
+    cfg.PixelSnapH = true;
+    cfg.FontNo = fontNo;
+    ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+    if (f) {
+        // Verify the font actually has Chinese glyphs by checking if it built OK
+        if (io.Fonts->Build()) {
+            // Check if the Chinese character '中' (U+4E2D) has a real glyph (not the fallback '?')
+            const ImFontGlyph* g = f->FindGlyph((ImWchar)0x4E2D);
+            if (g && g->Codepoint == 0x4E2D && (g->X1 - g->X0) > 1.0f) {
+                LOGI("[+] Font VERIFIED with Chinese glyphs: %s (FontNo: %d)", path, fontNo);
+                return f;
             }
+            LOGI("[!] Font loaded but has NO Chinese glyphs: %s (FontNo: %d)", path, fontNo);
+        } else {
+            LOGI("[!] Font atlas Build() failed: %s (FontNo: %d)", path, fontNo);
         }
-        closedir(dir);
+    } else {
+        LOGI("[!] AddFontFromFileTTF returned NULL: %s (FontNo: %d)", path, fontNo);
     }
-    return candidates;
+    io.Fonts->Clear();
+    return nullptr;
 }
 
 void UpdateFontHD(bool force = false) {
@@ -1660,44 +1639,124 @@ void UpdateFontHD(bool force = false) {
     if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f && g_mainFont != nullptr) return;
 
     ImGui_ImplOpenGL3_DestroyDeviceObjects();
-
     io.Fonts->Clear();
     g_mainFont = nullptr;
 
-    ImFontConfig configMain;
-    configMain.OversampleH = 1;
-    configMain.OversampleV = 1;
-    configMain.PixelSnapH = true;
+    // Phase 1: 优先尝试已知的纯 TrueType 中文字体路径
+    const char* priority_paths[] = {
+        "/system/fonts/DroidSansFallback.ttf",
+        "/system/fonts/DroidSansFallbackFull.ttf",
+        "/system/fonts/NotoSansSC-Regular.ttf",
+        "/system/fonts/NotoSansHans-Regular.ttf",
+        "/system/fonts/SysSans-Hans-Regular.ttf",
+        "/system/fonts/Miui-Regular.ttf",
+        "/system/fonts/SourceHanSansCN-Regular.ttf",
+        "/system/fonts/HarmonyOS_Sans_SC.ttf",
+        "/system/fonts/OplusSC-Regular.ttf",
+        "/system/fonts/VivoSansSC-Regular.ttf",
+    };
 
-    auto candidates = GetCandidateFonts();
-    for (const auto& c : candidates) {
-        if (access(c.path.c_str(), R_OK) != 0) continue;
-        LOGI("[*] Trying font: %s (FontNo: %d)", c.path.c_str(), c.fontNo);
-        ImFontConfig cfg = configMain;
-        cfg.FontNo = c.fontNo;
-        g_mainFont = io.Fonts->AddFontFromFileTTF(c.path.c_str(), targetSize, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-        if (g_mainFont) {
-            LOGI("[+] Loaded Chinese Font OK: %s (FontNo: %d, size: %.1f)", c.path.c_str(), c.fontNo, targetSize);
-            break;
-        } else {
-            LOGI("[!] Font FAILED to load: %s (FontNo: %d)", c.path.c_str(), c.fontNo);
-            io.Fonts->Clear();
+    for (const char* path : priority_paths) {
+        if (access(path, R_OK) != 0) continue;
+        LOGI("[*] Phase1 trying: %s", path);
+        g_mainFont = TryLoadChineseFont(io, path, 0, targetSize);
+        if (g_mainFont) goto font_done;
+    }
+
+    // Phase 2: 尝试 TTC 集合字体（索引 0~4）
+    {
+        const char* ttc_paths[] = {
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/NotoSerifCJK-Regular.ttc",
+        };
+        for (const char* path : ttc_paths) {
+            if (access(path, R_OK) != 0) continue;
+            for (int idx = 0; idx < 5; idx++) {
+                LOGI("[*] Phase2 trying TTC: %s (FontNo: %d)", path, idx);
+                g_mainFont = TryLoadChineseFont(io, path, idx, targetSize);
+                if (g_mainFont) goto font_done;
+            }
         }
     }
 
-    if (!g_mainFont) {
-        LOGI("[!] All Chinese font candidates failed, falling back to default ASCII font.");
-        g_mainFont = io.Fonts->AddFontDefault();
+    // Phase 3: 暴力扫描 /system/fonts/ 目录，尝试所有 .ttf 文件
+    {
+        DIR* dir = opendir("/system/fonts");
+        if (dir) {
+            LOGI("[*] Phase3: Scanning /system/fonts/ for ANY TrueType font with Chinese glyphs...");
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                std::string name = ent->d_name;
+                // 只尝试 .ttf 文件（.otf 是 CFF 格式，stb_truetype 不支持）
+                if (name.size() < 5) continue;
+                std::string ext = name.substr(name.size() - 4);
+                if (ext != ".ttf" && ext != ".TTF") continue;
+                std::string full = "/system/fonts/" + name;
+                if (access(full.c_str(), R_OK) != 0) continue;
+                LOGI("[*] Phase3 trying: %s", full.c_str());
+                g_mainFont = TryLoadChineseFont(io, full.c_str(), 0, targetSize);
+                if (g_mainFont) { closedir(dir); goto font_done; }
+            }
+            closedir(dir);
+        }
+
+        // 也扫描 /product/fonts/
+        dir = opendir("/product/fonts");
+        if (dir) {
+            LOGI("[*] Phase3: Scanning /product/fonts/...");
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                std::string name = ent->d_name;
+                if (name.size() < 5) continue;
+                std::string ext = name.substr(name.size() - 4);
+                if (ext != ".ttf" && ext != ".TTF") continue;
+                std::string full = "/product/fonts/" + name;
+                if (access(full.c_str(), R_OK) != 0) continue;
+                LOGI("[*] Phase3 trying: %s", full.c_str());
+                g_mainFont = TryLoadChineseFont(io, full.c_str(), 0, targetSize);
+                if (g_mainFont) { closedir(dir); goto font_done; }
+            }
+            closedir(dir);
+        }
     }
 
+    // Phase 4: 尝试所有 .ttc 文件的所有子字体索引
+    {
+        DIR* dir = opendir("/system/fonts");
+        if (dir) {
+            LOGI("[*] Phase4: Trying ALL .ttc files with indices 0-6...");
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                std::string name = ent->d_name;
+                if (name.size() < 5) continue;
+                std::string ext = name.substr(name.size() - 4);
+                if (ext != ".ttc" && ext != ".TTC") continue;
+                std::string full = "/system/fonts/" + name;
+                if (access(full.c_str(), R_OK) != 0) continue;
+                for (int idx = 0; idx < 7; idx++) {
+                    LOGI("[*] Phase4 trying: %s (FontNo: %d)", full.c_str(), idx);
+                    g_mainFont = TryLoadChineseFont(io, full.c_str(), idx, targetSize);
+                    if (g_mainFont) { closedir(dir); goto font_done; }
+                }
+            }
+            closedir(dir);
+        }
+    }
+
+    // Phase 5: 完全失败，使用默认英文字体
+    LOGI("[!] ALL FONT PHASES FAILED. No TrueType Chinese font found on this system.");
+    LOGI("[!] Falling back to default ASCII font. Chinese will show as '?'.");
+    g_mainFont = io.Fonts->AddFontDefault();
+    io.Fonts->Build();
+
+font_done:
     if (g_mainFont) {
         io.FontDefault = g_mainFont;
     }
 
-    io.Fonts->Build();
     ImGui_ImplOpenGL3_CreateDeviceObjects();
     g_current_rendered_size = targetSize;
-    LOGI("[+] Font atlas built and uploaded to GPU.");
+    LOGI("[+] Font setup complete. g_mainFont=%p", (void*)g_mainFont);
 }
 
 void DrawOffsetAdjuster(const char* label, uint32_t* value) {
