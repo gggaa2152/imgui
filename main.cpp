@@ -189,6 +189,7 @@ static int g_segment_valid_streak = 0;
 static bool g_need_segment_gap_before_enter = false;
 
 // UI State & Styles
+bool g_isImGuiInit = false;
 ImFont* g_mainFont = nullptr;
 float g_autoScale = 1.0f;
 float g_current_rendered_size = 0.0f;
@@ -2806,7 +2807,6 @@ void DrawMainMenu() {
     ImGui::End();
 }
 
-bool g_isImGuiInit = false;
 int g_current_frame = 0;
 std::atomic<bool> g_engine_rendering{false};
 std::atomic<int> g_active_renderer{0}; // 0=未知, 1=OpenGL ES, 2=Vulkan
