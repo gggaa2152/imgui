@@ -50,7 +50,9 @@ void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
 
 std::string FindChineseFontPath() {
     const char* known_paths[] = {
+        "/system/fonts/NotoSansSC-VF.ttf",          // Android 12/13/14 可变中文字体 (如 MuMu 12)
         "/system/fonts/NotoSansSC-Regular.otf",
+        "/system/fonts/NotoSansSC-Regular.ttf",
         "/system/fonts/DroidSansFallback.ttf",
         "/system/fonts/SysSans-Hans-Regular.ttf",
         "/system/fonts/Miui-Regular.ttf",
@@ -96,25 +98,24 @@ void UpdateFontHD(bool force = false) {
     io.Fonts->Clear();
     g_mainFont = nullptr;
 
+    // 禁用过高的采样率，控制字体纹理图集在 2048x2048 以内，防止 GLES 纹理溢出
     ImFontConfig configMain;
-    configMain.OversampleH = 2;
-    configMain.OversampleV = 2;
-    configMain.PixelSnapH = false;
+    configMain.OversampleH = 1;
+    configMain.OversampleV = 1;
+    configMain.PixelSnapH = true;
 
     std::string fontPath = FindChineseFontPath();
     if (!fontPath.empty()) {
-        // 使用 GetGlyphRangesChineseFull() 全量中文字库，避免生僻字显示为问号
-        g_mainFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), targetSize * 1.5f, &configMain, io.Fonts->GetGlyphRangesChineseFull());
+        // 改用常用简体中文字库，完美平衡汉字覆盖率与纹理内存占用
+        g_mainFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), targetSize, &configMain, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
         if (g_mainFont) {
-            g_mainFont->Scale = 1.0f / 1.5f;
-            LOGI("[+] Loaded Chinese Font from: %s", fontPath.c_str());
+            LOGI("[+] Loaded Chinese Font successfully from: %s", fontPath.c_str());
         }
     }
 
     if (!g_mainFont) {
-        LOGI("[!] Warning: Chinese font not found, falling back to default font.");
+        LOGI("[!] Warning: Chinese font file failed to build, falling back to default font.");
         g_mainFont = io.Fonts->AddFontDefault();
-        if (g_mainFont) g_mainFont->Scale = 1.0f / 1.5f;
     }
 
     io.Fonts->Build();
