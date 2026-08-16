@@ -1659,9 +1659,7 @@ void UpdateFontHD(bool force = false) {
     float targetSize = std::clamp(22.0f * g_autoScale, 18.0f, 48.0f);
     if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f && g_mainFont != nullptr) return;
 
-    if (g_isImGuiInit) {
-        ImGui_ImplOpenGL3_DestroyDeviceObjects();
-    }
+    ImGui_ImplOpenGL3_DestroyDeviceObjects();
 
     io.Fonts->Clear();
     g_mainFont = nullptr;
@@ -1673,18 +1671,22 @@ void UpdateFontHD(bool force = false) {
 
     auto candidates = GetCandidateFonts();
     for (const auto& c : candidates) {
-        if (access(c.path.c_str(), R_OK) == 0) {
-            configMain.FontNo = c.fontNo;
-            g_mainFont = io.Fonts->AddFontFromFileTTF(c.path.c_str(), targetSize, &configMain, io.Fonts->GetGlyphRangesChineseFull());
-            if (g_mainFont) {
-                LOGI("[+] Loaded Chinese Font successfully from: %s (FontNo: %d, size: %.1f)", c.path.c_str(), c.fontNo, targetSize);
-                break;
-            }
+        if (access(c.path.c_str(), R_OK) != 0) continue;
+        LOGI("[*] Trying font: %s (FontNo: %d)", c.path.c_str(), c.fontNo);
+        ImFontConfig cfg = configMain;
+        cfg.FontNo = c.fontNo;
+        g_mainFont = io.Fonts->AddFontFromFileTTF(c.path.c_str(), targetSize, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+        if (g_mainFont) {
+            LOGI("[+] Loaded Chinese Font OK: %s (FontNo: %d, size: %.1f)", c.path.c_str(), c.fontNo, targetSize);
+            break;
+        } else {
+            LOGI("[!] Font FAILED to load: %s (FontNo: %d)", c.path.c_str(), c.fontNo);
+            io.Fonts->Clear();
         }
     }
 
     if (!g_mainFont) {
-        LOGI("[!] Warning: Chinese TTF font file could not be parsed, falling back to default ASCII font.");
+        LOGI("[!] All Chinese font candidates failed, falling back to default ASCII font.");
         g_mainFont = io.Fonts->AddFontDefault();
     }
 
@@ -1693,10 +1695,9 @@ void UpdateFontHD(bool force = false) {
     }
 
     io.Fonts->Build();
-    if (g_isImGuiInit) {
-        ImGui_ImplOpenGL3_CreateDeviceObjects();
-    }
+    ImGui_ImplOpenGL3_CreateDeviceObjects();
     g_current_rendered_size = targetSize;
+    LOGI("[+] Font atlas built and uploaded to GPU. TexWidth=%d TexHeight=%d", io.Fonts->TexWidth, io.Fonts->TexHeight);
 }
 
 void DrawOffsetAdjuster(const char* label, uint32_t* value) {
@@ -3155,10 +3156,10 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
         const char* glsl_ver = "#version 300 es";
         if (gl_ver && strstr(gl_ver, "OpenGL ES 2.")) glsl_ver = "#version 100";
 
-        io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
-        UpdateFontHD(true);
-        SetupImGuiStyle();
         ImGui_ImplOpenGL3_Init(glsl_ver);
+        io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
+        SetupImGuiStyle();
+        UpdateFontHD(true);
         g_isImGuiInit = true;
         LOGI("[+] GLES ImGui Initialized. Resolution: %dx%d", g_gl_width, g_gl_height);
     }
