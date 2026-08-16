@@ -34,6 +34,8 @@
 #include <vulkan/vulkan.h>
 #include <jni.h>
 #include "dobby.h"
+#include <zlib.h>
+#include "chinese_font_data.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "JKInternal", __VA_ARGS__)
 
@@ -1601,29 +1603,6 @@ bool FrostSidebarBtn(const char* label, bool selected, int id) {
 
 void SetupImGuiStyle() { ApplyFrostedTheme(); }
 
-// 暴力扫描 /system/fonts/ 目录，尝试所有字体文件直到找到能加载中文的
-// 原因: MuMu 12 (Android 12+) 的中文字体都是 CFF/OTF 格式，stb_truetype 只支持 TrueType 轮廓
-// 所以需要暴力尝试所有 .ttf 文件，找到真正的 TrueType 格式字体
-ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size) {
-    ImFontConfig cfg;
-    cfg.OversampleH = 1;
-    cfg.OversampleV = 1;
-    cfg.PixelSnapH = true;
-    cfg.FontNo = fontNo;
-    ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-    if (f) {
-        if (io.Fonts->Build()) {
-            LOGI("[+] Font OK: %s (FontNo: %d)", path, fontNo);
-            return f;
-        }
-        LOGI("[!] Font Build() failed: %s (FontNo: %d)", path, fontNo);
-    } else {
-        LOGI("[!] AddFontFromFileTTF NULL: %s (FontNo: %d)", path, fontNo);
-    }
-    io.Fonts->Clear();
-    return nullptr;
-}
-
 void UpdateFontHD(bool force = false) {
     ImGuiIO& io = ImGui::GetIO();
     float screenH = (io.DisplaySize.y > 100.0f) ? io.DisplaySize.y : 2400.0f;
@@ -1635,122 +1614,63 @@ void UpdateFontHD(bool force = false) {
     io.Fonts->Clear();
     g_mainFont = nullptr;
 
-    // Phase 1: 优先尝试已知的纯 TrueType 中文字体路径
-    const char* priority_paths[] = {
-        "/system/fonts/DroidSansFallback.ttf",
-        "/system/fonts/DroidSansFallbackFull.ttf",
-        "/system/fonts/NotoSansSC-Regular.ttf",
-        "/system/fonts/NotoSansHans-Regular.ttf",
-        "/system/fonts/SysSans-Hans-Regular.ttf",
-        "/system/fonts/Miui-Regular.ttf",
-        "/system/fonts/SourceHanSansCN-Regular.ttf",
-        "/system/fonts/HarmonyOS_Sans_SC.ttf",
-        "/system/fonts/OplusSC-Regular.ttf",
-        "/system/fonts/VivoSansSC-Regular.ttf",
-    };
+    ImFontConfig cfg;
+    cfg.OversampleH = 1;
+    cfg.OversampleV = 1;
+    cfg.PixelSnapH = true;
 
-    for (const char* path : priority_paths) {
-        if (access(path, R_OK) != 0) continue;
-        LOGI("[*] Phase1 trying: %s", path);
-        g_mainFont = TryLoadChineseFont(io, path, 0, targetSize);
-        if (g_mainFont) goto font_done;
-    }
-
-    // Phase 2: 尝试 TTC 集合字体（索引 0~4）
+    // ===== Primary: 内嵌微软雅黑子集 (TrueType glyf outlines, 100% compatible with stb_truetype) =====
     {
-        const char* ttc_paths[] = {
-            "/system/fonts/NotoSansCJK-Regular.ttc",
-            "/system/fonts/NotoSerifCJK-Regular.ttc",
-        };
-        for (const char* path : ttc_paths) {
-            if (access(path, R_OK) != 0) continue;
-            for (int idx = 0; idx < 5; idx++) {
-                LOGI("[*] Phase2 trying TTC: %s (FontNo: %d)", path, idx);
-                g_mainFont = TryLoadChineseFont(io, path, idx, targetSize);
-                if (g_mainFont) goto font_done;
-            }
-        }
-    }
-
-    // Phase 3: 暴力扫描 /system/fonts/ 目录，尝试所有 .ttf 文件
-    {
-        DIR* dir = opendir("/system/fonts");
-        if (dir) {
-            LOGI("[*] Phase3: Scanning /system/fonts/ for ANY TrueType font with Chinese glyphs...");
-            struct dirent* ent;
-            while ((ent = readdir(dir)) != NULL) {
-                std::string name = ent->d_name;
-                // 只尝试 .ttf 文件（.otf 是 CFF 格式，stb_truetype 不支持）
-                if (name.size() < 5) continue;
-                std::string ext = name.substr(name.size() - 4);
-                if (ext != ".ttf" && ext != ".TTF") continue;
-                std::string full = "/system/fonts/" + name;
-                if (access(full.c_str(), R_OK) != 0) continue;
-                LOGI("[*] Phase3 trying: %s", full.c_str());
-                g_mainFont = TryLoadChineseFont(io, full.c_str(), 0, targetSize);
-                if (g_mainFont) { closedir(dir); goto font_done; }
-            }
-            closedir(dir);
-        }
-
-        // 也扫描 /product/fonts/
-        dir = opendir("/product/fonts");
-        if (dir) {
-            LOGI("[*] Phase3: Scanning /product/fonts/...");
-            struct dirent* ent;
-            while ((ent = readdir(dir)) != NULL) {
-                std::string name = ent->d_name;
-                if (name.size() < 5) continue;
-                std::string ext = name.substr(name.size() - 4);
-                if (ext != ".ttf" && ext != ".TTF") continue;
-                std::string full = "/product/fonts/" + name;
-                if (access(full.c_str(), R_OK) != 0) continue;
-                LOGI("[*] Phase3 trying: %s", full.c_str());
-                g_mainFont = TryLoadChineseFont(io, full.c_str(), 0, targetSize);
-                if (g_mainFont) { closedir(dir); goto font_done; }
-            }
-            closedir(dir);
-        }
-    }
-
-    // Phase 4: 尝试所有 .ttc 文件的所有子字体索引
-    {
-        DIR* dir = opendir("/system/fonts");
-        if (dir) {
-            LOGI("[*] Phase4: Trying ALL .ttc files with indices 0-6...");
-            struct dirent* ent;
-            while ((ent = readdir(dir)) != NULL) {
-                std::string name = ent->d_name;
-                if (name.size() < 5) continue;
-                std::string ext = name.substr(name.size() - 4);
-                if (ext != ".ttc" && ext != ".TTC") continue;
-                std::string full = "/system/fonts/" + name;
-                if (access(full.c_str(), R_OK) != 0) continue;
-                for (int idx = 0; idx < 7; idx++) {
-                    LOGI("[*] Phase4 trying: %s (FontNo: %d)", full.c_str(), idx);
-                    g_mainFont = TryLoadChineseFont(io, full.c_str(), idx, targetSize);
-                    if (g_mainFont) { closedir(dir); goto font_done; }
+        unsigned long decompSize = chinese_font_original_size;
+        unsigned char* decompBuf = (unsigned char*)malloc(decompSize);
+        if (decompBuf) {
+            int zret = uncompress(decompBuf, &decompSize, chinese_font_compressed_data, chinese_font_compressed_size);
+            if (zret == Z_OK && decompSize > 0) {
+                void* fontMem = IM_ALLOC(decompSize);
+                if (fontMem) {
+                    memcpy(fontMem, decompBuf, decompSize);
+                    g_mainFont = io.Fonts->AddFontFromMemoryTTF(fontMem, (int)decompSize, targetSize, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+                    if (g_mainFont) {
+                        LOGI("[+] Embedded Chinese font loaded! size=%.1f decomp=%lu bytes", targetSize, decompSize);
+                    } else {
+                        LOGI("[!] Embedded font AddFontFromMemoryTTF failed");
+                        IM_FREE(fontMem);
+                    }
                 }
+            } else {
+                LOGI("[!] zlib decompress failed: %d", zret);
             }
-            closedir(dir);
+            free(decompBuf);
         }
     }
 
-    // Phase 5: 完全失败，使用默认英文字体
-    LOGI("[!] ALL FONT PHASES FAILED. No TrueType Chinese font found on this system.");
-    LOGI("[!] Falling back to default ASCII font. Chinese will show as '?'.");
-    g_mainFont = io.Fonts->AddFontDefault();
-    io.Fonts->Build();
-
-font_done:
-    if (g_mainFont) {
-        io.FontDefault = g_mainFont;
+    // ===== Fallback: system fonts =====
+    if (!g_mainFont) {
+        const char* paths[] = {
+            "/system/fonts/DroidSansFallback.ttf",
+            "/system/fonts/DroidSansFallbackFull.ttf",
+            "/system/fonts/NotoSansSC-Regular.ttf",
+        };
+        for (const char* p : paths) {
+            if (access(p, R_OK) != 0) continue;
+            g_mainFont = io.Fonts->AddFontFromFileTTF(p, targetSize, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+            if (g_mainFont) { LOGI("[+] System font: %s", p); break; }
+            io.Fonts->Clear();
+        }
     }
 
+    if (!g_mainFont) {
+        LOGI("[!] All fonts failed, ASCII fallback");
+        g_mainFont = io.Fonts->AddFontDefault();
+    }
+
+    if (g_mainFont) io.FontDefault = g_mainFont;
+    io.Fonts->Build();
     ImGui_ImplOpenGL3_CreateDeviceObjects();
     g_current_rendered_size = targetSize;
-    LOGI("[+] Font setup complete. g_mainFont=%p", (void*)g_mainFont);
+    LOGI("[+] Font setup done. g_mainFont=%p", (void*)g_mainFont);
 }
+
 
 void DrawOffsetAdjuster(const char* label, uint32_t* value) {
     ImGui::PushID(label);
@@ -3348,6 +3268,51 @@ void* Il2CppInitThread(void*) {
 
     LoadConfig();
     EnsureTextureWorkerStarted();
+    
+    if (g_off.func_shop_listen != 0) {
+        DobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
+        LOGI("[+] Hooked func_shop_listen.");
+    }
+    if (g_off.func_set_IsGameEnd != 0) {
+        DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
+        LOGI("[+] Hooked func_set_IsGameEnd.");
+    }
+    
+    typedef void* (*il2cpp_domain_get_t)();
+    typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
+    typedef void* (*il2cpp_assembly_get_image_t)(void*);
+    typedef void* (*il2cpp_class_from_name_t)(void*, const char*, const char*);
+    typedef void* (*il2cpp_class_get_method_from_name_t)(void*, const char*, int);
+
+    auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
+    auto assembly_open = (il2cpp_domain_assembly_open_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_assembly_open");
+    auto assembly_get_image = (il2cpp_assembly_get_image_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_assembly_get_image");
+    auto class_from_name = (il2cpp_class_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_from_name");
+    auto class_get_method_from_name = (il2cpp_class_get_method_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_get_method_from_name");
+
+    if (domain_get && assembly_open && assembly_get_image && class_from_name && class_get_method_from_name) {
+        void* domain = domain_get();
+        if (domain) {
+            void* assembly = assembly_open(domain, "UnityEngine.UIModule.dll");
+            if (assembly) {
+                void* image = assembly_get_image(assembly);
+                if (image) {
+                    void* klass = class_from_name(image, "UnityEngine", "Canvas");
+                    if (klass) {
+                        void* method = class_get_method_from_name(klass, "SendWillRenderCanvases", 0);
+                        if (method) {
+                            void* method_ptr = *(void**)method;
+                            if (method_ptr) {
+                                DobbyHook(method_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
+                                LOGI("[+] Hooked SendWillRenderCanvases.");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     return nullptr;
 }
 
