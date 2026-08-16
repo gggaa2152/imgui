@@ -3255,10 +3255,8 @@ VkResult hook_vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, const Vk
     return res;
 }
 
-void* SetupThread(void*) {
-    LOGI("[+] Adaptive Dual-Engine Setup Thread Started...");
-
-    // 1. 等待 libil2cpp.so 加载并初始化游戏内存偏移与钩子
+void* Il2CppInitThread(void*) {
+    LOGI("[+] Background Il2Cpp Init Thread Started...");
     while (g_il2cppTrueBase == 0) {
         FILE *fp = fopen("/proc/self/maps", "r");
         if (fp) {
@@ -3272,52 +3270,17 @@ void* SetupThread(void*) {
         }
         if (g_il2cppTrueBase == 0) sleep(1);
     }
-    
+    LOGI("[+] libil2cpp.so Base Found: 0x%lx", (unsigned long)g_il2cppTrueBase);
+
     LoadConfig();
     EnsureTextureWorkerStarted();
-    
-    if (g_off.func_shop_listen != 0) {
-        DobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
-    }
-    if (g_off.func_set_IsGameEnd != 0) {
-        DobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
-    }
-    
-    typedef void* (*il2cpp_domain_get_t)();
-    typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
-    typedef void* (*il2cpp_assembly_get_image_t)(void*);
-    typedef void* (*il2cpp_class_from_name_t)(void*, const char*, const char*);
-    typedef void* (*il2cpp_class_get_method_from_name_t)(void*, const char*, int);
+    return nullptr;
+}
 
-    auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
-    auto assembly_open = (il2cpp_domain_assembly_open_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_assembly_open");
-    auto assembly_get_image = (il2cpp_assembly_get_image_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_assembly_get_image");
-    auto class_from_name = (il2cpp_class_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_from_name");
-    auto class_get_method_from_name = (il2cpp_class_get_method_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_get_method_from_name");
+void* SetupThread(void*) {
+    LOGI("[+] Adaptive Dual-Engine Setup Thread Started...");
 
-    if (domain_get && assembly_open && assembly_get_image && class_from_name && class_get_method_from_name) {
-        void* domain = domain_get();
-        if (domain) {
-            void* assembly = assembly_open(domain, "UnityEngine.UIModule.dll");
-            if (assembly) {
-                void* image = assembly_get_image(assembly);
-                if (image) {
-                    void* klass = class_from_name(image, "UnityEngine", "Canvas");
-                    if (klass) {
-                        void* method = class_get_method_from_name(klass, "SendWillRenderCanvases", 0);
-                        if (method) {
-                            void* method_ptr = *(void**)method;
-                            if (method_ptr) {
-                                DobbyHook(method_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. 尝试对 Vulkan 通道进行挂钩
+    // 1. 优先对 Vulkan 通道进行挂钩（无阻塞）
     void* vk_create_ptr = DobbySymbolResolver("libvulkan.so", "vkCreateInstance");
     if (!vk_create_ptr) { void* h = dlopen("libvulkan.so", RTLD_LAZY); if (h) vk_create_ptr = dlsym(h, "vkCreateInstance"); }
     if (vk_create_ptr) {
@@ -3332,7 +3295,7 @@ void* SetupThread(void*) {
         LOGI("[+] Vulkan QueuePresent Direct Hook Set.");
     }
 
-    // 3. 尝试对 OpenGL / EGL 通道进行挂钩
+    // 2. 优先对 OpenGL / EGL 通道进行挂钩（直接截获渲染流）
     void* egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
     if (!egl_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_ptr = dlsym(h, "eglSwapBuffers"); }
     if (egl_ptr) {
@@ -3347,7 +3310,12 @@ void* SetupThread(void*) {
         LOGI("[+] EGL GetProcAddress Hook Set.");
     }
 
-    // 4. 3 秒后寻找 libunity.so 并 Hook nativeInjectEvent，绑定手指/鼠标输入与启动连点器
+    // 3. 后台启动 il2cpp 基址探测与配置加载线程，不阻塞主图形管道
+    pthread_t t_il2cpp;
+    pthread_create(&t_il2cpp, 0, Il2CppInitThread, 0);
+    pthread_detach(t_il2cpp);
+
+    // 4. 3 秒后寻找 libunity.so 并 Hook nativeInjectEvent，绑定触摸输入与启动连点器
     sleep(3);
     FindAndHookHiddenJNI();
 
