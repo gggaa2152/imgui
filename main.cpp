@@ -3222,6 +3222,9 @@ unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
 void* hook_eglGetProcAddress(const char* procname) {
     if (!procname) return nullptr;
     if (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) {
+        if (!old_eglSwap && old_eglGetProcAddress) {
+            old_eglSwap = (unsigned int (*)(EGLDisplay, EGLSurface))old_eglGetProcAddress("eglSwapBuffers");
+        }
         return (void*)hook_eglSwap;
     }
     if (old_eglGetProcAddress) return old_eglGetProcAddress(procname);
@@ -3297,19 +3300,21 @@ void* SetupThread(void*) {
         LOGI("[+] Vulkan QueuePresent Direct Hook Set.");
     }
 
-    // 2. 优先对 OpenGL / EGL 通道进行挂钩（直接截获渲染流）
-    void* egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
-    if (!egl_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_ptr = dlsym(h, "eglSwapBuffers"); }
-    if (egl_ptr) {
-        DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
-        LOGI("[+] EGL SwapBuffers Hook Set.");
+    // 2. 优先对 OpenGL / EGL 通道进行挂钩
+    // 注意：在模拟器(Houdini)中，libEGL 的 eglSwapBuffers 是极小的 8 字节桩函数，
+    // 直接对 eglSwapBuffers 进行 16 字节 inline-hook 会越界破坏临近函数触发 libtcb 崩溃。
+    // 正确的做法是只 Hook eglGetProcAddress，将 Unity 请求的 eglSwapBuffers 重定向到我们的 hook_eglSwap！
+    void* egl_sym = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
+    if (!egl_sym) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_sym = dlsym(h, "eglSwapBuffers"); }
+    if (egl_sym) {
+        old_eglSwap = (unsigned int (*)(EGLDisplay, EGLSurface))egl_sym;
     }
 
     void* getproc_ptr = DobbySymbolResolver("libEGL.so", "eglGetProcAddress");
     if (!getproc_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) getproc_ptr = dlsym(h, "eglGetProcAddress"); }
     if (getproc_ptr) {
         DobbyHook(getproc_ptr, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
-        LOGI("[+] EGL GetProcAddress Hook Set.");
+        LOGI("[+] EGL GetProcAddress Interceptor Hook Set (Safe redirect for eglSwapBuffers).");
     }
 
     // 3. 后台启动 il2cpp 基址探测与配置加载线程，不阻塞主图形管道
