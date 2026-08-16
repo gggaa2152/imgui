@@ -1604,70 +1604,72 @@ bool FrostSidebarBtn(const char* label, bool selected, int id) {
 
 void SetupImGuiStyle() { ApplyFrostedTheme(); }
 
-std::string FindChineseFontPath() {
-    const char* known_paths[] = {
-        "/system/fonts/NotoSansSC-VF.ttf",          // Android 12/13/14 可变中文字体 (如 MuMu 12)
-        "/system/fonts/NotoSansSC-Regular.otf",
+std::vector<std::string> GetCandidateFontPaths() {
+    std::vector<std::string> paths = {
+        "/system/fonts/DroidSansFallback.ttf",          // 标准 TrueType，stb_truetype 100% 完美支持（无问号）
         "/system/fonts/NotoSansSC-Regular.ttf",
-        "/system/fonts/DroidSansFallback.ttf",
         "/system/fonts/SysSans-Hans-Regular.ttf",
         "/system/fonts/Miui-Regular.ttf",
-        "/system/fonts/SourceHanSansCN-Regular.otf",
+        "/system/fonts/SourceHanSansCN-Regular.ttf",
         "/system/fonts/HarmonyOS_Sans_SC.ttf",
         "/system/fonts/OplusSC-Regular.ttf",
         "/system/fonts/VivoSansSC-Regular.ttf",
-        "/system/fonts/NotoSansCJK-Regular.ttc"
+        "/system/fonts/NotoSansCJK-Regular.ttc",
+        "/system/fonts/NotoSansSC-Regular.otf",
+        "/system/fonts/NotoSansSC-VF.ttf"
     };
-    for (const char* path : known_paths) {
-        if (access(path, R_OK) == 0) return path;
-    }
     
     DIR* dir = opendir("/system/fonts");
     if (dir) {
         struct dirent* ent;
         while ((ent = readdir(dir)) != NULL) {
             std::string name = ent->d_name;
-            if (name.find(".ttf") != std::string::npos || name.find(".otf") != std::string::npos || name.find(".ttc") != std::string::npos) {
-                if (name.find("SC") != std::string::npos || name.find("CJK") != std::string::npos ||
-                    name.find("Hans") != std::string::npos || name.find("Fallback") != std::string::npos) {
-                    std::string full_path = "/system/fonts/" + name;
-                    if (access(full_path.c_str(), R_OK) == 0) {
-                        closedir(dir);
-                        return full_path;
-                    }
+            if (name.find("Fallback") != std::string::npos ||
+                name.find("Hans") != std::string::npos ||
+                name.find("SC") != std::string::npos ||
+                name.find("CJK") != std::string::npos ||
+                name.find("Chinese") != std::string::npos) {
+                std::string full_path = "/system/fonts/" + name;
+                if (std::find(paths.begin(), paths.end(), full_path) == paths.end()) {
+                    paths.push_back(full_path);
                 }
             }
         }
         closedir(dir);
     }
-    return "";
+    return paths;
 }
 
 void UpdateFontHD(bool force = false) {
     ImGuiIO& io = ImGui::GetIO();
     float screenH = (io.DisplaySize.y > 100.0f) ? io.DisplaySize.y : 2400.0f;
     g_autoScale = screenH / 1080.0f;
-    float targetSize = std::clamp(20.0f * g_autoScale, 18.0f, 48.0f);
+    float targetSize = std::clamp(22.0f * g_autoScale, 18.0f, 48.0f);
     if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f && g_mainFont != nullptr) return;
 
     io.Fonts->Clear();
     g_mainFont = nullptr;
 
+    // 采用 1:1 采样率以确保完整收录 7000+ 常用汉字与符号，不爆显存
     ImFontConfig configMain;
     configMain.OversampleH = 1;
     configMain.OversampleV = 1;
     configMain.PixelSnapH = true;
 
-    std::string fontPath = FindChineseFontPath();
-    if (!fontPath.empty()) {
-        g_mainFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), targetSize, &configMain, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-        if (g_mainFont) {
-            LOGI("[+] Loaded Chinese Font successfully from: %s", fontPath.c_str());
+    auto candidatePaths = GetCandidateFontPaths();
+    for (const auto& path : candidatePaths) {
+        if (access(path.c_str(), R_OK) == 0) {
+            // 使用 ChineseFull 覆盖全部汉字与常用标点符号，杜绝任何生僻字/符号出现问号
+            g_mainFont = io.Fonts->AddFontFromFileTTF(path.c_str(), targetSize, &configMain, io.Fonts->GetGlyphRangesChineseFull());
+            if (g_mainFont) {
+                LOGI("[+] Loaded Chinese Font successfully from: %s (size: %.1f)", path.c_str(), targetSize);
+                break;
+            }
         }
     }
 
     if (!g_mainFont) {
-        LOGI("[!] Warning: Chinese font file failed to build, falling back to default font.");
+        LOGI("[!] Warning: Chinese TTF font file could not be parsed, falling back to default ASCII font.");
         g_mainFont = io.Fonts->AddFontDefault();
     }
 
