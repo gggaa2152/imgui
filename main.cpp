@@ -2,9 +2,13 @@
 #include <pthread.h>
 #include <android/log.h>
 #include <dlfcn.h>
+#include <dirent.h>
 #include <string.h>
+#include <vector>
+#include <string>
 #include <atomic>
 #include <algorithm>
+#include <cmath>
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -13,23 +17,137 @@
 #include "imgui_impl_opengl3.h"
 #include "dobby.h"
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "JKDiagnostic", __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "JKPureMenu", __VA_ARGS__)
 
 bool g_show_menu = true;
 bool g_isImGuiInit = false;
+ImFont* g_mainFont = nullptr;
+float g_autoScale = 1.0f;
+float g_current_rendered_size = 0.0f;
+
 int g_gl_width = 1080;
 int g_gl_height = 2400;
-std::atomic<bool> g_engine_rendering{false};
 int g_current_frame = 0;
+std::atomic<bool> g_engine_rendering{false};
 
-// 原始指针备份
+// 原始函数指针备份
 unsigned int (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
+unsigned int (*old_eglSwapWithDamage)(EGLDisplay, EGLSurface, EGLint*, EGLint) = nullptr;
 void* (*old_eglGetProcAddress)(const char*) = nullptr;
 int (*old_vkCreateInstance)(void*, void*, void*) = nullptr;
 
-// -------------------------------------------------------------
-// 核心 ImGui 极简画板 (带严格状态保护)
-// -------------------------------------------------------------
+// 自动在系统目录中寻找有效的中文字体，杜绝中文问号 (????) 乱码
+std::string FindChineseFontPath() {
+    const char* known_paths[] = {
+        "/system/fonts/NotoSansCJK-Regular.ttc",
+        "/system/fonts/NotoSansSC-Regular.otf",
+        "/system/fonts/NotoSansTC-Regular.otf",
+        "/system/fonts/DroidSansFallback.ttf",
+        "/system/fonts/SysSans-Hans-Regular.ttf",
+        "/system/fonts/Miui-Regular.ttf",
+        "/system/fonts/SourceHanSansCN-Regular.otf",
+        "/system/fonts/FZLanTingHei-R-GBK.ttf",
+        "/system/fonts/HarmonyOS_Sans_SC.ttf",
+        "/system/fonts/OplusSC-Regular.ttf",
+        "/system/fonts/VivoSansSC-Regular.ttf"
+    };
+    for (const char* path : known_paths) {
+        if (access(path, R_OK) == 0) return path;
+    }
+    
+    DIR* dir = opendir("/system/fonts");
+    if (dir) {
+        struct dirent* ent;
+        while ((ent = readdir(dir)) != NULL) {
+            std::string name = ent->d_name;
+            if (name.find(".ttf") != std::string::npos || name.find(".otf") != std::string::npos || name.find(".ttc") != std::string::npos) {
+                if (name.find("SC") != std::string::npos || name.find("CJK") != std::string::npos ||
+                    name.find("Hans") != std::string::npos || name.find("Fallback") != std::string::npos ||
+                    name.find("Chinese") != std::string::npos) {
+                    std::string full_path = "/system/fonts/" + name;
+                    if (access(full_path.c_str(), R_OK) == 0) {
+                        closedir(dir);
+                        return full_path;
+                    }
+                }
+            }
+        }
+        closedir(dir);
+    }
+    return "";
+}
+
+// 高清中文字体加载与 DPI 动态缩放
+void UpdateFontHD(bool force = false) {
+    ImGuiIO& io = ImGui::GetIO();
+    float screenH = (io.DisplaySize.y > 100.0f) ? io.DisplaySize.y : 2400.0f;
+    g_autoScale = screenH / 1080.0f;
+    float targetSize = std::clamp(20.0f * g_autoScale, 16.0f, 45.0f);
+    if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f) return;
+
+    ImGui_ImplOpenGL3_DestroyDeviceObjects();
+    io.Fonts->Clear();
+    g_mainFont = nullptr;
+
+    ImFontConfig configMain;
+    configMain.OversampleH = 2;
+    configMain.OversampleV = 2;
+    configMain.PixelSnapH = false;
+
+    std::string fontPath = FindChineseFontPath();
+    if (!fontPath.empty()) {
+        g_mainFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), targetSize * 1.5f, &configMain, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+        if (g_mainFont) {
+            g_mainFont->Scale = 1.0f / 1.5f;
+            LOGI("[+] Loaded Chinese Font: %s", fontPath.c_str());
+        }
+    }
+
+    if (!g_mainFont) {
+        LOGI("[-] System Chinese font not found, falling back to default font");
+        g_mainFont = io.Fonts->AddFontDefault();
+        if (g_mainFont) g_mainFont->Scale = 1.0f / 1.5f;
+    }
+
+    io.Fonts->Build();
+    ImGui_ImplOpenGL3_CreateDeviceObjects();
+    g_current_rendered_size = targetSize;
+}
+
+// 极简纯菜单界面
+void DrawMainMenu() {
+    ImGui::SetNextWindowPos(ImVec2(100.0f * g_autoScale, 100.0f * g_autoScale), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(480.0f * g_autoScale, 320.0f * g_autoScale), ImGuiCond_FirstUseEver);
+
+    if (ImGui::Begin((const char*)u8"功能控制菜单 (纯渲染测试版)", &g_show_menu)) {
+        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"✓ 菜单已成功在模拟器上绘制！");
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), (const char*)u8"✓ 中文字体加载正常，无问号乱码");
+        ImGui::Separator();
+
+        ImGui::Text((const char*)u8"当前渲染帧数: %d", g_current_frame);
+        ImGui::Text((const char*)u8"屏幕实时分辨率: %d x %d", g_gl_width, g_gl_height);
+        ImGui::Text((const char*)u8"UI 自动缩放比例: %.2f", g_autoScale);
+
+        ImGui::Separator();
+        static bool test_toggle1 = true;
+        static bool test_toggle2 = false;
+        ImGui::Checkbox((const char*)u8"测试功能开关 1", &test_toggle1);
+        ImGui::Checkbox((const char*)u8"测试功能开关 2", &test_toggle2);
+
+        static float test_slider = 1.0f;
+        ImGui::SliderFloat((const char*)u8"测试滑动条", &test_slider, 0.1f, 5.0f, "%.1f");
+
+        if (ImGui::Button((const char*)u8"点击测试按钮", ImVec2(-1, 36.0f * g_autoScale))) {
+            LOGI("[+] Test button clicked inside ImGui menu!");
+        }
+    }
+    ImGui::End();
+
+    // 亦可显示 ImGui 官方 Demo Window 验证控件绘制
+    ImGui::ShowDemoWindow(&g_show_menu);
+}
+
+// 核心 ImGui 渲染管线 (带严格的 OpenGL ES 状态恢复与强制去遮挡)
 void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     g_current_frame++;
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
@@ -38,7 +156,7 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
     if (g_gl_width <= 0 || g_gl_height <= 0) { g_gl_width = 1080; g_gl_height = 2400; }
 
-    // ★ 极其关键：备份 Unity 当前的 OpenGL 状态
+    // 1. 完整备份 Unity 当前 OpenGL 状态
     GLint last_active_texture; glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
     glActiveTexture(GL_TEXTURE0);
     GLint last_program; glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
@@ -54,52 +172,47 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     GLboolean last_enable_scissor_test = glIsEnabled(GL_SCISSOR_TEST);
     GLint last_fbo; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
 
-    // 初始化 ImGui
+    // 2. 初始化 ImGui 上下文
     if (!g_isImGuiInit) {
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
+
         const char* gl_ver = (const char*)glGetString(GL_VERSION);
         const char* glsl_ver = "#version 300 es";
         if (gl_ver && strstr(gl_ver, "OpenGL ES 2.")) glsl_ver = "#version 100";
+
         ImGui_ImplOpenGL3_Init(glsl_ver);
         io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
-        io.Fonts->AddFontDefault(); 
-        io.Fonts->Build();
-        ImGui_ImplOpenGL3_CreateDeviceObjects(); 
+        UpdateFontHD(true);
         g_isImGuiInit = true;
         LOGI("[+] ImGui Context Created. Resolution: %dx%d", g_gl_width, g_gl_height);
     }
-    
-    ImGuiIO& io = ImGui::GetIO(); 
+
+    ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
     io.DeltaTime = 1.0f / 60.0f;
 
-    ImGui_ImplOpenGL3_NewFrame(); 
+    // 3. 构建 ImGui 帧
+    ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
 
-    // 绘制测试面板
-    ImGui::SetNextWindowPos(ImVec2(100, 100), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(400, 250), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("渲染极简测试面板", &g_show_menu)) {
-        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "如果你能看到我，说明渲染 Hook 完美！");
-        ImGui::Separator();
-        ImGui::Text("当前分辨率: %d x %d", g_gl_width, g_gl_height);
-        ImGui::Text("当前 FBO: %d", last_fbo);
-        ImGui::Text("当前帧数: %d", g_current_frame);
-    }
-    ImGui::End();
-
-    ImGui::ShowDemoWindow(&g_show_menu);
+    DrawMainMenu();
 
     ImGui::Render();
-    
-    // ★ 强行画在屏幕表面
+
+    // 4. 强力复位状态机，防止游戏 3D 深度测试或剪裁遮挡 UI
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, g_gl_width, g_gl_height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    
-    // ★ 彻底恢复游戏状态
+
+    // 5. 还原 Unity 原始 OpenGL 状态
     glUseProgram(last_program);
     glBindTexture(GL_TEXTURE_2D, last_texture);
     glActiveTexture(last_active_texture);
@@ -120,88 +233,71 @@ void RenderImGui_Core(EGLDisplay display, EGLSurface surface) {
     }
 }
 
-// -------------------------------------------------------------
-// 拦截器 1：拦截 eglSwapBuffers
-// -------------------------------------------------------------
+// 全屏刷新 Hook
 unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
     RenderImGui_Core(display, surface);
     if (old_eglSwap) return old_eglSwap(display, surface);
     return 1;
 }
 
-// -------------------------------------------------------------
-// 拦截器 2：拦截动态分配 eglGetProcAddress (针对 Houdini 伪装)
-// -------------------------------------------------------------
+// 局部刷新 Hook (解决游戏中途对局不渲染菜单的关键)
+unsigned int hook_eglSwapWithDamage(EGLDisplay display, EGLSurface surface, EGLint* rects, EGLint n_rects) {
+    RenderImGui_Core(display, surface);
+    if (old_eglSwapWithDamage) return old_eglSwapWithDamage(display, surface, rects, n_rects);
+    return 1;
+}
+
+// 动态寻址 Hook (截获 Houdini 逃逸指针)
 void* hook_eglGetProcAddress(const char* procname) {
     void* real_addr = old_eglGetProcAddress ? old_eglGetProcAddress(procname) : nullptr;
-    
-    if (procname && (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0)) {
-        LOGI("[!] Intercepted dynamic request for: %s", procname);
-        
-        // 如果我们还没拿到原指针，趁机保存一份
-        if (!old_eglSwap && real_addr) {
-            old_eglSwap = (unsigned int (*)(EGLDisplay, EGLSurface))real_addr;
-        }
-        
-        // 无论你要什么，强行塞给引擎我们自己的 Hook 后的画笔！
+    if (procname && strcmp(procname, "eglSwapBuffers") == 0) {
+        if (!old_eglSwap && real_addr) old_eglSwap = (unsigned int (*)(EGLDisplay, EGLSurface))real_addr;
         return (void*)hook_eglSwap;
+    }
+    if (procname && strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) {
+        if (!old_eglSwapWithDamage && real_addr) old_eglSwapWithDamage = (unsigned int (*)(EGLDisplay, EGLSurface, EGLint*, EGLint))real_addr;
+        return (void*)hook_eglSwapWithDamage;
     }
     return real_addr;
 }
 
-// -------------------------------------------------------------
-// 拦截器 3：物理消灭 Vulkan，强逼引擎回滚 OpenGL
-// -------------------------------------------------------------
+// 屏蔽 Vulkan 拦截点
 int hook_vkCreateInstance(void* pCreateInfo, void* pAllocator, void* pInstance) {
-    LOGI("[!] Vulkan Creation Blocked! Forcing Unity to fallback to OpenGL...");
-    return -9; // 强行返回 VK_ERROR_INCOMPATIBLE_DRIVER 错误码
+    LOGI("[!] Vulkan Blocked! Forcing OpenGL...");
+    return -9;
 }
 
-// -------------------------------------------------------------
-// 安装防线
-// -------------------------------------------------------------
+// 安装多层 Hook 防线
 void* SetupThread(void*) {
-    LOGI("[+] Ultimate Rendering Bypass Setup Started...");
+    LOGI("[+] SetupThread started. Installing render hooks...");
 
-    // 1. 物理消灭 Vulkan
+    // 1. 强杀 Vulkan 强制让游戏回滚 OpenGL
     void* vk_ptr = DobbySymbolResolver("libvulkan.so", "vkCreateInstance");
-    if (!vk_ptr) {
-        void* h = dlopen("libvulkan.so", RTLD_LAZY);
-        if (h) vk_ptr = dlsym(h, "vkCreateInstance");
-    }
-    if (vk_ptr) {
-        DobbyHook(vk_ptr, (void*)hook_vkCreateInstance, (void**)&old_vkCreateInstance);
-        LOGI("[+] Vulkan Blocked Successfully.");
-    }
+    if (!vk_ptr) { void* h = dlopen("libvulkan.so", RTLD_LAZY); if (h) vk_ptr = dlsym(h, "vkCreateInstance"); }
+    if (vk_ptr) DobbyHook(vk_ptr, (void*)hook_vkCreateInstance, (void**)&old_vkCreateInstance);
 
-    // 2. 拦截动态指针分配
+    // 2. 动态拦截 eglGetProcAddress 劫持指针
     void* getproc_ptr = DobbySymbolResolver("libEGL.so", "eglGetProcAddress");
-    if (!getproc_ptr) {
-        void* h = dlopen("libEGL.so", RTLD_LAZY);
-        if (h) getproc_ptr = dlsym(h, "eglGetProcAddress");
-    }
-    if (getproc_ptr) {
-        DobbyHook(getproc_ptr, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
-        LOGI("[+] eglGetProcAddress Hooked.");
-    }
+    if (!getproc_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) getproc_ptr = dlsym(h, "eglGetProcAddress"); }
+    if (getproc_ptr) DobbyHook(getproc_ptr, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
 
-    // 3. 基础静态拦截
-    void* egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
-    if (!egl_ptr) {
-        void* h = dlopen("libEGL.so", RTLD_LAZY);
-        if (h) egl_ptr = dlsym(h, "eglSwapBuffers");
-    }
-    if (egl_ptr) {
-        DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
-        LOGI("[+] eglSwapBuffers Hooked.");
-    }
+    // 3. 拦截基础 eglSwapBuffers 与局部刷新 eglSwapBuffersWithDamageKHR
+    void* egl_ptr = (void*)eglGetProcAddress("eglSwapBuffers");
+    if (!egl_ptr) egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
+    if (!egl_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_ptr = dlsym(h, "eglSwapBuffers"); }
+    if (egl_ptr) DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
 
-    LOGI("[+] All rendering traps set! Waiting for Unity to render...");
+    void* egl_damage_ptr = (void*)eglGetProcAddress("eglSwapBuffersWithDamageKHR");
+    if (!egl_damage_ptr) egl_damage_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffersWithDamageKHR");
+    if (!egl_damage_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_damage_ptr = dlsym(h, "eglSwapBuffersWithDamageKHR"); }
+    if (egl_damage_ptr) DobbyHook(egl_damage_ptr, (void*)hook_eglSwapWithDamage, (void**)&old_eglSwapWithDamage);
+
+    LOGI("[+] Render hooks installed successfully.");
     return nullptr;
 }
 
-__attribute__((constructor)) void Init() { 
-    pthread_t t; 
-    pthread_create(&t, 0, SetupThread, 0); 
-    pthread_detach(t); 
+__attribute__((constructor)) void Init() {
+    pthread_t t;
+    pthread_create(&t, 0, SetupThread, 0);
+    pthread_detach(t);
 }
