@@ -51,7 +51,6 @@ if(BUILD_MYMENU)
         GLESv3
         EGL
         android
-    
         z
     )
 endif()
