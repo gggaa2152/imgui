@@ -1506,10 +1506,12 @@ static bool BeginContentFloatWindow(const char* id, bool* open, float* pos_x = n
 static void DrawFloatScaleGrip(const char* grip_id, float* scale, float min_s, float max_s) {
     if (!scale || g_floats_locked) return;
     ImGuiWindow* win = ImGui::GetCurrentWindow();
+    if (!win) return;
     ImGuiIO& io = ImGui::GetIO();
     ImGui::PushID(grip_id);
     ImGuiID gid = ImGui::GetID("##scale_grip");
-    ImGuiStorage* st = &win->StateStorage;
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    if (!st) { ImGui::PopID(); return; }
 
     float ball_r = 9.0f * g_autoScale;
     float pick_r = ball_r * 2.4f;
@@ -1594,7 +1596,7 @@ bool FrostSidebarBtn(const char* label, bool selected, int id) {
         float pad = 10.0f * sc;
         ImU32 iconCol = selected ? IM_COL32(255, 255, 255, 255) : IM_COL32(180, 190, 205, 255);
         DrawSidebarIcon(win->DrawList, ImVec2(bb.Min.x + pad + 8.0f * sc, bb.Min.y + size.y * 0.5f), 5.5f * sc, id, iconCol);
-        win->DrawList->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(bb.Min.x + pad + 22.0f * sc, bb.Min.y + (size.y - ImGui::GetFontSize()) * 0.5f),
+        win->DrawList->AddText(ImVec2(bb.Min.x + pad + 22.0f * sc, bb.Min.y + (size.y - ImGui::GetFontSize()) * 0.5f),
             selected ? IM_COL32(255, 255, 255, 255) : IM_COL32(180, 190, 205, 255), label);
     }
     return pressed;
@@ -1646,13 +1648,11 @@ void UpdateFontHD(bool force = false) {
     float screenH = (io.DisplaySize.y > 100.0f) ? io.DisplaySize.y : 2400.0f;
     g_autoScale = screenH / 1080.0f;
     float targetSize = std::clamp(20.0f * g_autoScale, 18.0f, 48.0f);
-    if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f) return;
+    if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f && g_mainFont != nullptr) return;
 
-    ImGui_ImplOpenGL3_DestroyDeviceObjects();
     io.Fonts->Clear();
     g_mainFont = nullptr;
 
-    // 禁用过高的采样率，控制字体纹理图集在 2048x2048 以内，防止 GLES 纹理溢出
     ImFontConfig configMain;
     configMain.OversampleH = 1;
     configMain.OversampleV = 1;
@@ -1660,7 +1660,6 @@ void UpdateFontHD(bool force = false) {
 
     std::string fontPath = FindChineseFontPath();
     if (!fontPath.empty()) {
-        // 改用常用简体中文字库，完美平衡汉字覆盖率与纹理内存占用
         g_mainFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), targetSize, &configMain, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
         if (g_mainFont) {
             LOGI("[+] Loaded Chinese Font successfully from: %s", fontPath.c_str());
@@ -1672,8 +1671,11 @@ void UpdateFontHD(bool force = false) {
         g_mainFont = io.Fonts->AddFontDefault();
     }
 
+    if (g_mainFont) {
+        io.FontDefault = g_mainFont;
+    }
+
     io.Fonts->Build();
-    ImGui_ImplOpenGL3_CreateDeviceObjects();
     g_current_rendered_size = targetSize;
 }
 
@@ -2305,7 +2307,7 @@ bool ModernAnimatedFolder(const char* label, bool* state) {
     float cx = bb.Min.x + 15.0f * sc; float cy = bb.Min.y + size.y * 0.5f; float ang = anim * 1.5708f; float arr = 5.0f * sc;
     win->DrawList->AddTriangleFilled(ImVec2(cx+cosf(ang)*arr, cy+sinf(ang)*arr), ImVec2(cx+cosf(ang+2.094f)*arr, cy+sinf(ang+2.094f)*arr), ImVec2(cx+cosf(ang-2.094f)*arr, cy+sinf(ang-2.094f)*arr), ImGui::GetColorU32(th.primary));
     ImFont* font = ImGui::GetFont(); float fSz = ImGui::GetFontSize();
-    win->DrawList->AddText(font, fSz, ImVec2(cx + 25.0f * g_autoScale * g_scale, bb.Min.y + (size.y - fSz)*0.5f), IM_COL32_WHITE, label);
+    win->DrawList->AddText(ImVec2(cx + 25.0f * g_autoScale * g_scale, bb.Min.y + (size.y - fSz)*0.5f), IM_COL32_WHITE, label);
     if (*state) { ImGui::Indent(15.0f * g_autoScale * g_scale); return true; } return false;
 }
 
@@ -2322,7 +2324,7 @@ void ModernTierSelector(const char* label, bool* tierArray) {
         win->DrawList->AddRectFilled(bb.Min, bb.Max, IM_COL32((int)(30+70*a), (int)(35+100*a), (int)(45+50*a), 255), 4.0f * g_autoScale);
         if (a > 0.01f) win->DrawList->AddRect(bb.Min, bb.Max, ImGui::GetColorU32(ImVec4(UITheme().primary.x, UITheme().primary.y, UITheme().primary.z, 0.85f * a)), 4.0f*g_autoScale, 0, 1.5f*g_autoScale);
         char buf[4]; snprintf(buf, sizeof(buf), "%d", i); ImVec2 t_sz = ImGui::CalcTextSize(buf);
-        win->DrawList->AddText(ImGui::GetFont(), ImGui::GetFontSize(), pos + ImVec2((bb.GetWidth() - t_sz.x)*0.5f, (bb.GetHeight() - t_sz.y)*0.5f), tierArray[i] ? IM_COL32(0,0,0,255) : IM_COL32_WHITE, buf);
+        win->DrawList->AddText(pos + ImVec2((bb.GetWidth() - t_sz.x)*0.5f, (bb.GetHeight() - t_sz.y)*0.5f), tierArray[i] ? IM_COL32(0,0,0,255) : IM_COL32_WHITE, buf);
     }
 }
 
@@ -3106,13 +3108,12 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
     if (g_gl_width <= 0 || g_gl_height <= 0) return;
 
-    // 备份 OpenGL 状态
+    // 备份 OpenGL 状态（避免查询不支持的 GLES 枚举）
     GLint last_active_texture = 0; glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
     glActiveTexture(GL_TEXTURE0);
     GLint last_program = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
     GLint last_texture = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
     GLint last_array_buffer = 0; glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
-    GLint last_element_array_buffer = 0; glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
     GLint last_vertex_array = 0; glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
     GLint last_viewport[4] = {0}; glGetIntegerv(GL_VIEWPORT, last_viewport);
     GLint last_scissor_box[4] = {0}; glGetIntegerv(GL_SCISSOR_BOX, last_scissor_box);
@@ -3133,8 +3134,8 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
         ImGui_ImplOpenGL3_Init(glsl_ver);
         io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
-        SetupImGuiStyle();
         UpdateFontHD(true);
+        SetupImGuiStyle();
         g_isImGuiInit = true;
         LOGI("[+] GLES ImGui Initialized. Resolution: %dx%d", g_gl_width, g_gl_height);
     }
@@ -3193,7 +3194,6 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     glActiveTexture(last_active_texture);
     glBindVertexArray(last_vertex_array);
     glBindBuffer(GL_ARRAY_BUFFER, last_array_buffer);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, last_element_array_buffer);
     glBindFramebuffer(GL_FRAMEBUFFER, last_fbo);
     glViewport(last_viewport[0], last_viewport[1], last_viewport[2], last_viewport[3]);
     glScissor(last_scissor_box[0], last_scissor_box[1], last_scissor_box[2], last_scissor_box[3]);
