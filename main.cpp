@@ -3091,74 +3091,80 @@ extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) 
 }
 
 void FindAndHookHiddenJNI() {
-    FILE* fp = fopen("/proc/self/maps", "r"); if (!fp) return;
-    char line[1024];
-    struct MemRegion { uintptr_t start, end; };
-    std::vector<MemRegion> ro_regions;
-    std::vector<MemRegion> exec_regions;
+    static std::atomic<bool> hooked{false};
+    if (hooked.load()) return;
 
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "libunity.so")) {
-            uintptr_t start = 0, end = 0;
-            if (strstr(line, "r-xp")) {
-                if (sscanf(line, "%lx-%lx", &start, &end) == 2 && start < end) {
-                    exec_regions.push_back({start, end});
-                }
-            } else if (strstr(line, "r--p") || strstr(line, "rw-p")) {
-                if (sscanf(line, "%lx-%lx", &start, &end) == 2 && start < end) {
-                    ro_regions.push_back({start, end});
-                }
-            }
-        }
-    }
-    fclose(fp);
+    for (int retry = 0; retry < 10 && !hooked.load(); retry++) {
+        FILE* fp = fopen("/proc/self/maps", "r");
+        if (!fp) { sleep(1); continue; }
+        char line[1024];
+        struct MemRegion { uintptr_t start, end; bool is_rw; };
+        std::vector<MemRegion> regions;
 
-    if (ro_regions.empty() || exec_regions.empty()) return;
-
-    const char* target_string = "nativeInjectEvent";
-    size_t target_len = strlen(target_string);
-    std::vector<uintptr_t> string_addrs;
-    for (const auto& reg : ro_regions) {
-        for (uintptr_t p = reg.start; p + target_len <= reg.end; p++) {
-            char buf[32] = {0};
-            if (SafeReadMemory(p, buf, target_len)) {
-                if (memcmp(buf, target_string, target_len) == 0) {
-                    string_addrs.push_back(p);
+        while (fgets(line, sizeof(line), fp)) {
+            if (strstr(line, "libunity.so")) {
+                bool is_r = strstr(line, "r-") != nullptr;
+                bool is_rw = strstr(line, "rw") != nullptr;
+                if (is_r || is_rw) {
+                    uintptr_t start = 0, end = 0;
+                    if (sscanf(line, "%lx-%lx", &start, &end) == 2 && start < end) {
+                        regions.push_back({start, end, is_rw});
+                    }
                 }
             }
         }
-    }
+        fclose(fp);
 
-    if (string_addrs.empty()) return;
+        if (regions.empty()) { sleep(1); continue; }
 
-    bool found_func = false;
-    for (const auto& reg : ro_regions) {
-        uintptr_t align_start = (reg.start + 7) & ~7;
-        for (uintptr_t p = align_start; p + sizeof(void*) * 3 <= reg.end; p += sizeof(void*)) {
-            uintptr_t ptr_val = SafeReadPtr(p, 0);
-            for (uintptr_t str_addr : string_addrs) {
-                if (ptr_val == str_addr) {
-                    uintptr_t real_function_addr = SafeReadPtr(p, 16);
-                    bool is_exec = false;
-                    for (const auto& er : exec_regions) {
-                        if (real_function_addr >= er.start && real_function_addr < er.end && (real_function_addr % 4 == 0)) {
-                            is_exec = true; break;
+        const char* target_string = "nativeInjectEvent";
+        size_t target_len = strlen(target_string);
+        std::vector<uintptr_t> string_addrs;
+
+        for (const auto& reg : regions) {
+            if (!reg.is_rw) {
+                for (uintptr_t p = reg.start; p < reg.end - target_len; p++) {
+                    if (memcmp((void*)p, target_string, target_len) == 0) {
+                        string_addrs.push_back(p);
+                    }
+                }
+            }
+        }
+
+        if (string_addrs.empty()) { sleep(1); continue; }
+
+        bool found_func = false;
+        for (const auto& reg : regions) {
+            uintptr_t align_start = (reg.start + 7) & ~7;
+            for (uintptr_t p = align_start; p < reg.end - sizeof(void*) * 3; p += sizeof(void*)) {
+                uintptr_t ptr_val = *(uintptr_t*)p;
+                for (uintptr_t str_addr : string_addrs) {
+                    if (ptr_val == str_addr) {
+                        void** fnPtr_addr = (void**)(p + 16);
+                        void* real_function_addr = *fnPtr_addr;
+                        if (real_function_addr != nullptr && (uintptr_t)real_function_addr > 0x100000) {
+                            DobbyHook(real_function_addr, (void*)hook_nativeInjectEvent, (void**)&old_nativeInjectEvent);
+                            LOGI("[+] nativeInjectEvent Hooked for Touch Input successfully at %p", real_function_addr);
+                            found_func = true;
+                            hooked.store(true);
+                            break;
                         }
                     }
-                    if (is_exec && (uintptr_t)real_function_addr > 0x100000) {
-                        DobbyHook((void*)real_function_addr, (void*)hook_nativeInjectEvent, (void**)&old_nativeInjectEvent);
-                        LOGI("[+] nativeInjectEvent Hooked Safely for Touch Input.");
-                        found_func = true; break;
-                    }
                 }
+                if (found_func) break;
             }
             if (found_func) break;
         }
+
         if (found_func) break;
+        sleep(1);
     }
     
     // 启动连点器后台线程
-    std::thread(AutoClickerThread).detach();
+    static std::atomic<bool> clicker_started{false};
+    if (!clicker_started.exchange(true)) {
+        std::thread(AutoClickerThread).detach();
+    }
 }
 
 typedef void (*func_set_IsGameEnd_t)(void* thisObj, uint8_t isEnd);
