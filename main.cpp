@@ -477,7 +477,7 @@ uint8_t SafeReadByte(uintptr_t addr, uint32_t offset) {
 #define SAFE_READ_PTR(addr, offset) SafeReadPtr(addr, offset)
 #define SAFE_READ_INT(addr, offset) SafeReadInt(addr, offset)
 #define SAFE_READ_BYTE(addr, offset) SafeReadByte(addr, offset)
-#define IsValidPtr(ptr) ((ptr) > 0x10000000 && (ptr) < 0x00007FFFFFFFFFFF)
+#define IsValidPtr(ptr) (((uintptr_t)(ptr)) > 0x10000000 && ((uintptr_t)(ptr)) < 0x00007FFFFFFFFFFF && (((uintptr_t)(ptr)) & 0x3) == 0)
 
 std::string utf16_to_utf8(const std::wstring& wstr) {
     std::string res;
@@ -1078,7 +1078,7 @@ void ParseGameMemory() {
             uintptr_t addr16 = SAFE_READ_PTR(shopItems[i], g_off.addr16);
             if (IsValidPtr(addr16)) g_dbg_addr16 = addr16;
             int shop_hero_id = SAFE_READ_INT(addr16, g_off.shop_hero_id);
-            if (shop_hero_id > 0 && shop_hero_id < 2000) g_dbg_shop_ok = true;
+            if (shop_hero_id > 0 && shop_hero_id < 200000) g_dbg_shop_ok = true;
             pi.shop.push_back(shop_hero_id);
             
             // 自动购买
@@ -1108,7 +1108,7 @@ void ParseGameMemory() {
         auto benchItems = GetPointersInArray(addr18, 10);
         for (auto b_item : benchItems) {
             int b_hid = SAFE_READ_INT(b_item, g_off.bench_hero_id);
-            if (b_hid > 0 && b_hid < 2000) g_dbg_bench_ok = true;
+            if (b_hid > 0 && b_hid < 200000) g_dbg_bench_ok = true;
             pi.bench.push_back(b_hid);
         }
         
@@ -1123,8 +1123,8 @@ void ParseGameMemory() {
             bh.heroId = SAFE_READ_INT(bd_item, g_off.board_hero_id);
             bh.x = SAFE_READ_INT(bd_item, g_off.board_x);
             bh.y = SAFE_READ_INT(bd_item, g_off.board_y);
-            if (bh.heroId > 0 && bh.heroId < 2000) g_dbg_board_ok = true;
-            if (bh.x >= 0 && bh.x < 8 && bh.y >= 0 && bh.y < 8) g_dbg_board_pos_ok = true;
+            if (bh.heroId > 0 && bh.heroId < 200000) g_dbg_board_ok = true;
+            if (bh.x >= 0 && bh.x <= 8 && bh.y >= 0 && bh.y <= 8) g_dbg_board_pos_ok = true;
             pi.board.push_back(bh);
         }
         g_players.push_back(pi);
@@ -1487,8 +1487,8 @@ void DrawQuitCapsule() {
             typedef void (*func_quit_t)(uintptr_t, int, int);
             func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
             if (quit_func && IsValidExecutableAddr((void*)quit_func) && IsValidPtr(g_dbg_segmentcsogame)) {
-                AddActionLog((const char*)u8"-> [极速退游] call func_quit(segment=0x%lx, player_id=%d, mode=1)", g_dbg_segmentcsogame, g_my_player_id);
-                SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 1));
+                AddActionLog((const char*)u8"-> [极速退游] call func_quit(segment=0x%lx, player_id=%d, mode=0)", g_dbg_segmentcsogame, g_my_player_id);
+                SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 0));
             } else {
                 AddActionLog((const char*)u8"-> [退游失败] func_quit(0x%lx)或segment(0x%lx)无效!", (uintptr_t)quit_func, g_dbg_segmentcsogame);
             }
@@ -3358,8 +3358,8 @@ void* hook_SendWillRenderCanvases() {
         typedef void (*func_quit_t)(uintptr_t, int, int);
         func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
         if (quit_func && IsValidExecutableAddr((void*)quit_func) && IsValidPtr(g_dbg_segmentcsogame)) {
-            AddActionLog((const char*)u8"-> [极速退游] call func_quit(segment=0x%lx, player_id=%d, mode=1)", g_dbg_segmentcsogame, g_my_player_id);
-            SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 1));
+            AddActionLog((const char*)u8"-> [极速退游] call func_quit(segment=0x%lx, player_id=%d, mode=0)", g_dbg_segmentcsogame, g_my_player_id);
+            SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 0));
         } else {
             AddActionLog((const char*)u8"-> [退游失败] func_quit指针或segment无效!");
         }
