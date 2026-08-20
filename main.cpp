@@ -1966,8 +1966,35 @@ void DrawHexKeypadModal() {
 }
 
 void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_addr = 0, bool show_resolved = false) {
+    bool is_valid = false;
+    if (show_resolved) {
+        is_valid = IsValidPtr(resolved_addr) || (resolved_addr > 0 && resolved_addr < 0xFFFFFFFF);
+    } else {
+        std::string s(label);
+        if (s.find("func_") == 0) is_valid = IsValidExecutableAddr((void*)(g_il2cppTrueBase + *value));
+        else if (s.find("pi_") == 0) is_valid = IsValidPtr(g_dbg_addr13);
+        else if (s.find("ph_") == 0) is_valid = IsValidPtr(g_dbg_addr7);
+        else if (s.find("dict struct_size") != std::string::npos || s.find("dict ptr_offset") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr12) || IsValidPtr(g_dbg_addr7);
+        else if (s.find("addr7 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr7);
+        else if (s.find("addr9 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr9);
+        else if (s.find("addr23 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr23);
+        else if (s.find("shop_hero_id") != std::string::npos) is_valid = g_shop_slots.size() > 0;
+        else if (s.find("bench_hero_id") != std::string::npos) is_valid = g_is_in_match.load();
+        else if (s.find("board_") != std::string::npos) is_valid = g_is_in_match.load();
+        else if (s.find("addr15") != std::string::npos || s.find("addr16") != std::string::npos) is_valid = g_shop_slots.size() > 0;
+        else if (s.find("addr17") != std::string::npos || s.find("addr18") != std::string::npos) is_valid = g_is_in_match.load();
+        else if (s.find("addr19") != std::string::npos || s.find("addr20") != std::string::npos) is_valid = g_is_in_match.load();
+        else if (s.find("my_player_id") != std::string::npos) is_valid = g_my_player_id > 0;
+        else if (s.find("next_opponents_list") != std::string::npos) is_valid = !g_next_opponents.empty();
+        else if (s.find("hexctrl") != std::string::npos) is_valid = IsValidPtr(g_dbg_hexctrl);
+        else if (s.find("addr14") != std::string::npos) is_valid = g_shop_slots.size() > 0;
+        else is_valid = true;
+    }
+    ImVec4 label_col = is_valid ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+    
     ImGui::PushID(label);
-    ImGui::Text("%-24s", label); 
+    ImGui::TextColored(label_col, "%-24s", label);
+
     
     if (show_resolved) {
         ImGui::SameLine();
@@ -2899,71 +2926,83 @@ void DrawMainMenu() {
                 }
                 break;
             case 2:
-                DrawSectionTitle((const char*)u8"链路诊断与状态监视");
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址链路】");
-                ImGui::Text("il2cppTrueBase: 0x%lx", g_il2cppTrueBase);
-                ImGui::Text("addr1 (Instance): 0x%lx %s", g_dbg_addr1, IsValidPtr(g_dbg_addr1) ? "[OK]" : "[x]");
-                ImGui::Text("addr2: 0x%lx %s", g_dbg_addr2, IsValidPtr(g_dbg_addr2) ? "[OK]" : "[x]");
-                ImGui::Text("addr3: 0x%lx %s", g_dbg_addr3, IsValidPtr(g_dbg_addr3) ? "[OK]" : "[x]");
-                ImGui::Text("addra: 0x%lx %s", g_dbg_addra, IsValidPtr(g_dbg_addra) ? "[OK]" : "[x]");
-                ImGui::Text("segmentCSOGame: 0x%lx %s", g_dbg_segmentcsogame, IsValidPtr(g_dbg_segmentcsogame) ? "[OK]" : "[x]");
-                ImGui::Text("本地玩家ID: %d | 对局状态: %s", g_my_player_id, g_is_in_match.load() ? "对局中" : "未在对局");
-                
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【核心Hook拦截状态】");
-                ImGui::Text("1. 商店监听 (func_shop_listen): %s", old_shop_listen ? "已挂钩 [OK]" : "未挂钩/偏移待校准 [x]");
-                ImGui::Text("2. 对局状态 (func_set_IsGameEnd): %s", orig_set_IsGameEnd ? "已挂钩 [OK]" : "未挂钩/偏移待校准 [x]");
-                ImGui::Text("3. 主线程管道 (SendWillRenderCanvases): %s", orig_SendWillRenderCanvases ? "已挂钩 [OK]" : "未挂钩 [x]");
-                ImGui::Text("4. 触摸输入拦截 (nativeInjectEvent): %s", old_nativeInjectEvent ? "已挂钩 [OK]" : "未挂钩 [x]");
+                {
+                    auto PrintCol = [](const char* fmt, bool ok, ...) {
+                        va_list args;
+                        va_start(args, ok);
+                        ImVec4 col = ok ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                        ImGui::PushStyleColor(ImGuiCol_Text, col);
+                        ImGui::TextV(fmt, args);
+                        ImGui::PopStyleColor();
+                        va_end(args);
+                    };
 
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库数据调试】");
-                ImGui::Text("addr4=0x%lx | addr7=0x%lx (条目数: %zu)", g_dbg_addr4, g_dbg_addr7, g_dbg_list7_addrs.size());
-                ImGui::Indent();
-                for (size_t i = 0; i < std::min((size_t)6, g_dbg_list7_addrs.size()); i++) {
-                    uintptr_t a8 = g_dbg_list7_addrs[i];
-                    ImGui::Text("addr7[%zu] -> addr8: 0x%lx", i, a8);
-                }
-                if (g_dbg_list7_addrs.size() > 6) ImGui::Text("... (共 %zu 个条目)", g_dbg_list7_addrs.size());
-                ImGui::Unindent();
+                    DrawSectionTitle((const char*)u8"链路诊断与状态监视");
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址链路】");
+                    PrintCol("il2cppTrueBase: 0x%lx", g_il2cppTrueBase > 0, g_il2cppTrueBase);
+                    PrintCol("addr1 (Instance): 0x%lx %s", IsValidPtr(g_dbg_addr1), g_dbg_addr1, IsValidPtr(g_dbg_addr1) ? "[OK]" : "[x]");
+                    PrintCol("addr2: 0x%lx %s", IsValidPtr(g_dbg_addr2), g_dbg_addr2, IsValidPtr(g_dbg_addr2) ? "[OK]" : "[x]");
+                    PrintCol("addr3: 0x%lx %s", IsValidPtr(g_dbg_addr3), g_dbg_addr3, IsValidPtr(g_dbg_addr3) ? "[OK]" : "[x]");
+                    PrintCol("addra: 0x%lx %s", IsValidPtr(g_dbg_addra), g_dbg_addra, IsValidPtr(g_dbg_addra) ? "[OK]" : "[x]");
+                    PrintCol("segmentCSOGame: 0x%lx %s", IsValidPtr(g_dbg_segmentcsogame), g_dbg_segmentcsogame, IsValidPtr(g_dbg_segmentcsogame) ? "[OK]" : "[x]");
+                    PrintCol("真实ID: %d | 对局状态: %s", g_is_in_match.load() || g_my_player_id > 0, g_my_player_id, g_is_in_match.load() ? "对局中" : "未在对局");
+                    
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【核心Hook点状态】");
+                    PrintCol("1. 商店挂载 (func_shop_listen): %s", old_shop_listen != nullptr, old_shop_listen ? "已挂载 [OK]" : "未挂载/偏移需校准 [x]");
+                    PrintCol("2. 对局状态 (func_set_IsGameEnd): %s", orig_set_IsGameEnd != nullptr, orig_set_IsGameEnd ? "已挂载 [OK]" : "未挂载/偏移需校准 [x]");
+                    PrintCol("3. 线程管道 (SendWillRenderCanvases): %s", orig_SendWillRenderCanvases != nullptr, orig_SendWillRenderCanvases ? "已挂载 [OK]" : "未挂载 [x]");
+                    PrintCol("4. 触摸分发 (nativeInjectEvent): %s", old_nativeInjectEvent != nullptr, old_nativeInjectEvent ? "已挂载 [OK]" : "未挂载 [x]");
 
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【商店槽位地址 (5槽)】");
-                ImGui::Text("捕获进度: %zu / 5", g_shop_slots.size());
-                ImGui::Indent();
-                for (size_t i = 0; i < g_shop_slots.size(); i++)
-                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.85f, 1.0f), "ShopSlot[%zu]: 0x%lx", i, g_shop_slots[i]);
-                for (size_t i = g_shop_slots.size(); i < 5; i++)
-                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "ShopSlot[%zu]: (等待游戏刷新商店...)", i);
-                ImGui::Unindent();
-
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家列表 (addr12)】");
-                ImGui::Text("addr11=0x%lx | addr12=0x%lx | 解析出玩家数: %zu", g_dbg_addr11, g_dbg_addr12, g_players.size());
-                ImGui::Indent();
-                for (size_t i = 0; i < g_players.size(); i++) {
-                    const auto& pi = g_players[i];
-                    ImGui::Text("[%zu] ID=%d 昵称=%s 金币=%d 等级=%d 连胜=%d 连败=%d (addr13=0x%lx)", 
-                        i+1, pi.id, pi.name.c_str(), pi.money, pi.level, pi.win_streak, pi.lose_streak, pi.addr13_ptr);
-                }
-                ImGui::Unindent();
-
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【下轮对手预测】");
-                if (g_next_opponents.empty()) ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "等待进入对局获取对手列表...");
-                else {
-                    for (size_t i = 0; i < g_next_opponents.size(); i++) {
-                        int opp_id = g_next_opponents[i];
-                        std::string opp_name = "未知";
-                        for (const auto& p : g_players) { if (p.id == opp_id) { opp_name = p.name; break; } }
-                        ImGui::Text("对手[%zu]: ID=%d (%s)", i + 1, opp_id, opp_name.c_str());
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库字典链】");
+                    PrintCol("addr4=0x%lx | addr7=0x%lx (大小: %zu)", IsValidPtr(g_dbg_addr4) && IsValidPtr(g_dbg_addr7), g_dbg_addr4, g_dbg_addr7, g_dbg_list7_addrs.size());
+                    ImGui::Indent();
+                    for (size_t i = 0; i < std::min((size_t)6, g_dbg_list7_addrs.size()); i++) {
+                        uintptr_t a8 = g_dbg_list7_addrs[i];
+                        PrintCol("addr7[%zu] -> addr8: 0x%lx", IsValidPtr(a8), i, a8);
                     }
-                }
+                    if (g_dbg_list7_addrs.size() > 6) ImGui::Text("... (共 %zu 个项)", g_dbg_list7_addrs.size());
+                    ImGui::Unindent();
 
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【海克斯与排位 (addr21~26)】");
-                ImGui::Text("addr21=0x%lx | addr23=0x%lx | addr26=0x%lx | hexctrl=0x%lx", g_dbg_addr21, g_dbg_addr23, g_dbg_addr26, g_dbg_hexctrl);
-                ImGui::Text("海克斯品质: [%d, %d, %d]", g_hex_qualities[0], g_hex_qualities[1], g_hex_qualities[2]);
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【商店槽位地址 (5个)】");
+                    PrintCol("数量: %zu / 5", g_shop_slots.size() == 5, g_shop_slots.size());
+                    ImGui::Indent();
+                    for (size_t i = 0; i < g_shop_slots.size(); i++)
+                        PrintCol("ShopSlot[%zu]: 0x%lx", IsValidPtr(g_shop_slots[i]), i, g_shop_slots[i]);
+                    for (size_t i = g_shop_slots.size(); i < 5; i++)
+                        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "ShopSlot[%zu]: (等待刷新...)", i);
+                    ImGui::Unindent();
+
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家列表 (addr12)】");
+                    PrintCol("addr11=0x%lx | addr12=0x%lx | 数量: %zu", IsValidPtr(g_dbg_addr12) && g_players.size() > 0, g_dbg_addr11, g_dbg_addr12, g_players.size());
+                    ImGui::Indent();
+                    for (size_t i = 0; i < g_players.size(); i++) {
+                        const auto& pi = g_players[i];
+                        PrintCol("[%zu] ID=%d 昵称=%s 钱=%d 等级=%d 连胜=%d 连败=%d (addr13=0x%lx)", 
+                            IsValidPtr(pi.addr13_ptr), i+1, pi.id, pi.name.c_str(), pi.money, pi.level, pi.win_streak, pi.lose_streak, pi.addr13_ptr);
+                    }
+                    ImGui::Unindent();
+
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【下回合对手预测】");
+                    if (g_next_opponents.empty()) ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "等待对局中获取列表...");
+                    else {
+                        for (size_t i = 0; i < g_next_opponents.size(); i++) {
+                            int opp_id = g_next_opponents[i];
+                            std::string opp_name = "未知";
+                            for (const auto& p : g_players) { if (p.id == opp_id) { opp_name = p.name; break; } }
+                            PrintCol("对手[%zu]: ID=%d (%s)", opp_id > 0, i + 1, opp_id, opp_name.c_str());
+                        }
+                    }
+
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【海克斯与排位段位 (addr21~26)】");
+                    PrintCol("addr21=0x%lx | addr23=0x%lx | addr26=0x%lx | hexctrl=0x%lx", IsValidPtr(g_dbg_addr21) && IsValidPtr(g_dbg_addr26), g_dbg_addr21, g_dbg_addr23, g_dbg_addr26, g_dbg_hexctrl);
+                    PrintCol("海克斯品质: [%d, %d, %d]", IsValidPtr(g_dbg_hexctrl), g_hex_qualities[0], g_hex_qualities[1], g_hex_qualities[2]);
+                }
                 break;
             case 3:
                 DrawSectionTitle((const char*)u8"偏移调试与实时诊断");
@@ -3048,7 +3087,10 @@ void DrawMainMenu() {
     }
     ImGui::End();
 }
-
+    } 
+    ImGui::End(); 
+    DrawActionLogOverlay(); 
+}
 int g_current_frame = 0;
 std::atomic<bool> g_engine_rendering{false};
 std::atomic<int> g_active_renderer{0}; // 0=未知, 1=OpenGL ES, 2=Vulkan
@@ -3210,8 +3252,10 @@ void hook_set_IsGameEnd(void* thisObj, uint8_t isEnd) {
     if (orig_set_IsGameEnd) orig_set_IsGameEnd(thisObj, isEnd);
     if (!thisObj || !IsValidPtr((uintptr_t)thisObj)) return;
     if (isEnd == 0) {
+        AddActionLog((const char*)u8"-> [引擎状态] call func_set_IsGameEnd(isEnd=0) | 游戏开始!");
         g_match_enter_pending.store(true, std::memory_order_release);
     } else if (g_is_in_match.load(std::memory_order_acquire)) {
+        AddActionLog((const char*)u8"-> [引擎状态] call func_set_IsGameEnd(isEnd=%d) | 游戏结束!", isEnd);
         g_is_in_match.store(false, std::memory_order_release);
         g_match_enter_pending.store(false, std::memory_order_release);
         g_need_segment_gap_before_enter = true;
@@ -3229,8 +3273,16 @@ void* hook_SendWillRenderCanvases() {
             func_buy_new_t buy_hero = (func_buy_new_t)(g_il2cppTrueBase + g_off.func_buy_hero_new);
             if (buy_hero && IsValidExecutableAddr((void*)buy_hero)) {
                 for (uintptr_t slot_addr : g_Tasks.buy_slots) {
-                    if (IsValidPtr(slot_addr)) { SAFE_CALL_VOID(buy_hero((void*)slot_addr)); }
+                    if (IsValidPtr(slot_addr)) { 
+                        int hero_id = SAFE_READ_INT(slot_addr, g_off.shop_hero_id);
+                        AddActionLog((const char*)u8"-> [自动购买] call buy_hero_new(slot_addr=0x%lx) | hero_id=%d", slot_addr, hero_id);
+                        SAFE_CALL_VOID(buy_hero((void*)slot_addr)); 
+                    } else {
+                        AddActionLog((const char*)u8"-> [自动购买失败] slot_addr(0x%lx) 指针无效!", slot_addr);
+                    }
                 }
+            } else {
+                AddActionLog((const char*)u8"-> [自动购买失败] 函数地址(0x%lx) 无效!", (uintptr_t)buy_hero);
             }
             g_Tasks.buy_slots.clear();
         }
@@ -3240,7 +3292,10 @@ void* hook_SendWillRenderCanvases() {
         typedef void (*func_quit_t)(uintptr_t, int, int);
         func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
         if (quit_func && IsValidExecutableAddr((void*)quit_func) && IsValidPtr(g_dbg_segmentcsogame)) {
+            AddActionLog((const char*)u8"-> [极速退游] call func_quit(segment=0x%lx, player_id=%d, mode=1)", g_dbg_segmentcsogame, g_my_player_id);
             SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 1));
+        } else {
+            AddActionLog((const char*)u8"-> [退游失败] func_quit指针或segment无效!");
         }
         g_is_in_match.store(false, std::memory_order_release);
         g_need_segment_gap_before_enter = true;
