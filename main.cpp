@@ -44,24 +44,23 @@ bool g_show_menu = true;
 
 // 采用了你最新调试出的精准偏移
 struct Offsets {
-    // 【主线基础寻址】
-    uint32_t func_get_Instance = 0x80EF374;
+    // 主线寻址链
+    uint32_t func_get_Instance = 0x9339D64;
     uint32_t addr2 = 0x10;
     uint32_t addr3 = 0x20;
     uint32_t addra = 0x10;
     uint32_t segmentcsogame = 0x20;
     
-    uint32_t func_quit = 0x6ad90b4;
-    uint32_t my_player_id = 0x100;          // addr2 视角玩家（观战时会变）
-    uint32_t segment_my_player_id = 0xEC;   // segmentcsogame 真实本地玩家 ID
-    uint32_t next_opponents_list = 0x240;
-    uint32_t func_reqbuyhero = 0x46d6e94;
-    uint32_t func_shop_listen = 0x722e680;
-    uint32_t func_buy_hero_new = 0x7232fe4;
+    uint32_t func_quit = 0x8292D94;
+    uint32_t my_player_id = 0x100;
+    uint32_t segment_my_player_id = 0x10C;
+    uint32_t next_opponents_list = 0x248;
+    uint32_t func_shop_listen = 0xA63FC44;
+    uint32_t func_buy_hero_new = 0xA644B48;
     uint32_t func_set_IsGameEnd = 0x6F489C8;
     
-    // 【牌库字典链 (addr4~9)】
-    uint32_t addr4 = 0x230;
+    // 牌库字典链 (addr4~9)
+    uint32_t addr4 = 0x250;
     uint32_t addr5 = 0x18;
     uint32_t addr6 = 0x18;
     uint32_t addr7 = 0x10;
@@ -74,19 +73,19 @@ struct Offsets {
     uint32_t addr9_struct_size = 0x20;
     uint32_t addr9_ptr_offset = 0x10;
     
-    // 【牌库底层数据 (addr10)】
+    // 牌库底部 (addr10)
     uint32_t ph_heroId = 0x10;
     uint32_t ph_remaining = 0x1c; 
     uint32_t ph_total = 0x20;     
     
-    // 【玩家字典链 (addr11~12)】
+    // 字典 (addr11~12)
     uint32_t addr11 = 0x38;
     uint32_t addr12 = 0x18;
     
     uint32_t addr12_struct_size = 0x08;
     uint32_t addr12_ptr_offset = 0x08;
     
-    // 【玩家基本属性 (addr13)】
+    // 玩家 (addr13)
     uint32_t addr13 = 0x50;
     uint32_t pi_name = 0x18;
     uint32_t pi_id = 0x20;
@@ -94,35 +93,35 @@ struct Offsets {
     uint32_t pi_money = 0x5c;
     uint32_t pi_win_streak = 0xdc;
     uint32_t pi_lose_streak = 0xe0;
-    uint32_t pi_level = 0xf0;
+    uint32_t pi_level = 0x100;
     
-    // 【玩家商店、备战区与场上】
-    uint32_t addr14 = 0x108;
+    // 商店、备战与场上
+    uint32_t addr14 = 0x118;
     uint32_t addr15 = 0x10;
     uint32_t addr16 = 0x10;
     uint32_t shop_hero_id = 0x14; 
     
-    uint32_t addr17 = 0x388;
+    uint32_t addr17 = 0x398;
     uint32_t addr18 = 0x10;
     uint32_t bench_hero_id = 0x108; 
     
-    uint32_t addr19 = 0x390;
+    uint32_t addr19 = 0x3A0;
     uint32_t addr20 = 0x10; 
     uint32_t board_hero_id = 0x108; 
     uint32_t board_x = 0x30;
     uint32_t board_y = 0x34;
     
-    // 【海克斯链】
-    uint32_t addr21 = 0x128;
+    // 海克斯与排位
+    uint32_t addr21 = 0x148;
     uint32_t addr22 = 0x18;
-    uint32_t addr23 = 0x08;
+    uint32_t addr23 = 0x10;
     uint32_t addr23_struct_size = 0x20;
     uint32_t addr23_ptr_offset = 0x10;
-    uint32_t addr26 = 0x68;              // addr23 每条 +0x68 -> addr26（原先只读第一条当 addr24）
-    uint32_t pi_avatar_rank = 0x2DC;     // addr26 +0x2DC = 玩家头像排位 id
-    uint32_t pi_avatar_player_id = 0x248; // addr26 +0x248 = 玩家 id（与玩家列表 id 对上即该玩家）
+    uint32_t addr26 = 0x68;              
+    uint32_t pi_avatar_rank = 0x2DC;     
+    uint32_t pi_avatar_player_id = 0x248; 
     uint32_t hexctrl = 0x60;
-    uint32_t func_get_hex = 0x6e356d4;
+    uint32_t func_get_hex = 0x8BBA7FC;
 };
 
 Offsets g_off;
@@ -558,7 +557,7 @@ void SaveConfig() {
         out << "[主线基础寻址与全局功能]\n";
         WRITE_OFF_32(func_get_Instance); WRITE_OFF_32(addr2); WRITE_OFF_32(addr3); WRITE_OFF_32(addra); WRITE_OFF_32(segmentcsogame);
         WRITE_OFF_32(func_quit); WRITE_OFF_32(my_player_id); WRITE_OFF_32(segment_my_player_id); WRITE_OFF_32(next_opponents_list);
-        WRITE_OFF_32(func_reqbuyhero); WRITE_OFF_32(func_shop_listen); WRITE_OFF_32(func_buy_hero_new);
+        WRITE_OFF_32(func_shop_listen); WRITE_OFF_32(func_buy_hero_new);
         WRITE_OFF_32(func_set_IsGameEnd);
         
         out << "\n[牌库字典链]\n";
@@ -664,8 +663,7 @@ void LoadConfig() {
                 #define PARSE_OFF_32(name) if (key == #name) g_off.name = val;
                 
                 PARSE_OFF_32(func_get_Instance) PARSE_OFF_32(addr2) PARSE_OFF_32(addr3) PARSE_OFF_32(addra) PARSE_OFF_32(segmentcsogame)
-                PARSE_OFF_32(func_quit) PARSE_OFF_32(my_player_id) PARSE_OFF_32(segment_my_player_id) PARSE_OFF_32(next_opponents_list) PARSE_OFF_32(func_reqbuyhero)
-                PARSE_OFF_32(func_shop_listen) PARSE_OFF_32(func_buy_hero_new) PARSE_OFF_32(func_set_IsGameEnd)
+                PARSE_OFF_32(func_quit) PARSE_OFF_32(my_player_id) PARSE_OFF_32(segment_my_player_id) PARSE_OFF_32(next_opponents_list) PARSE_OFF_32(func_shop_listen) PARSE_OFF_32(func_buy_hero_new) PARSE_OFF_32(func_set_IsGameEnd)
                 PARSE_OFF_32(addr4) PARSE_OFF_32(addr5) PARSE_OFF_32(addr6) PARSE_OFF_32(addr7)
                 PARSE_OFF_32(addr7_struct_size) PARSE_OFF_32(addr7_ptr_offset)
                 PARSE_OFF_32(addr9) PARSE_OFF_32(addr9_struct_size) PARSE_OFF_32(addr9_ptr_offset)
@@ -2925,7 +2923,6 @@ void DrawMainMenu() {
                 DrawOffsetAdjuster("func_set_IsGameEnd", &g_off.func_set_IsGameEnd);
                 DrawOffsetAdjuster("my_player_id (addr2)", &g_off.my_player_id);
                 DrawOffsetAdjuster("next_opponents_list", &g_off.next_opponents_list);
-                DrawOffsetAdjuster("func_reqbuyhero", &g_off.func_reqbuyhero);
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家字典 (addr11~12)】");
                 DrawOffsetAdjuster("addr11", &g_off.addr11, g_dbg_addr11, true);
