@@ -2,6 +2,8 @@
 #include <sys/uio.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
+#include <setjmp.h>
 #include <android/log.h>
 #include <dlfcn.h>
 #include <string>
@@ -43,7 +45,7 @@ bool g_show_menu = true;
 // 采用了你最新调试出的精准偏移
 struct Offsets {
     // 【主线基础寻址】
-    uint32_t func_get_Instance = 0x9339D64;
+    uint32_t func_get_Instance = 0x80EF374;
     uint32_t addr2 = 0x10;
     uint32_t addr3 = 0x20;
     uint32_t addra = 0x10;
@@ -326,6 +328,128 @@ uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x
         return ((uintptr_t(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t))old_shop_listen)(x0, x1, x2, x3, x4, x5, x6, x7);
     }
     return 0;
+}
+
+// -------------------- Anti-Crash Signal Guard & Safe Execution --------------------
+static thread_local sigjmp_buf g_segv_jmp_buf;
+static thread_local bool g_segv_guard_active = false;
+
+static void SegvSignalHandler(int sig, siginfo_t* info, void* ucontext) {
+    if (g_segv_guard_active) {
+        g_segv_guard_active = false;
+        siglongjmp(g_segv_jmp_buf, 1);
+    }
+    struct sigaction sa;
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(sig, &sa, nullptr);
+    raise(sig);
+}
+
+inline void InitCrashGuard() {
+    static std::atomic<bool> inited{false};
+    if (inited.exchange(true)) return;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = SegvSignalHandler;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
+    sigaction(SIGILL, &sa, nullptr);
+    LOGI("[+] Anti-Crash Signal Guard Installed.");
+}
+
+#define SAFE_CALL(call_expr, fallback_val) [&]() { \
+    InitCrashGuard(); \
+    g_segv_guard_active = true; \
+    if (sigsetjmp(g_segv_jmp_buf, 1) == 0) { \
+        auto res = (call_expr); \
+        g_segv_guard_active = false; \
+        return res; \
+    } else { \
+        g_segv_guard_active = false; \
+        LOGI("[!] Crash prevented during call: " #call_expr); \
+        return fallback_val; \
+    } \
+}()
+
+#define SAFE_CALL_VOID(call_expr) [&]() { \
+    InitCrashGuard(); \
+    g_segv_guard_active = true; \
+    if (sigsetjmp(g_segv_jmp_buf, 1) == 0) { \
+        call_expr; \
+        g_segv_guard_active = false; \
+    } else { \
+        g_segv_guard_active = false; \
+        LOGI("[!] Crash prevented during void call: " #call_expr); \
+    } \
+}()
+
+struct MemRange { uintptr_t start; uintptr_t end; };
+static std::vector<MemRange> g_il2cpp_exec_regions;
+static std::mutex g_exec_regions_mutex;
+
+inline void UpdateIl2CppExecRegions() {
+    std::lock_guard<std::mutex> lock(g_exec_regions_mutex);
+    g_il2cpp_exec_regions.clear();
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) return;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "libil2cpp.so") && strstr(line, "r-xp")) {
+            uintptr_t start = 0, end = 0;
+            if (sscanf(line, "%lx-%lx", &start, &end) == 2 && start < end) {
+                g_il2cpp_exec_regions.push_back({start, end});
+            }
+        }
+    }
+    fclose(fp);
+}
+
+inline bool IsValidExecutableAddr(void* addr) {
+    if (!addr) return false;
+    uintptr_t ptr = (uintptr_t)addr;
+    if (ptr % 4 != 0) return false;
+    std::lock_guard<std::mutex> lock(g_exec_regions_mutex);
+    for (const auto& r : g_il2cpp_exec_regions) {
+        if (ptr >= r.start && ptr < r.end) return true;
+    }
+    return false;
+}
+
+inline int SafeDobbyHook(void* target, void* replace, void** origin) {
+    if (!target || !replace) return -1;
+    if (!IsValidExecutableAddr(target)) {
+        LOGI("[!] SafeDobbyHook rejected invalid target address: %p", target);
+        return -1;
+    }
+    // ARM64 function prologue validation
+    uint32_t first_insn = 0;
+    if (!SafeReadMemory((uintptr_t)target, &first_insn, sizeof(first_insn))) {
+        LOGI("[!] SafeDobbyHook: unable to read target instruction at %p", target);
+        return -1;
+    }
+    bool looks_like_func_entry = false;
+    if ((first_insn & 0xFFE00000) == 0xA9800000) looks_like_func_entry = true; // STP pre-index
+    if ((first_insn & 0xFF0003FF) == 0xD10003FF) looks_like_func_entry = true; // SUB SP
+    if (first_insn == 0xD503233F || first_insn == 0xD503237F) looks_like_func_entry = true; // PACIASP/PACIBSP
+    if ((first_insn & 0xFFE0FFE0) == 0xAA0003E0) looks_like_func_entry = true; // MOV reg
+    if ((first_insn & 0xFC000000) == 0x14000000 || (first_insn & 0xFC000000) == 0x94000000) looks_like_func_entry = true; // B/BL
+    if (first_insn == 0xD503201F) looks_like_func_entry = true; // NOP
+    if ((first_insn & 0xFFC003E0) == 0xF90003E0) looks_like_func_entry = true; // STR [SP]
+    
+    if (!looks_like_func_entry) {
+        LOGI("[!] SafeDobbyHook rejected: address %p doesn't look like function entry (insn=0x%08X)", target, first_insn);
+        return -1;
+    }
+    int ret = DobbyHook(target, replace, origin);
+    if (ret == 0) {
+        LOGI("[+] SafeDobbyHook successfully hooked target: %p", target);
+    } else {
+        LOGI("[!] SafeDobbyHook failed with code %d for target: %p", ret, target);
+    }
+    return ret;
 }
 
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
@@ -710,7 +834,7 @@ bool TryResolveSegmentCSOGame(uintptr_t* out_segment = nullptr) {
     if (!get_Instance) return false;
 
     uintptr_t addr1 = 0;
-    try { addr1 = (uintptr_t)get_Instance(nullptr); } catch (...) { return false; }
+    addr1 = SAFE_CALL((uintptr_t)get_Instance(nullptr), (uintptr_t)0); // Anti-crash protected
     if (!IsValidPtr(addr1)) return false;
 
     uintptr_t addr2 = SAFE_READ_PTR(addr1, g_off.addr2);
@@ -828,7 +952,7 @@ void ParseGameMemory() {
     if (!get_Instance) return;
     
     // [主线]
-    try { g_dbg_addr1 = (uintptr_t)get_Instance(nullptr); } catch(...) { g_dbg_addr1 = 0; }
+    g_dbg_addr1 = SAFE_CALL((uintptr_t)get_Instance(nullptr), (uintptr_t)0); // Anti-crash protected
     g_dbg_addr2 = SAFE_READ_PTR(g_dbg_addr1, g_off.addr2);
     g_dbg_addr3 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr3); 
     g_dbg_addra = SAFE_READ_PTR(g_dbg_addr3, g_off.addra); 
@@ -1005,11 +1129,10 @@ void ParseGameMemory() {
 
                         typedef int (*func_get_hex_t)(uintptr_t, int);
                         func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
-                        if (get_hex) {
-                            try {
-                                int q0 = get_hex(g_dbg_hexctrl, 0);
-                                int q1 = get_hex(g_dbg_hexctrl, 1);
-                                int q2 = get_hex(g_dbg_hexctrl, 2);
+                        if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
+                            int q0 = SAFE_CALL(get_hex(g_dbg_hexctrl, 0), 0);
+                            int q1 = SAFE_CALL(get_hex(g_dbg_hexctrl, 1), 0);
+                            int q2 = SAFE_CALL(get_hex(g_dbg_hexctrl, 2), 0);
                                 
                                 if (q0 > 0 || q1 > 0 || q2 > 0) {
                                     if (q0 == prev_q0.load() && q1 == prev_q1.load() && q2 == prev_q2.load()) {
@@ -3092,7 +3215,12 @@ void FindAndHookHiddenJNI() {
     for (const auto& reg : regions) {
         if (!reg.is_rw) {
             for (uintptr_t p = reg.start; p < reg.end - strlen(target_string); p++) {
-                if (memcmp((void*)p, target_string, strlen(target_string)) == 0) string_addrs.push_back(p);
+                {
+                    char tmp_buf[32] = {0};
+                    size_t tlen = strlen(target_string);
+                    if (tlen <= sizeof(tmp_buf) && SafeReadMemory(p, tmp_buf, tlen) && memcmp(tmp_buf, target_string, tlen) == 0)
+                        string_addrs.push_back(p);
+                }
             }
         }
     }
@@ -3103,11 +3231,13 @@ void FindAndHookHiddenJNI() {
     for (const auto& reg : regions) {
         uintptr_t align_start = (reg.start + 7) & ~7;
         for (uintptr_t p = align_start; p < reg.end - sizeof(void*)*3; p += sizeof(void*)) {
-            uintptr_t ptr_val = *(uintptr_t*)p;
+            uintptr_t ptr_val = 0;
+                if (!SafeReadMemory(p, &ptr_val, sizeof(ptr_val))) continue;
             for (uintptr_t str_addr : string_addrs) {
                 if (ptr_val == str_addr) {
-                    void** fnPtr_addr = (void**)(p + 16);
-                    void* real_function_addr = *fnPtr_addr;
+                    uintptr_t real_func_val = 0;
+                        if (!SafeReadMemory(p + 16, &real_func_val, sizeof(real_func_val))) continue;
+                        void* real_function_addr = (void*)real_func_val;
                     if (real_function_addr != nullptr && (uintptr_t)real_function_addr > 0x100000) {
                         DobbyHook(real_function_addr, (void*)hook_nativeInjectEvent, (void**)&old_nativeInjectEvent);
                         LOGI("[+] nativeInjectEvent Hooked for Touch Input.");
@@ -3148,9 +3278,9 @@ void* hook_SendWillRenderCanvases() {
         if (!g_Tasks.buy_slots.empty()) {
             typedef void (*func_buy_new_t)(void*);
             func_buy_new_t buy_hero = (func_buy_new_t)(g_il2cppTrueBase + g_off.func_buy_hero_new);
-            if (buy_hero) {
+            if (buy_hero && IsValidExecutableAddr((void*)buy_hero)) {
                 for (uintptr_t slot_addr : g_Tasks.buy_slots) {
-                    try { buy_hero((void*)slot_addr); } catch(...) {}
+                    if (IsValidPtr(slot_addr)) { SAFE_CALL_VOID(buy_hero((void*)slot_addr)); }
                 }
             }
             g_Tasks.buy_slots.clear();
@@ -3160,8 +3290,8 @@ void* hook_SendWillRenderCanvases() {
         g_Tasks.trigger_quit.store(false);
         typedef void (*func_quit_t)(uintptr_t, int, int);
         func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
-        if (quit_func && IsValidPtr(g_dbg_segmentcsogame)) {
-            try { quit_func(g_dbg_segmentcsogame, g_my_player_id, 1); } catch(...) {}
+        if (quit_func && IsValidExecutableAddr((void*)quit_func) && IsValidPtr(g_dbg_segmentcsogame)) {
+            SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 1));
         }
         g_is_in_match.store(false, std::memory_order_release);
         g_need_segment_gap_before_enter = true;
@@ -3346,12 +3476,17 @@ void* Il2CppInitThread(void*) {
     }
     LOGI("[+] libil2cpp.so Base Found: 0x%lx", (unsigned long)g_il2cppTrueBase);
 
+    // Wait for il2cpp to fully initialize, then build executable regions cache
+    sleep(2);
+    UpdateIl2CppExecRegions();
+
     LoadConfig();
     EnsureTextureWorkerStarted();
     return nullptr;
 }
 
 void* SetupThread(void*) {
+    InitCrashGuard();
     LOGI("[+] Adaptive Dual-Engine Setup Thread Started...");
 
     // 1. 优先对 Vulkan 通道进行挂钩（无阻塞）
