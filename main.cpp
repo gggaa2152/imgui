@@ -3141,8 +3141,7 @@ void FindAndHookHiddenJNI() {
         }
         if (found_func) break;
     }
-    
-    
+}
 
 typedef void (*func_set_IsGameEnd_t)(void* thisObj, uint8_t isEnd);
 func_set_IsGameEnd_t orig_set_IsGameEnd = nullptr;
