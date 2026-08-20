@@ -52,7 +52,6 @@ struct Offsets {
     uint32_t segmentcsogame = 0x20;
     
     uint32_t func_quit = 0x8292D94;
-    uint32_t my_player_id = 0x100;
     uint32_t segment_my_player_id = 0x10C;
     uint32_t next_opponents_list = 0x248;
     uint32_t func_shop_listen = 0xA63FC44;
@@ -582,7 +581,7 @@ void SaveConfig() {
         
         out << "[主线基础寻址与全局功能]\n";
         WRITE_OFF_32(func_get_Instance); WRITE_OFF_32(addr2); WRITE_OFF_32(addr3); WRITE_OFF_32(addra); WRITE_OFF_32(segmentcsogame);
-        WRITE_OFF_32(func_quit); WRITE_OFF_32(my_player_id); WRITE_OFF_32(segment_my_player_id); WRITE_OFF_32(next_opponents_list);
+        WRITE_OFF_32(func_quit); WRITE_OFF_32(segment_my_player_id); WRITE_OFF_32(next_opponents_list);
         WRITE_OFF_32(func_shop_listen); WRITE_OFF_32(func_buy_hero_new);
         WRITE_OFF_32(func_set_IsGameEnd); WRITE_OFF_32(func_SendWillRenderCanvases);
         
@@ -689,7 +688,7 @@ void LoadConfig() {
                 #define PARSE_OFF_32(name) if (key == #name) g_off.name = val;
                 
                 PARSE_OFF_32(func_get_Instance) PARSE_OFF_32(addr2) PARSE_OFF_32(addr3) PARSE_OFF_32(addra) PARSE_OFF_32(segmentcsogame)
-                PARSE_OFF_32(func_quit) PARSE_OFF_32(my_player_id) PARSE_OFF_32(segment_my_player_id) PARSE_OFF_32(next_opponents_list) PARSE_OFF_32(func_shop_listen) PARSE_OFF_32(func_buy_hero_new) PARSE_OFF_32(func_set_IsGameEnd) PARSE_OFF_32(func_SendWillRenderCanvases)
+                PARSE_OFF_32(func_quit) PARSE_OFF_32(segment_my_player_id) PARSE_OFF_32(next_opponents_list) PARSE_OFF_32(func_shop_listen) PARSE_OFF_32(func_buy_hero_new) PARSE_OFF_32(func_set_IsGameEnd) PARSE_OFF_32(func_SendWillRenderCanvases)
                 PARSE_OFF_32(addr4) PARSE_OFF_32(addr5) PARSE_OFF_32(addr6) PARSE_OFF_32(addr7)
                 PARSE_OFF_32(addr7_struct_size) PARSE_OFF_32(addr7_ptr_offset)
                 PARSE_OFF_32(addr9) PARSE_OFF_32(addr9_struct_size) PARSE_OFF_32(addr9_ptr_offset)
@@ -3133,7 +3132,6 @@ void DrawMainMenu() {
                 DrawOffsetAdjuster("segment_my_player_id(我的玩家ID组件)", &g_off.segment_my_player_id, (uintptr_t)g_my_player_id, true);
                 char buf_qu[128]; snprintf(buf_qu, sizeof(buf_qu), "func_quit(退出游戏) [调用:%llu次]##func_quit", (unsigned long long)g_count_func_quit.load()); DrawOffsetAdjuster(buf_qu, &g_off.func_quit, (uintptr_t)(g_il2cppTrueBase + g_off.func_quit), true);
                 char buf_ge[128]; snprintf(buf_ge, sizeof(buf_ge), "func_set_IsGameEnd(判断结束) [调用:%llu次]##func_set_IsGameEnd", (unsigned long long)g_count_set_IsGameEnd.load()); DrawOffsetAdjuster(buf_ge, &g_off.func_set_IsGameEnd, (uintptr_t)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), true);
-                DrawOffsetAdjuster("my_player_id(我的玩家ID)", &g_off.my_player_id);
                 DrawOffsetAdjuster("next_opponents_list(下一回合对手列表)", &g_off.next_opponents_list);
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家字典 (addr11~12)】");
