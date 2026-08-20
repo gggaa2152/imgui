@@ -2637,6 +2637,12 @@ void ModernTierSelector(const char* label, bool* tierArray) {
     }
 }
 
+extern void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject);
+typedef void (*func_set_IsGameEnd_t)(void* thisObj, uint8_t isEnd);
+extern func_set_IsGameEnd_t orig_set_IsGameEnd;
+typedef void* (*func_SendWillRenderCanvases_t)();
+extern func_SendWillRenderCanvases_t orig_SendWillRenderCanvases;
+
 void DrawMainMenu() {
     ApplyFrostedTheme();
     if (g_menu_orb) {
