@@ -2,8 +2,6 @@
 #include <sys/uio.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <signal.h>
-#include <setjmp.h>
 #include <android/log.h>
 #include <dlfcn.h>
 #include <string>
@@ -36,8 +34,6 @@
 #include <vulkan/vulkan.h>
 #include <jni.h>
 #include "dobby.h"
-#include <zlib.h>
-#include "chinese_font_data.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "JKInternal", __VA_ARGS__)
 
@@ -47,7 +43,7 @@ bool g_show_menu = true;
 // 采用了你最新调试出的精准偏移
 struct Offsets {
     // 【主线基础寻址】
-    uint32_t func_get_Instance = 0x9339D64;
+    uint32_t func_get_Instance = 0x80EF374;
     uint32_t addr2 = 0x10;
     uint32_t addr3 = 0x20;
     uint32_t addra = 0x10;
@@ -330,109 +326,6 @@ uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x
         return ((uintptr_t(*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t))old_shop_listen)(x0, x1, x2, x3, x4, x5, x6, x7);
     }
     return 0;
-}
-
-// -------------------- Anti-Crash Signal Guard & Safe Execution --------------------
-static thread_local sigjmp_buf g_segv_jmp_buf;
-static thread_local bool g_segv_guard_active = false;
-
-static void SegvSignalHandler(int sig, siginfo_t* info, void* ucontext) {
-    if (g_segv_guard_active) {
-        g_segv_guard_active = false;
-        siglongjmp(g_segv_jmp_buf, 1);
-    }
-    struct sigaction sa;
-    sa.sa_handler = SIG_DFL;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(sig, &sa, nullptr);
-    raise(sig);
-}
-
-inline void InitCrashGuard() {
-    static std::atomic<bool> inited{false};
-    if (inited.exchange(true)) return;
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = SegvSignalHandler;
-    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
-    sigaction(SIGSEGV, &sa, nullptr);
-    sigaction(SIGBUS, &sa, nullptr);
-    sigaction(SIGILL, &sa, nullptr);
-    LOGI("[+] Anti-Crash Signal Guard Installed.");
-}
-
-#define SAFE_CALL(call_expr, fallback_val) [&]() { \
-    InitCrashGuard(); \
-    g_segv_guard_active = true; \
-    if (sigsetjmp(g_segv_jmp_buf, 1) == 0) { \
-        auto res = (call_expr); \
-        g_segv_guard_active = false; \
-        return res; \
-    } else { \
-        g_segv_guard_active = false; \
-        LOGI("[!] Crash prevented during call: " #call_expr); \
-        return fallback_val; \
-    } \
-}()
-
-#define SAFE_CALL_VOID(call_expr) [&]() { \
-    InitCrashGuard(); \
-    g_segv_guard_active = true; \
-    if (sigsetjmp(g_segv_jmp_buf, 1) == 0) { \
-        call_expr; \
-        g_segv_guard_active = false; \
-    } else { \
-        g_segv_guard_active = false; \
-        LOGI("[!] Crash prevented during void call: " #call_expr); \
-    } \
-}()
-
-struct MemRange { uintptr_t start; uintptr_t end; };
-static std::vector<MemRange> g_il2cpp_exec_regions;
-static std::mutex g_exec_regions_mutex;
-
-inline void UpdateIl2CppExecRegions() {
-    std::lock_guard<std::mutex> lock(g_exec_regions_mutex);
-    g_il2cpp_exec_regions.clear();
-    FILE* fp = fopen("/proc/self/maps", "r");
-    if (!fp) return;
-    char line[512];
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "libil2cpp.so") && strstr(line, "r-xp")) {
-            uintptr_t start = 0, end = 0;
-            if (sscanf(line, "%lx-%lx", &start, &end) == 2 && start < end) {
-                g_il2cpp_exec_regions.push_back({start, end});
-            }
-        }
-    }
-    fclose(fp);
-}
-
-inline bool IsValidExecutableAddr(void* addr) {
-    if (!addr) return false;
-    uintptr_t ptr = (uintptr_t)addr;
-    if (ptr % 4 != 0) return false;
-    std::lock_guard<std::mutex> lock(g_exec_regions_mutex);
-    for (const auto& r : g_il2cpp_exec_regions) {
-        if (ptr >= r.start && ptr < r.end) return true;
-    }
-    return false;
-}
-
-inline int SafeDobbyHook(void* target, void* replace, void** origin) {
-    if (!target || !replace) return -1;
-    if (!IsValidExecutableAddr(target)) {
-        LOGI("[!] SafeDobbyHook rejected invalid target address: %p", target);
-        return -1;
-    }
-    int ret = DobbyHook(target, replace, origin);
-    if (ret == 0) {
-        LOGI("[+] SafeDobbyHook successfully hooked target: %p", target);
-    } else {
-        LOGI("[!] SafeDobbyHook failed with code %d for target: %p", ret, target);
-    }
-    return ret;
 }
 
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
@@ -811,29 +704,22 @@ void ClearGameState() {
 }
 
 bool TryResolveSegmentCSOGame(uintptr_t* out_segment = nullptr) {
-    if (g_il2cppTrueBase == 0 || g_off.func_get_Instance == 0) return false;
+    if (g_il2cppTrueBase == 0) return false;
     typedef void* (*func_get_Instance_t)(void* method_info);
     func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
     if (!get_Instance) return false;
 
-    uintptr_t addr1 = SAFE_CALL((uintptr_t)get_Instance(nullptr), (uintptr_t)0);
-    g_dbg_addr1 = addr1;
+    uintptr_t addr1 = 0;
+    try { addr1 = (uintptr_t)get_Instance(nullptr); } catch (...) { return false; }
     if (!IsValidPtr(addr1)) return false;
 
     uintptr_t addr2 = SAFE_READ_PTR(addr1, g_off.addr2);
-    g_dbg_addr2 = addr2;
     if (!IsValidPtr(addr2)) return false;
-
     uintptr_t addr3 = SAFE_READ_PTR(addr2, g_off.addr3);
-    g_dbg_addr3 = addr3;
     if (!IsValidPtr(addr3)) return false;
-
     uintptr_t addra = SAFE_READ_PTR(addr3, g_off.addra);
-    g_dbg_addra = addra;
     if (!IsValidPtr(addra)) return false;
-
     uintptr_t segment = SAFE_READ_PTR(addra, g_off.segmentcsogame);
-    g_dbg_segmentcsogame = segment;
     if (!IsValidPtr(segment)) return false;
 
     if (out_segment) *out_segment = segment;
@@ -934,15 +820,15 @@ static void ApplyAvatarRanksFromList23() {
 }
 
 void ParseGameMemory() {
-    if (g_il2cppTrueBase == 0 || g_off.func_get_Instance == 0) return;
+    if (g_il2cppTrueBase == 0) return;
     if (!g_is_in_match.load(std::memory_order_acquire)) return;
 
     typedef void* (*func_get_Instance_t)(void* method_info);
     func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
     if (!get_Instance) return;
     
-    // [主线基础寻址]
-    g_dbg_addr1 = SAFE_CALL((uintptr_t)get_Instance(nullptr), (uintptr_t)0);
+    // [主线]
+    try { g_dbg_addr1 = (uintptr_t)get_Instance(nullptr); } catch(...) { g_dbg_addr1 = 0; }
     g_dbg_addr2 = SAFE_READ_PTR(g_dbg_addr1, g_off.addr2);
     g_dbg_addr3 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr3); 
     g_dbg_addra = SAFE_READ_PTR(g_dbg_addr3, g_off.addra); 
@@ -1119,25 +1005,27 @@ void ParseGameMemory() {
 
                         typedef int (*func_get_hex_t)(uintptr_t, int);
                         func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
-                        if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
-                            int q0 = SAFE_CALL(get_hex(g_dbg_hexctrl, 0), 0);
-                            int q1 = SAFE_CALL(get_hex(g_dbg_hexctrl, 1), 0);
-                            int q2 = SAFE_CALL(get_hex(g_dbg_hexctrl, 2), 0);
-                            
-                            if (q0 > 0 || q1 > 0 || q2 > 0) {
-                                if (q0 == prev_q0.load() && q1 == prev_q1.load() && q2 == prev_q2.load()) {
-                                    match_counter++;
-                                    if (match_counter.load() >= 1) { 
-                                        hex_confirmed.store(true);
+                        if (get_hex) {
+                            try {
+                                int q0 = get_hex(g_dbg_hexctrl, 0);
+                                int q1 = get_hex(g_dbg_hexctrl, 1);
+                                int q2 = get_hex(g_dbg_hexctrl, 2);
+                                
+                                if (q0 > 0 || q1 > 0 || q2 > 0) {
+                                    if (q0 == prev_q0.load() && q1 == prev_q1.load() && q2 == prev_q2.load()) {
+                                        match_counter++;
+                                        if (match_counter.load() >= 1) { 
+                                            hex_confirmed.store(true);
+                                        }
+                                    } else {
+                                        prev_q0.store(q0); prev_q1.store(q1); prev_q2.store(q2);
+                                        match_counter.store(0);
                                     }
-                                } else {
-                                    prev_q0.store(q0); prev_q1.store(q1); prev_q2.store(q2);
-                                    match_counter.store(0);
                                 }
-                            }
-                            g_hex_qualities[0] = q0;
-                            g_hex_qualities[1] = q1;
-                            g_hex_qualities[2] = q2;
+                                g_hex_qualities[0] = q0;
+                                g_hex_qualities[1] = q1;
+                                g_hex_qualities[2] = q2;
+                            } catch (...) {}
                         }
                     }).detach();
                 }
@@ -1713,6 +1601,29 @@ bool FrostSidebarBtn(const char* label, bool selected, int id) {
 
 void SetupImGuiStyle() { ApplyFrostedTheme(); }
 
+// 暴力扫描 /system/fonts/ 目录，尝试所有字体文件直到找到能加载中文的
+// 原因: MuMu 12 (Android 12+) 的中文字体都是 CFF/OTF 格式，stb_truetype 只支持 TrueType 轮廓
+// 所以需要暴力尝试所有 .ttf 文件，找到真正的 TrueType 格式字体
+ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size) {
+    ImFontConfig cfg;
+    cfg.OversampleH = 1;
+    cfg.OversampleV = 1;
+    cfg.PixelSnapH = true;
+    cfg.FontNo = fontNo;
+    ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+    if (f) {
+        if (io.Fonts->Build()) {
+            LOGI("[+] Font OK: %s (FontNo: %d)", path, fontNo);
+            return f;
+        }
+        LOGI("[!] Font Build() failed: %s (FontNo: %d)", path, fontNo);
+    } else {
+        LOGI("[!] AddFontFromFileTTF NULL: %s (FontNo: %d)", path, fontNo);
+    }
+    io.Fonts->Clear();
+    return nullptr;
+}
+
 void UpdateFontHD(bool force = false) {
     ImGuiIO& io = ImGui::GetIO();
     float screenH = (io.DisplaySize.y > 100.0f) ? io.DisplaySize.y : 2400.0f;
@@ -1724,63 +1635,122 @@ void UpdateFontHD(bool force = false) {
     io.Fonts->Clear();
     g_mainFont = nullptr;
 
-    ImFontConfig cfg;
-    cfg.OversampleH = 1;
-    cfg.OversampleV = 1;
-    cfg.PixelSnapH = true;
+    // Phase 1: 优先尝试已知的纯 TrueType 中文字体路径
+    const char* priority_paths[] = {
+        "/system/fonts/DroidSansFallback.ttf",
+        "/system/fonts/DroidSansFallbackFull.ttf",
+        "/system/fonts/NotoSansSC-Regular.ttf",
+        "/system/fonts/NotoSansHans-Regular.ttf",
+        "/system/fonts/SysSans-Hans-Regular.ttf",
+        "/system/fonts/Miui-Regular.ttf",
+        "/system/fonts/SourceHanSansCN-Regular.ttf",
+        "/system/fonts/HarmonyOS_Sans_SC.ttf",
+        "/system/fonts/OplusSC-Regular.ttf",
+        "/system/fonts/VivoSansSC-Regular.ttf",
+    };
 
-    // ===== Primary: 内嵌微软雅黑子集 (TrueType glyf outlines, 100% compatible with stb_truetype) =====
+    for (const char* path : priority_paths) {
+        if (access(path, R_OK) != 0) continue;
+        LOGI("[*] Phase1 trying: %s", path);
+        g_mainFont = TryLoadChineseFont(io, path, 0, targetSize);
+        if (g_mainFont) goto font_done;
+    }
+
+    // Phase 2: 尝试 TTC 集合字体（索引 0~4）
     {
-        unsigned long decompSize = chinese_font_original_size;
-        unsigned char* decompBuf = (unsigned char*)malloc(decompSize);
-        if (decompBuf) {
-            int zret = uncompress(decompBuf, &decompSize, chinese_font_compressed_data, chinese_font_compressed_size);
-            if (zret == Z_OK && decompSize > 0) {
-                void* fontMem = IM_ALLOC(decompSize);
-                if (fontMem) {
-                    memcpy(fontMem, decompBuf, decompSize);
-                    g_mainFont = io.Fonts->AddFontFromMemoryTTF(fontMem, (int)decompSize, targetSize, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-                    if (g_mainFont) {
-                        LOGI("[+] Embedded Chinese font loaded! size=%.1f decomp=%lu bytes", targetSize, decompSize);
-                    } else {
-                        LOGI("[!] Embedded font AddFontFromMemoryTTF failed");
-                        IM_FREE(fontMem);
-                    }
-                }
-            } else {
-                LOGI("[!] zlib decompress failed: %d", zret);
-            }
-            free(decompBuf);
-        }
-    }
-
-    // ===== Fallback: system fonts =====
-    if (!g_mainFont) {
-        const char* paths[] = {
-            "/system/fonts/DroidSansFallback.ttf",
-            "/system/fonts/DroidSansFallbackFull.ttf",
-            "/system/fonts/NotoSansSC-Regular.ttf",
+        const char* ttc_paths[] = {
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/NotoSerifCJK-Regular.ttc",
         };
-        for (const char* p : paths) {
-            if (access(p, R_OK) != 0) continue;
-            g_mainFont = io.Fonts->AddFontFromFileTTF(p, targetSize, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-            if (g_mainFont) { LOGI("[+] System font: %s", p); break; }
-            io.Fonts->Clear();
+        for (const char* path : ttc_paths) {
+            if (access(path, R_OK) != 0) continue;
+            for (int idx = 0; idx < 5; idx++) {
+                LOGI("[*] Phase2 trying TTC: %s (FontNo: %d)", path, idx);
+                g_mainFont = TryLoadChineseFont(io, path, idx, targetSize);
+                if (g_mainFont) goto font_done;
+            }
         }
     }
 
-    if (!g_mainFont) {
-        LOGI("[!] All fonts failed, ASCII fallback");
-        g_mainFont = io.Fonts->AddFontDefault();
+    // Phase 3: 暴力扫描 /system/fonts/ 目录，尝试所有 .ttf 文件
+    {
+        DIR* dir = opendir("/system/fonts");
+        if (dir) {
+            LOGI("[*] Phase3: Scanning /system/fonts/ for ANY TrueType font with Chinese glyphs...");
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                std::string name = ent->d_name;
+                // 只尝试 .ttf 文件（.otf 是 CFF 格式，stb_truetype 不支持）
+                if (name.size() < 5) continue;
+                std::string ext = name.substr(name.size() - 4);
+                if (ext != ".ttf" && ext != ".TTF") continue;
+                std::string full = "/system/fonts/" + name;
+                if (access(full.c_str(), R_OK) != 0) continue;
+                LOGI("[*] Phase3 trying: %s", full.c_str());
+                g_mainFont = TryLoadChineseFont(io, full.c_str(), 0, targetSize);
+                if (g_mainFont) { closedir(dir); goto font_done; }
+            }
+            closedir(dir);
+        }
+
+        // 也扫描 /product/fonts/
+        dir = opendir("/product/fonts");
+        if (dir) {
+            LOGI("[*] Phase3: Scanning /product/fonts/...");
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                std::string name = ent->d_name;
+                if (name.size() < 5) continue;
+                std::string ext = name.substr(name.size() - 4);
+                if (ext != ".ttf" && ext != ".TTF") continue;
+                std::string full = "/product/fonts/" + name;
+                if (access(full.c_str(), R_OK) != 0) continue;
+                LOGI("[*] Phase3 trying: %s", full.c_str());
+                g_mainFont = TryLoadChineseFont(io, full.c_str(), 0, targetSize);
+                if (g_mainFont) { closedir(dir); goto font_done; }
+            }
+            closedir(dir);
+        }
     }
 
-    if (g_mainFont) io.FontDefault = g_mainFont;
+    // Phase 4: 尝试所有 .ttc 文件的所有子字体索引
+    {
+        DIR* dir = opendir("/system/fonts");
+        if (dir) {
+            LOGI("[*] Phase4: Trying ALL .ttc files with indices 0-6...");
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                std::string name = ent->d_name;
+                if (name.size() < 5) continue;
+                std::string ext = name.substr(name.size() - 4);
+                if (ext != ".ttc" && ext != ".TTC") continue;
+                std::string full = "/system/fonts/" + name;
+                if (access(full.c_str(), R_OK) != 0) continue;
+                for (int idx = 0; idx < 7; idx++) {
+                    LOGI("[*] Phase4 trying: %s (FontNo: %d)", full.c_str(), idx);
+                    g_mainFont = TryLoadChineseFont(io, full.c_str(), idx, targetSize);
+                    if (g_mainFont) { closedir(dir); goto font_done; }
+                }
+            }
+            closedir(dir);
+        }
+    }
+
+    // Phase 5: 完全失败，使用默认英文字体
+    LOGI("[!] ALL FONT PHASES FAILED. No TrueType Chinese font found on this system.");
+    LOGI("[!] Falling back to default ASCII font. Chinese will show as '?'.");
+    g_mainFont = io.Fonts->AddFontDefault();
     io.Fonts->Build();
+
+font_done:
+    if (g_mainFont) {
+        io.FontDefault = g_mainFont;
+    }
+
     ImGui_ImplOpenGL3_CreateDeviceObjects();
     g_current_rendered_size = targetSize;
-    LOGI("[+] Font setup done. g_mainFont=%p", (void*)g_mainFont);
+    LOGI("[+] Font setup complete. g_mainFont=%p", (void*)g_mainFont);
 }
-
 
 void DrawOffsetAdjuster(const char* label, uint32_t* value) {
     ImGui::PushID(label);
@@ -3099,80 +3069,59 @@ extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) 
 }
 
 void FindAndHookHiddenJNI() {
-    static std::atomic<bool> hooked{false};
-    if (hooked.load()) return;
+    FILE* fp = fopen("/proc/self/maps", "r"); if (!fp) return;
+    char line[1024];
+    struct MemRegion { uintptr_t start, end; bool is_rw; };
+    std::vector<MemRegion> regions;
 
-    for (int retry = 0; retry < 10 && !hooked.load(); retry++) {
-        FILE* fp = fopen("/proc/self/maps", "r");
-        if (!fp) { sleep(1); continue; }
-        char line[1024];
-        struct MemRegion { uintptr_t start, end; bool is_rw; };
-        std::vector<MemRegion> regions;
-
-        while (fgets(line, sizeof(line), fp)) {
-            if (strstr(line, "libunity.so")) {
-                bool is_r = strstr(line, "r-") != nullptr;
-                bool is_rw = strstr(line, "rw") != nullptr;
-                if (is_r || is_rw) {
-                    uintptr_t start = 0, end = 0;
-                    if (sscanf(line, "%lx-%lx", &start, &end) == 2 && start < end) {
-                        regions.push_back({start, end, is_rw});
-                    }
-                }
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "libunity.so")) {
+            bool is_r = strstr(line, "r-") != nullptr;
+            bool is_rw = strstr(line, "rw") != nullptr;
+            if (is_r || is_rw) {
+                uintptr_t start, end;
+                sscanf(line, "%lx-%lx", &start, &end);
+                regions.push_back({start, end, is_rw});
             }
         }
-        fclose(fp);
+    }
+    fclose(fp);
 
-        if (regions.empty()) { sleep(1); continue; }
-
-        const char* target_string = "nativeInjectEvent";
-        size_t target_len = strlen(target_string);
-        std::vector<uintptr_t> string_addrs;
-
-        for (const auto& reg : regions) {
-            if (!reg.is_rw) {
-                for (uintptr_t p = reg.start; p < reg.end - target_len; p++) {
-                    if (memcmp((void*)p, target_string, target_len) == 0) {
-                        string_addrs.push_back(p);
-                    }
-                }
+    const char* target_string = "nativeInjectEvent";
+    std::vector<uintptr_t> string_addrs;
+    for (const auto& reg : regions) {
+        if (!reg.is_rw) {
+            for (uintptr_t p = reg.start; p < reg.end - strlen(target_string); p++) {
+                if (memcmp((void*)p, target_string, strlen(target_string)) == 0) string_addrs.push_back(p);
             }
         }
+    }
 
-        if (string_addrs.empty()) { sleep(1); continue; }
+    if (string_addrs.empty()) return;
 
-        bool found_func = false;
-        for (const auto& reg : regions) {
-            uintptr_t align_start = (reg.start + 7) & ~7;
-            for (uintptr_t p = align_start; p < reg.end - sizeof(void*) * 3; p += sizeof(void*)) {
-                uintptr_t ptr_val = *(uintptr_t*)p;
-                for (uintptr_t str_addr : string_addrs) {
-                    if (ptr_val == str_addr) {
-                        void** fnPtr_addr = (void**)(p + 16);
-                        void* real_function_addr = *fnPtr_addr;
-                        if (real_function_addr != nullptr && (uintptr_t)real_function_addr > 0x100000) {
-                            DobbyHook(real_function_addr, (void*)hook_nativeInjectEvent, (void**)&old_nativeInjectEvent);
-                            LOGI("[+] nativeInjectEvent Hooked for Touch Input successfully at %p", real_function_addr);
-                            found_func = true;
-                            hooked.store(true);
-                            break;
-                        }
+    bool found_func = false;
+    for (const auto& reg : regions) {
+        uintptr_t align_start = (reg.start + 7) & ~7;
+        for (uintptr_t p = align_start; p < reg.end - sizeof(void*)*3; p += sizeof(void*)) {
+            uintptr_t ptr_val = *(uintptr_t*)p;
+            for (uintptr_t str_addr : string_addrs) {
+                if (ptr_val == str_addr) {
+                    void** fnPtr_addr = (void**)(p + 16);
+                    void* real_function_addr = *fnPtr_addr;
+                    if (real_function_addr != nullptr && (uintptr_t)real_function_addr > 0x100000) {
+                        DobbyHook(real_function_addr, (void*)hook_nativeInjectEvent, (void**)&old_nativeInjectEvent);
+                        LOGI("[+] nativeInjectEvent Hooked for Touch Input.");
+                        found_func = true; break;
                     }
                 }
-                if (found_func) break;
             }
             if (found_func) break;
         }
-
         if (found_func) break;
-        sleep(1);
     }
     
     // 启动连点器后台线程
-    static std::atomic<bool> clicker_started{false};
-    if (!clicker_started.exchange(true)) {
-        std::thread(AutoClickerThread).detach();
-    }
+    std::thread(AutoClickerThread).detach();
 }
 
 typedef void (*func_set_IsGameEnd_t)(void* thisObj, uint8_t isEnd);
@@ -3199,11 +3148,9 @@ void* hook_SendWillRenderCanvases() {
         if (!g_Tasks.buy_slots.empty()) {
             typedef void (*func_buy_new_t)(void*);
             func_buy_new_t buy_hero = (func_buy_new_t)(g_il2cppTrueBase + g_off.func_buy_hero_new);
-            if (buy_hero && IsValidExecutableAddr((void*)buy_hero)) {
+            if (buy_hero) {
                 for (uintptr_t slot_addr : g_Tasks.buy_slots) {
-                    if (IsValidPtr(slot_addr)) {
-                        SAFE_CALL_VOID(buy_hero((void*)slot_addr));
-                    }
+                    try { buy_hero((void*)slot_addr); } catch(...) {}
                 }
             }
             g_Tasks.buy_slots.clear();
@@ -3213,8 +3160,8 @@ void* hook_SendWillRenderCanvases() {
         g_Tasks.trigger_quit.store(false);
         typedef void (*func_quit_t)(uintptr_t, int, int);
         func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
-        if (quit_func && IsValidExecutableAddr((void*)quit_func) && IsValidPtr(g_dbg_segmentcsogame)) {
-            SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 1));
+        if (quit_func && IsValidPtr(g_dbg_segmentcsogame)) {
+            try { quit_func(g_dbg_segmentcsogame, g_my_player_id, 1); } catch(...) {}
         }
         g_is_in_match.store(false, std::memory_order_release);
         g_need_segment_gap_before_enter = true;
@@ -3399,61 +3346,13 @@ void* Il2CppInitThread(void*) {
     }
     LOGI("[+] libil2cpp.so Base Found: 0x%lx", (unsigned long)g_il2cppTrueBase);
 
-    // 等待 2 秒确保 Unity / il2cpp 内存段映射和初始化完整
-    sleep(2);
-    UpdateIl2CppExecRegions();
-
     LoadConfig();
     EnsureTextureWorkerStarted();
-    
-    if (g_off.func_shop_listen != 0) {
-        SafeDobbyHook((void*)(g_il2cppTrueBase + g_off.func_shop_listen), (void*)hook_shop_listen, (void**)&old_shop_listen);
-    }
-    if (g_off.func_set_IsGameEnd != 0) {
-        SafeDobbyHook((void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
-    }
-    
-    typedef void* (*il2cpp_domain_get_t)();
-    typedef void* (*il2cpp_domain_assembly_open_t)(void*, const char*);
-    typedef void* (*il2cpp_assembly_get_image_t)(void*);
-    typedef void* (*il2cpp_class_from_name_t)(void*, const char*, const char*);
-    typedef void* (*il2cpp_class_get_method_from_name_t)(void*, const char*, int);
-
-    auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
-    auto assembly_open = (il2cpp_domain_assembly_open_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_assembly_open");
-    auto assembly_get_image = (il2cpp_assembly_get_image_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_assembly_get_image");
-    auto class_from_name = (il2cpp_class_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_from_name");
-    auto class_get_method_from_name = (il2cpp_class_get_method_from_name_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_class_get_method_from_name");
-
-    if (domain_get && assembly_open && assembly_get_image && class_from_name && class_get_method_from_name) {
-        void* domain = domain_get();
-        if (domain) {
-            void* assembly = assembly_open(domain, "UnityEngine.UIModule.dll");
-            if (assembly) {
-                void* image = assembly_get_image(assembly);
-                if (image) {
-                    void* klass = class_from_name(image, "UnityEngine", "Canvas");
-                    if (klass) {
-                        void* method = class_get_method_from_name(klass, "SendWillRenderCanvases", 0);
-                        if (method) {
-                            void* method_ptr = *(void**)method;
-                            if (method_ptr && IsValidExecutableAddr(method_ptr)) {
-                                DobbyHook(method_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
-                                LOGI("[+] Hooked SendWillRenderCanvases.");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     return nullptr;
 }
 
 void* SetupThread(void*) {
-    InitCrashGuard();
-    LOGI("[+] Adaptive Dual-Engine Setup Thread Started with CrashGuard...");
+    LOGI("[+] Adaptive Dual-Engine Setup Thread Started...");
 
     // 1. 优先对 Vulkan 通道进行挂钩（无阻塞）
     void* vk_create_ptr = DobbySymbolResolver("libvulkan.so", "vkCreateInstance");
