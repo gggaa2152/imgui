@@ -3382,7 +3382,8 @@ void* hook_SendWillRenderCanvases() {
             if (buy_hero && IsValidExecutableAddr((void*)buy_hero)) {
                 for (uintptr_t slot_addr : g_Tasks.buy_slots) {
                     if (IsValidPtr(slot_addr)) { 
-                        int hero_id = SAFE_READ_INT(slot_addr, g_off.shop_hero_id);
+                        uintptr_t a16 = SAFE_READ_PTR(slot_addr, g_off.addr16);
+                        int hero_id = IsValidPtr(a16) ? SAFE_READ_INT(a16, g_off.shop_hero_id) : SAFE_READ_INT(slot_addr, g_off.shop_hero_id);
                         AddActionLog((const char*)u8"-> [自动购买] call buy_hero_new(slot_addr=0x%lx) | hero_id=%d", slot_addr, hero_id);
                         SAFE_CALL_VOID(buy_hero((void*)slot_addr)); 
                     } else {
