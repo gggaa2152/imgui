@@ -107,9 +107,9 @@ struct Offsets {
     
     uint32_t addr19 = 0x3A0;
     uint32_t addr20 = 0x10; 
-    uint32_t board_hero_id = 0x108; 
-    uint32_t board_x = 0x30;
-    uint32_t board_y = 0x34;
+    uint32_t board_hero_id = 0x118; 
+    uint32_t board_x = 0x3C;
+    uint32_t board_y = 0x40;
     
     // 海克斯与排位
     uint32_t addr21 = 0x148;
@@ -317,8 +317,9 @@ uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x
     if (g_is_in_match.load(std::memory_order_relaxed) && !g_shop_listen_done.load() && x0 != 0) {
         if (std::find(g_shop_slots.begin(), g_shop_slots.end(), x0) == g_shop_slots.end()) {
             g_shop_slots.push_back(x0);
-            if (g_shop_slots.size() >= 5) {
-                g_shop_listen_done.store(true); 
+                        if (g_shop_slots.size() >= 5) {
+                g_shop_listen_done.store(true);
+                AddActionLog((const char*)u8"-> [商店] 已获取本局全部 5 个卡槽地址，自动停止监听!");
             }
         }
     }
@@ -665,6 +666,16 @@ void SaveConfig() {
         out << "float_opp_y=" << g_float_opp_y << "\n";
         out << "float_hex_x=" << g_float_hex_x << "\n";
         out << "float_hex_y=" << g_float_hex_y << "\n";
+        out << "auto_buy_ids=";
+        bool first_ab = true;
+        for (const auto& kv : g_heroAutoBuyChecked) {
+            if (kv.second) {
+                if (!first_ab) out << ",";
+                out << kv.first;
+                first_ab = false;
+            }
+        }
+        out << "\n";
                                         out.close();
     }
 }
@@ -809,15 +820,16 @@ void ResolveDiagnosticPointers() {
         return;
     }
 
-    typedef void* (*func_get_Instance_t)(void* method_info);
-    func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
-    if (!get_Instance || !IsValidExecutableAddr((void*)get_Instance)) {
-        g_dbg_addr1 = 0;
-    } else {
-        g_dbg_addr1 = SAFE_CALL((uintptr_t)(g_count_func_get_Instance++, get_Instance(nullptr)), (uintptr_t)0);
+    if (!IsValidPtr(g_dbg_addr1)) {
+        typedef void* (*func_get_Instance_t)(void* method_info);
+        func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
+        if (get_Instance && IsValidExecutableAddr((void*)get_Instance)) {
+            g_dbg_addr1 = SAFE_CALL((uintptr_t)(g_count_func_get_Instance++, get_Instance(nullptr)), (uintptr_t)0);
+        } else {
+            g_dbg_addr1 = 0;
+        }
     }
 
-    // 关键：每一步单独解析并实时更新全局调试变量，改一个就能立即看到一个！
     if (IsValidPtr(g_dbg_addr1)) {
         g_dbg_addr2 = SAFE_READ_PTR(g_dbg_addr1, g_off.addr2);
     } else {
@@ -984,12 +996,14 @@ void ParseGameMemory() {
     if (g_il2cppTrueBase == 0) return;
     if (!g_is_in_match.load(std::memory_order_acquire)) return;
 
-    typedef void* (*func_get_Instance_t)(void* method_info);
-    func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
-    if (!get_Instance) return;
-    
-    // [主线]
-    g_dbg_addr1 = SAFE_CALL((uintptr_t)(g_count_func_get_Instance++, get_Instance(nullptr)), (uintptr_t)0); // Anti-crash protected
+        if (!IsValidPtr(g_dbg_addr1)) {
+        typedef void* (*func_get_Instance_t)(void* method_info);
+        func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
+        if (get_Instance && IsValidExecutableAddr((void*)get_Instance)) {
+            g_dbg_addr1 = SAFE_CALL((uintptr_t)(g_count_func_get_Instance++, get_Instance(nullptr)), (uintptr_t)0);
+        }
+    }
+    if (!IsValidPtr(g_dbg_addr1)) return; // Anti-crash protected
     g_dbg_addr2 = SAFE_READ_PTR(g_dbg_addr1, g_off.addr2);
     g_dbg_addr3 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr3); 
     g_dbg_addra = SAFE_READ_PTR(g_dbg_addr3, g_off.addra); 
@@ -1656,6 +1670,11 @@ static bool BeginContentFloatWindow(const char* id, bool* open, float* pos_x = n
         ImGui::PopStyleVar(3);
         ImGui::PopStyleColor();
         return false;
+        }
+    if (pos_x && pos_y) {
+        ImVec2 curPos = ImGui::GetWindowPos();
+        *pos_x = curPos.x;
+        *pos_y = curPos.y;
     }
     return true;
 }
@@ -2042,7 +2061,6 @@ void DrawHexKeypadModal() {
         if (ImGui::Button((const char*)u8"✓ 确定应用并保存", ImVec2(confirm_w, 40 * g_autoScale))) {
             uint32_t val = (uint32_t)strtoul(g_hexKeypad.input_buf, nullptr, 16);
             *g_hexKeypad.target_val_ptr = val;
-            SaveConfig();
             g_hexKeypad.open = false;
         }
         ImGui::PopStyleColor(2);
@@ -2066,7 +2084,7 @@ void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_a
         std::string s(label);
         if (s.find("func_") == 0) is_valid = IsValidExecutableAddr((void*)(g_il2cppTrueBase + *value));
         else if (s.find("pi_name") != std::string::npos) is_valid = !g_players.empty() && !g_players[0].name.empty();
-        else if (s.find("pi_id") != std::string::npos) is_valid = !g_players.empty() && g_players[0].id > 0;
+        else if (s.find("pi_id") != std::string::npos) is_valid = !g_players.empty() && g_players[0].id >= 0;
         else if (s.find("pi_level") != std::string::npos) is_valid = !g_players.empty() && g_players[0].level >= 1 && g_players[0].level <= 11;
         else if (s.find("pi_money") != std::string::npos) is_valid = !g_players.empty() && g_players[0].money >= 0 && g_players[0].money < 500;
         else if (s.find("pi_win_streak") != std::string::npos || s.find("pi_lose_streak") != std::string::npos || s.find("pi_is_bot") != std::string::npos) is_valid = !g_players.empty();
@@ -2129,9 +2147,9 @@ void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_a
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - controls_width);
     
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4 * g_autoScale * g_scale, 0));
-    if (ImGui::Button("-10", ImVec2(btn_w, 0))) { *value -= 0x10; SaveConfig(); }
+    if (ImGui::Button("-10", ImVec2(btn_w, 0))) { *value -= 0x10; }
     ImGui::SameLine();
-    if (ImGui::Button("-1", ImVec2(btn_w, 0))) { *value -= 0x1; SaveConfig(); }
+    if (ImGui::Button("-1", ImVec2(btn_w, 0))) { *value -= 0x1; }
     ImGui::SameLine();
     
     // Hex button that opens the keypad on click!
@@ -2143,9 +2161,9 @@ void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_a
     ImGui::PopStyleColor(2);
     
     ImGui::SameLine();
-    if (ImGui::Button("+1", ImVec2(btn_w, 0))) { *value += 0x1; SaveConfig(); }
+    if (ImGui::Button("+1", ImVec2(btn_w, 0))) { *value += 0x1; }
     ImGui::SameLine();
-    if (ImGui::Button("+10", ImVec2(btn_w, 0))) { *value += 0x10; SaveConfig(); }
+    if (ImGui::Button("+10", ImVec2(btn_w, 0))) { *value += 0x10; }
     ImGui::PopStyleVar();
     ImGui::PopID();
 }
@@ -2902,7 +2920,7 @@ void DrawMainMenu() {
             switch (current_tab) {
             case 0:
                 DrawSectionTitle((const char*)u8"浮窗控制");
-                if (ImGui::Button((const char*)u8"保存全部配置", ImVec2(-1, 34 * g_autoScale * g_scale))) SaveConfig();
+                if (ImGui::Button((const char*)u8"保存全部配置", ImVec2(-1, 34 * g_autoScale * g_scale))) { SaveConfig(); AddActionLog((const char*)u8"-> [配置] 已成功保存所有当前改动过的偏移与设置到本地!"); }
                 ModernToggle((const char*)u8"英雄牌库悬浮窗", &g_win_cardpool, 0);
                 ModernToggle((const char*)u8"玩家数据悬浮窗", &g_win_playerdata, 1);
                 ModernToggle((const char*)u8"海克斯预测悬浮", &g_win_hextech, 3);
@@ -2971,7 +2989,23 @@ void DrawMainMenu() {
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"商店格子捕获进度: %zu / 5", g_shop_slots.size());
                 if (g_shop_listen_done.load()) ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), (const char*)u8"已成功获取5个格子地址，就绪！");
                 else ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), (const char*)u8"请在游戏内刷新一次商店以捕获...");
-                DrawGlassSeparator();
+                                DrawGlassSeparator();
+                int selected_hero_count = 0;
+                for (const auto& kv : g_heroAutoBuyChecked) {
+                    if (kv.second) selected_hero_count++;
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.22f, 0.22f, 0.85f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.3f, 0.3f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.15f, 0.15f, 1.0f));
+                char clear_btn_txt[64];
+                snprintf(clear_btn_txt, sizeof(clear_btn_txt), (const char*)u8"一键清空已选英雄 (已选: %d)", selected_hero_count);
+                if (ImGui::Button(clear_btn_txt, ImVec2(-1, 32.0f * g_autoScale * g_scale))) {
+                    g_heroAutoBuyChecked.clear();
+                    AddActionLog((const char*)u8"-> [自动购买] 已一键清空所有已勾选的英雄!");
+                }
+                ImGui::PopStyleColor(3);
+                ImGui::Spacing();
                 if (g_hero_images_ready.load()) {
                     if (g_hero_image_count > 0)
                         ImGui::TextColored(ImVec4(0.45f, 1.0f, 0.55f, 1.0f), (const char*)u8"已加载 %d 张英雄头像 (HeroImages.h)", g_hero_image_count);
@@ -3118,7 +3152,7 @@ void DrawMainMenu() {
                             int opp_id = g_next_opponents[i];
                             std::string opp_name = "未知";
                             for (const auto& p : g_players) { if (p.id == opp_id) { opp_name = p.name; break; } }
-                            PrintCol("对手[%zu]: ID=%d (%s)", opp_id > 0, i + 1, opp_id, opp_name.c_str());
+                            PrintCol("■[%zu]: ID=%d (%s)", opp_id >= 0, i + 1, opp_id, opp_name.c_str());
                         }
                     }
 
@@ -3130,17 +3164,17 @@ void DrawMainMenu() {
                 break;
             case 3:
                 DrawSectionTitle((const char*)u8"偏移调试与实时诊断");
-                if (ImGui::Button((const char*)u8"保存全部配置", ImVec2(-1, 34 * g_autoScale * g_scale))) SaveConfig();
+                if (ImGui::Button((const char*)u8"保存全部配置", ImVec2(-1, 34 * g_autoScale * g_scale))) { SaveConfig(); AddActionLog((const char*)u8"-> [配置] 已成功保存所有当前改动过的偏移与设置到本地!"); }
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址链路】（改一个对应地址立刻显示）");
-                char buf_gi[128]; snprintf(buf_gi, sizeof(buf_gi), "func_get_Instance(获取实例) [调用:%llu次]##func_get_Instance", (unsigned long long)g_count_func_get_Instance.load()); DrawOffsetAdjuster(buf_gi, &g_off.func_get_Instance, g_dbg_addr1, true);
+                DrawOffsetAdjuster("func_get_Instance(获取实例) [辅助主动调用]", &g_off.func_get_Instance, g_dbg_addr1, true);
                 DrawOffsetAdjuster("addr2(我的玩家对象偏移)", &g_off.addr2, g_dbg_addr2, true);
                 DrawOffsetAdjuster("addr3(玩家列表指针)", &g_off.addr3, g_dbg_addr3, true);
                 DrawOffsetAdjuster("addra(未知预留偏移)", &g_off.addra, g_dbg_addra, true);
                 DrawOffsetAdjuster("segmentcsogame(核心游戏组件)", &g_off.segmentcsogame, g_dbg_segmentcsogame, true);
                 DrawOffsetAdjuster("segment_my_player_id(我的玩家ID组件)", &g_off.segment_my_player_id, (uintptr_t)g_my_player_id, true);
-                char buf_qu[128]; snprintf(buf_qu, sizeof(buf_qu), "func_quit(退出游戏) [调用:%llu次]##func_quit", (unsigned long long)g_count_func_quit.load()); DrawOffsetAdjuster(buf_qu, &g_off.func_quit, (uintptr_t)(g_il2cppTrueBase + g_off.func_quit), true);
-                char buf_ge[128]; snprintf(buf_ge, sizeof(buf_ge), "func_set_IsGameEnd(判断结束) [调用:%llu次]##func_set_IsGameEnd", (unsigned long long)g_count_set_IsGameEnd.load()); DrawOffsetAdjuster(buf_ge, &g_off.func_set_IsGameEnd, (uintptr_t)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), true);
+                DrawOffsetAdjuster("func_quit(退出游戏) [辅助主动调用]", &g_off.func_quit, (uintptr_t)(g_il2cppTrueBase + g_off.func_quit), true);
+                DrawOffsetAdjuster("func_set_IsGameEnd(判断结束) [Hook游戏监听]", &g_off.func_set_IsGameEnd, (uintptr_t)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), true);
                 DrawOffsetAdjuster("next_opponents_list(下一回合对手列表)", &g_off.next_opponents_list);
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家字典 (addr11~12)】");
@@ -3183,7 +3217,7 @@ void DrawMainMenu() {
                 DrawOffsetAdjuster("pi_avatar_rank(海克斯品质/等级)", &g_off.pi_avatar_rank);
                 DrawOffsetAdjuster("pi_avatar_player_id(海克斯所属玩家ID)", &g_off.pi_avatar_player_id);
                 DrawOffsetAdjuster("hexctrl(海克斯控制对象)", &g_off.hexctrl, g_dbg_hexctrl, true);
-                char buf_gh[128]; snprintf(buf_gh, sizeof(buf_gh), "func_get_hex(获取海克斯) [调用:%llu次]##func_get_hex", (unsigned long long)g_count_func_get_hex.load()); DrawOffsetAdjuster(buf_gh, &g_off.func_get_hex, (uintptr_t)(g_il2cppTrueBase + g_off.func_get_hex), true);
+                DrawOffsetAdjuster("func_get_hex(获取海克斯) [辅助主动调用]", &g_off.func_get_hex, (uintptr_t)(g_il2cppTrueBase + g_off.func_get_hex), true);
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【商店、备战区与场上】");
                 DrawOffsetAdjuster("addr14(商店管理对象)", &g_off.addr14, g_dbg_addr14, true);
@@ -3200,9 +3234,9 @@ void DrawMainMenu() {
                 DrawOffsetAdjuster("board_y(棋盘Y坐标)", &g_off.board_y);
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【全局Hook】");
-                char buf_sl[128]; snprintf(buf_sl, sizeof(buf_sl), "func_shop_listen(监听商店) [调用:%llu次]##func_shop_listen", (unsigned long long)g_count_shop_listen.load()); DrawOffsetAdjuster(buf_sl, &g_off.func_shop_listen, (uintptr_t)(g_il2cppTrueBase + g_off.func_shop_listen), true);
-                char buf_bh[128]; snprintf(buf_bh, sizeof(buf_bh), "func_buy_hero_new(购买英雄) [调用:%llu次]##func_buy_hero_new", (unsigned long long)g_count_buy_hero_new.load()); DrawOffsetAdjuster(buf_bh, &g_off.func_buy_hero_new, (uintptr_t)(g_il2cppTrueBase + g_off.func_buy_hero_new), true);
-                char buf_rc[128]; snprintf(buf_rc, sizeof(buf_rc), "func_SendWillRenderCanvases(UI钩子) [调用:%llu次]##func_SendWillRenderCanvases", (unsigned long long)g_count_SendWillRenderCanvases.load()); DrawOffsetAdjuster(buf_rc, &g_off.func_SendWillRenderCanvases, (uintptr_t)(g_il2cppTrueBase + g_off.func_SendWillRenderCanvases), true);
+                DrawOffsetAdjuster("func_shop_listen(监听商店) [Hook游戏监听]", &g_off.func_shop_listen, (uintptr_t)(g_il2cppTrueBase + g_off.func_shop_listen), true);
+                DrawOffsetAdjuster("func_buy_hero_new(购买英雄) [辅助主动调用]", &g_off.func_buy_hero_new, (uintptr_t)(g_il2cppTrueBase + g_off.func_buy_hero_new), true);
+                DrawOffsetAdjuster("func_SendWillRenderCanvases(UI渲染主循环) [Hook游戏监听]", &g_off.func_SendWillRenderCanvases, (uintptr_t)(g_il2cppTrueBase + g_off.func_SendWillRenderCanvases), true);
                 break;
             }
 
