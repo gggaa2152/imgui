@@ -255,21 +255,6 @@ int g_cached_view_width = 0;
 int g_cached_view_height = 0;
 int g_gl_width = 0, g_gl_height = 0;
 
-// Auto Clicker Settings
-bool g_auto_clicker_enable = false;
-float g_click_interval_ms = 0.0f;    // 点击间隔（毫秒），0 = 无延迟尽力最快
-float g_touch_duration_ms = 0.0f;    // 触摸按下持续时间（毫秒），0 = 零延迟
-struct ClickPos { float x = 540.0f; float y = 960.0f; };
-std::vector<ClickPos> g_click_positions = { {540.0f, 960.0f} };
-int g_click_pos_captured = -1;       // 自动捕获的目标位置索引，-1 = 未捕获
-std::atomic<bool> g_clicker_running{false};
-
-// CPS Real-time Monitor
-std::atomic<int> g_total_clicks_executed{0};
-float g_realtime_cps = 0.0f;
-float g_cps_history[100] = {0.0f};
-int g_cps_hist_idx = 0;
-
 // Quit capsule (independent float)
 float g_quit_x = 80.0f, g_quit_y = 520.0f;
 int g_quit_confirm = 0;
@@ -281,9 +266,6 @@ bool g_floats_locked = false;
 
 // Card pool toggle capsule
 float g_cpbtn_x = 80.0f, g_cpbtn_y = 400.0f;
-
-// Clicker toggle capsule
-float g_clickerbtn_x = 80.0f, g_clickerbtn_y = 340.0f;
 
 // Saved float window positions (-1 = unset)
 float g_float_cp_x = -1.0f, g_float_cp_y = -1.0f;
@@ -651,9 +633,7 @@ void SaveConfig() {
         out << "lock_y=" << g_lock_y << "\n";
         out << "cpbtn_x=" << g_cpbtn_x << "\n";
         out << "cpbtn_y=" << g_cpbtn_y << "\n";
-        out << "clickerbtn_x=" << g_clickerbtn_x << "\n";
-        out << "clickerbtn_y=" << g_clickerbtn_y << "\n";
-        out << "float_cp_x=" << g_float_cp_x << "\n";
+                        out << "float_cp_x=" << g_float_cp_x << "\n";
         out << "float_cp_y=" << g_float_cp_y << "\n";
         out << "float_pd_x=" << g_float_pd_x << "\n";
         out << "float_pd_y=" << g_float_pd_y << "\n";
@@ -661,16 +641,7 @@ void SaveConfig() {
         out << "float_opp_y=" << g_float_opp_y << "\n";
         out << "float_hex_x=" << g_float_hex_x << "\n";
         out << "float_hex_y=" << g_float_hex_y << "\n";
-        out << "auto_clicker_enable=" << (g_auto_clicker_enable ? 1 : 0) << "\n";
-        out << "click_interval_ms=" << g_click_interval_ms << "\n";
-        out << "touch_duration_ms=" << g_touch_duration_ms << "\n";
-        out << "click_positions=";
-        for (size_t i = 0; i < g_click_positions.size(); i++) {
-            if (i > 0) out << ";";
-            out << g_click_positions[i].x << "," << g_click_positions[i].y;
-        }
-        out << "\n";
-        out.close();
+                                        out.close();
     }
 }
 
@@ -757,9 +728,7 @@ void LoadConfig() {
                 else if (key == "lock_y") g_lock_y = std::stof(valStr);
                 else if (key == "cpbtn_x") g_cpbtn_x = std::stof(valStr);
                 else if (key == "cpbtn_y") g_cpbtn_y = std::stof(valStr);
-                else if (key == "clickerbtn_x") g_clickerbtn_x = std::stof(valStr);
-                else if (key == "clickerbtn_y") g_clickerbtn_y = std::stof(valStr);
-                else if (key == "float_cp_x") g_float_cp_x = std::stof(valStr);
+                                                else if (key == "float_cp_x") g_float_cp_x = std::stof(valStr);
                 else if (key == "float_cp_y") g_float_cp_y = std::stof(valStr);
                 else if (key == "float_pd_x") g_float_pd_x = std::stof(valStr);
                 else if (key == "float_pd_y") g_float_pd_y = std::stof(valStr);
@@ -767,23 +736,7 @@ void LoadConfig() {
                 else if (key == "float_opp_y") g_float_opp_y = std::stof(valStr);
                 else if (key == "float_hex_x") g_float_hex_x = std::stof(valStr);
                 else if (key == "float_hex_y") g_float_hex_y = std::stof(valStr);
-                else if (key == "auto_clicker_enable") g_auto_clicker_enable = (std::stoi(valStr) != 0);
-                else if (key == "click_interval_ms") g_click_interval_ms = std::stof(valStr);
-                else if (key == "touch_duration_ms") g_touch_duration_ms = std::stof(valStr);
-                else if (key == "click_positions") {
-                    g_click_positions.clear();
-                    std::stringstream ss(valStr);
-                    std::string pair;
-                    while (std::getline(ss, pair, ';')) {
-                        if (pair.empty()) continue;
-                        std::stringstream ss2(pair);
-                        std::string xs, ys;
-                        if (std::getline(ss2, xs, ',') && std::getline(ss2, ys, ',')) {
-                            try { g_click_positions.push_back({std::stof(xs), std::stof(ys)}); } catch (...) {}
-                        }
-                    }
-                    if (g_click_positions.empty()) g_click_positions.push_back({540.0f, 960.0f});
-                }
+                                                                
                 else if (key == "auto_buy_ids") {
                     g_heroAutoBuyChecked.clear();
                     std::stringstream ss(valStr);
@@ -810,11 +763,6 @@ void ClearGameState() {
     g_my_player_id = 0;
     g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
 
-    g_dbg_addr1 = 0; g_dbg_addr2 = 0; g_dbg_addr3 = 0; g_dbg_addra = 0; g_dbg_segmentcsogame = 0;
-    g_dbg_addr4 = 0; g_dbg_addr5 = 0; g_dbg_addr6 = 0; g_dbg_addr7 = 0;
-    g_dbg_addr11 = 0; g_dbg_addr12 = 0; g_dbg_addr13 = 0;
-    g_dbg_addr21 = 0; g_dbg_addr22 = 0; g_dbg_addr23 = 0;
-    g_dbg_addr26 = 0; g_dbg_hexctrl = 0;
     g_dbg_list7_addrs.clear();
     g_dbg_list9_map.clear();
     g_dbg_player_addrs.clear();
@@ -832,27 +780,88 @@ void ClearGameState() {
     }
 }
 
-bool TryResolveSegmentCSOGame(uintptr_t* out_segment = nullptr) {
-    if (g_il2cppTrueBase == 0) return false;
+void ResolveDiagnosticPointers() {
+    if (g_il2cppTrueBase == 0 || g_off.func_get_Instance == 0) {
+        g_dbg_addr1 = 0; g_dbg_addr2 = 0; g_dbg_addr3 = 0; g_dbg_addra = 0; g_dbg_segmentcsogame = 0;
+        return;
+    }
+
     typedef void* (*func_get_Instance_t)(void* method_info);
     func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
-    if (!get_Instance) return false;
+    if (!get_Instance || !IsValidExecutableAddr((void*)get_Instance)) {
+        g_dbg_addr1 = 0;
+    } else {
+        g_dbg_addr1 = SAFE_CALL((uintptr_t)get_Instance(nullptr), (uintptr_t)0);
+    }
 
-    uintptr_t addr1 = 0;
-    addr1 = SAFE_CALL((uintptr_t)get_Instance(nullptr), (uintptr_t)0); // Anti-crash protected
-    if (!IsValidPtr(addr1)) return false;
+    // 关键：每一步单独解析并实时更新全局调试变量，改一个就能立即看到一个！
+    if (IsValidPtr(g_dbg_addr1)) {
+        g_dbg_addr2 = SAFE_READ_PTR(g_dbg_addr1, g_off.addr2);
+    } else {
+        g_dbg_addr2 = 0;
+    }
 
-    uintptr_t addr2 = SAFE_READ_PTR(addr1, g_off.addr2);
-    if (!IsValidPtr(addr2)) return false;
-    uintptr_t addr3 = SAFE_READ_PTR(addr2, g_off.addr3);
-    if (!IsValidPtr(addr3)) return false;
-    uintptr_t addra = SAFE_READ_PTR(addr3, g_off.addra);
-    if (!IsValidPtr(addra)) return false;
-    uintptr_t segment = SAFE_READ_PTR(addra, g_off.segmentcsogame);
-    if (!IsValidPtr(segment)) return false;
+    if (IsValidPtr(g_dbg_addr2)) {
+        g_dbg_addr3 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr3);
+        g_dbg_addr11 = SAFE_READ_PTR(g_dbg_addr2, g_off.addr11);
+    } else {
+        g_dbg_addr3 = 0;
+        g_dbg_addr11 = 0;
+    }
 
-    if (out_segment) *out_segment = segment;
-    return true;
+    if (IsValidPtr(g_dbg_addr3)) {
+        g_dbg_addra = SAFE_READ_PTR(g_dbg_addr3, g_off.addra);
+    } else {
+        g_dbg_addra = 0;
+    }
+
+    if (IsValidPtr(g_dbg_addra)) {
+        g_dbg_segmentcsogame = SAFE_READ_PTR(g_dbg_addra, g_off.segmentcsogame);
+    } else {
+        g_dbg_segmentcsogame = 0;
+    }
+
+    if (IsValidPtr(g_dbg_segmentcsogame)) {
+        g_my_player_id = SAFE_READ_INT(g_dbg_segmentcsogame, g_off.segment_my_player_id);
+        g_dbg_addr4 = SAFE_READ_PTR(g_dbg_segmentcsogame, g_off.addr4);
+        g_dbg_addr21 = SAFE_READ_PTR(g_dbg_segmentcsogame, g_off.addr21);
+    } else {
+        g_dbg_addr4 = 0;
+        g_dbg_addr21 = 0;
+    }
+
+    if (IsValidPtr(g_dbg_addr4)) {
+        g_dbg_addr5 = SAFE_READ_PTR(g_dbg_addr4, g_off.addr5);
+    } else { g_dbg_addr5 = 0; }
+
+    if (IsValidPtr(g_dbg_addr5)) {
+        g_dbg_addr6 = SAFE_READ_PTR(g_dbg_addr5, g_off.addr6);
+    } else { g_dbg_addr6 = 0; }
+
+    if (IsValidPtr(g_dbg_addr6)) {
+        g_dbg_addr7 = SAFE_READ_PTR(g_dbg_addr6, g_off.addr7);
+    } else { g_dbg_addr7 = 0; }
+
+    if (IsValidPtr(g_dbg_addr11)) {
+        g_dbg_addr12 = SAFE_READ_PTR(g_dbg_addr11, g_off.addr12);
+    } else { g_dbg_addr12 = 0; }
+
+    if (IsValidPtr(g_dbg_addr21)) {
+        g_dbg_addr22 = SAFE_READ_PTR(g_dbg_addr21, g_off.addr22);
+    } else { g_dbg_addr22 = 0; }
+
+    if (IsValidPtr(g_dbg_addr22)) {
+        g_dbg_addr23 = SAFE_READ_PTR(g_dbg_addr22, g_off.addr23);
+    } else { g_dbg_addr23 = 0; }
+}
+
+bool TryResolveSegmentCSOGame(uintptr_t* out_segment = nullptr) {
+    ResolveDiagnosticPointers();
+    if (IsValidPtr(g_dbg_segmentcsogame)) {
+        if (out_segment) *out_segment = g_dbg_segmentcsogame;
+        return true;
+    }
+    return false;
 }
 
 void UpdateMatchState() {
@@ -1537,73 +1546,6 @@ void DrawCardPoolCapsule() {
     ImGui::PopStyleVar();
 }
 
-void DrawClickerCapsule() {
-    ImGuiIO& io = ImGui::GetIO();
-    float sc = g_autoScale;
-    const char* label = g_auto_clicker_enable ? (const char*)u8"\u8fde\u70b9: \u5f00" : (const char*)u8"\u8fde\u70b9: \u5173";
-    ImVec2 txtSz = ImGui::CalcTextSize(label);
-    float padX = 22.0f * sc, padY = 12.0f * sc;
-    float capW = txtSz.x + padX * 2.0f;
-    float capH = txtSz.y + padY * 2.0f;
-    ImGui::SetNextWindowPos(ImVec2(g_clickerbtn_x, g_clickerbtn_y), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(capW, capH));
-    ImGuiWindowFlags capFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings
-        | ImGuiWindowFlags_NoNav;
-    if (g_floats_locked) capFlags |= ImGuiWindowFlags_NoMove;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0.01f));
-    ImGui::Begin("##ClickerCapsule", nullptr, capFlags);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 mn = ImGui::GetWindowPos();
-    ImVec2 mx(mn.x + capW, mn.y + capH);
-    float rounding = capH * 0.5f;
-    ImU32 bg = g_auto_clicker_enable ? IM_COL32(200, 150, 40, 215) : IM_COL32(70, 75, 85, 210);
-    ImU32 border = g_auto_clicker_enable ? IM_COL32(255, 200, 60, 180) : IM_COL32(140, 145, 155, 160);
-    dl->AddRectFilled(mn, mx, bg, rounding);
-    dl->AddRect(mn, mx, border, rounding, 0, 1.5f);
-    dl->AddText(ImVec2(mn.x + padX, mn.y + padY), IM_COL32(255, 255, 255, 245), label);
-    if (ImGui::InvisibleButton("##clickerbtn_cap", ImVec2(capW, capH))) {
-        g_auto_clicker_enable = !g_auto_clicker_enable;
-        g_clicker_running.store(g_auto_clicker_enable);
-    }
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0) && !g_floats_locked) {
-        g_clickerbtn_x += io.MouseDelta.x;
-        g_clickerbtn_y += io.MouseDelta.y;
-    }
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
-}
-
-void DrawClickerFeedback() {
-    if (!g_auto_clicker_enable) return;
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    float time = (float)ImGui::GetTime();
-    
-    float sc = g_autoScale;
-    float scale_x = 1.0f, scale_y = 1.0f;
-    if (g_cached_view_width > 0 && g_gl_width > 0) scale_x = (float)g_gl_width / g_cached_view_width;
-    if (g_cached_view_height > 0 && g_gl_height > 0) scale_y = (float)g_gl_height / g_cached_view_height;
-    
-    for (size_t pi = 0; pi < g_click_positions.size(); pi++) {
-        ImVec2 center(g_click_positions[pi].x * scale_x, g_click_positions[pi].y * scale_y);
-        // 十字准星
-        float cl = 12.0f * sc;
-        dl->AddLine(ImVec2(center.x - cl, center.y), ImVec2(center.x + cl, center.y), IM_COL32(255, 200, 50, 200), 2.0f * sc);
-        dl->AddLine(ImVec2(center.x, center.y - cl), ImVec2(center.x, center.y + cl), IM_COL32(255, 200, 50, 200), 2.0f * sc);
-        
-        // 波纹扩散动画
-        float freq = g_click_interval_ms > 0 ? (1000.0f / g_click_interval_ms) : 30.0f;
-        freq = std::clamp(freq, 2.0f, 20.0f); 
-        
-        float pulse = fmodf(time * freq, 1.0f); 
-        float radius = (8.0f + 30.0f * pulse) * sc;
-        float alpha = 1.0f - pulse;
-        
-        dl->AddCircle(center, radius, IM_COL32(255, 200, 50, (int)(alpha * 255.0f)), 0, 2.5f * sc);
-    }
-}
-
 static bool BeginContentFloatWindow(const char* id, bool* open, float* pos_x = nullptr, float* pos_y = nullptr, float alpha = 1.0f) {
     if (open && !*open) return false;
     if (pos_x && pos_y && *pos_x >= 0.0f && *pos_y >= 0.0f) {
@@ -2025,10 +1967,21 @@ void DrawHexKeypadModal() {
     ImGui::End();
 }
 
-void DrawOffsetAdjuster(const char* label, uint32_t* value) {
+void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_addr = 0, bool show_resolved = false) {
     ImGui::PushID(label);
-    ImGui::Text("%-32s", label); 
+    ImGui::Text("%-24s", label); 
     
+    if (show_resolved) {
+        ImGui::SameLine();
+        if (IsValidPtr(resolved_addr)) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "-> 0x%lx [OK]", (unsigned long)resolved_addr);
+        } else if (resolved_addr != 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "-> %lu [OK]", (unsigned long)resolved_addr);
+        } else {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 0.8f), "-> 0x0 [x]");
+        }
+    }
+
     char hex_str[32];
     snprintf(hex_str, sizeof(hex_str), "0x%X", *value);
 
@@ -2726,7 +2679,7 @@ void DrawMainMenu() {
             float sidebarW = 132.0f * g_autoScale * g_scale;
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
             ImGui::BeginChild("FrostSidebar", ImVec2(sidebarW, 0), true, ImGuiWindowFlags_NoScrollbar);
-            const char* tabLabels[] = { u8"浮窗", u8"拿牌", u8"监视", u8"调试" };
+            const char* tabLabels[] = { (const char*)u8"视觉透视", (const char*)u8"自动购买", (const char*)u8"链路诊断", (const char*)u8"偏移调试" };
             for (int i = 0; i < 4; i++) {
                 if (FrostSidebarBtn(tabLabels[i], current_tab == i, i)) current_tab = i;
                 ImGui::Dummy(ImVec2(0, 4.0f * g_autoScale));
@@ -2883,204 +2836,99 @@ void DrawMainMenu() {
                         ImGui::NewLine();
                     }
                 }
-                DrawGlassSeparator();
-                DrawSectionTitle((const char*)u8"\u8fde\u70b9\u5668");
-                {
-                    // 更新 CPS 统计数据
-                    float now_time = (float)ImGui::GetTime();
-                    static float last_cps_calc_time = 0.0f;
-                    if (now_time - last_cps_calc_time >= 0.1f) {
-                        static int last_click_count = 0;
-                        int curr_click_count = g_total_clicks_executed.load(std::memory_order_relaxed);
-                        float dt = now_time - last_cps_calc_time;
-                        if (dt > 0.001f) {
-                            g_realtime_cps = (curr_click_count - last_click_count) / dt;
-                        }
-                        last_click_count = curr_click_count;
-                        last_cps_calc_time = now_time;
-
-                        g_cps_history[g_cps_hist_idx] = g_realtime_cps;
-                        g_cps_hist_idx = (g_cps_hist_idx + 1) % 100;
-                    }
-
-                    // 开关
-                    bool was_on = g_auto_clicker_enable;
-                    ModernToggle((const char*)u8"\u5f00\u542f\u8fde\u70b9\u5668", &g_auto_clicker_enable, 11);
-                    if (g_auto_clicker_enable && !was_on) g_clicker_running.store(true);
-                    if (!g_auto_clicker_enable) g_clicker_running.store(false);
-
-                    // 间隔与持续时间
-                    SliderFloatFine((const char*)u8"点击间隔(ms)", &g_click_interval_ms, 0.0f, 200.0f, "%.1f ms");
-                    SliderFloatFine((const char*)u8"按下持续(ms)", &g_touch_duration_ms, 0.0f, 50.0f, "%.1f ms");
-                    
-                    if (g_click_interval_ms <= 0.0f && g_touch_duration_ms <= 0.0f) {
-                        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), (const char*)u8"模式: 零延迟极速爆破");
-                    } else {
-                        ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.f, 1.f), (const char*)u8"设定理论极限: %.0f 次/秒", 1000.0f / std::max(g_click_interval_ms + g_touch_duration_ms, 0.1f));
-                    }
-
-                    // 科技感 CPS 曲线画板
-                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"实时实际速率: %.1f 次/秒 (CPS)", g_realtime_cps);
-                    {
-                        ImDrawList* dl = ImGui::GetWindowDrawList();
-                        ImVec2 graphPos = ImGui::GetCursorScreenPos();
-                        float graphW = ImGui::GetContentRegionAvail().x;
-                        float graphH = 60.0f * g_autoScale * g_scale;
-
-                        ImGui::Dummy(ImVec2(graphW, graphH));
-
-                        // 背景框
-                        dl->AddRectFilled(graphPos, ImVec2(graphPos.x + graphW, graphPos.y + graphH), IM_COL32(10, 16, 28, 220), 6.0f);
-                        dl->AddRect(graphPos, ImVec2(graphPos.x + graphW, graphPos.y + graphH), IM_COL32(50, 120, 200, 100), 6.0f, 0, 1.0f);
-
-                        // 参考线
-                        for (int i = 1; i < 3; i++) {
-                            float y = graphPos.y + graphH * (i / 3.0f);
-                            dl->AddLine(ImVec2(graphPos.x, y), ImVec2(graphPos.x + graphW, y), IM_COL32(255, 255, 255, 12), 1.0f);
-                        }
-
-                        // 查找最大刻度
-                        float max_cps = 50.0f;
-                        for (int i = 0; i < 100; i++) {
-                            if (g_cps_history[i] > max_cps) max_cps = g_cps_history[i];
-                        }
-
-                        // 绘制实时发光曲线
-                        for (int i = 0; i < 99; i++) {
-                            int idx1 = (g_cps_hist_idx + i) % 100;
-                            int idx2 = (g_cps_hist_idx + i + 1) % 100;
-
-                            float val1 = std::clamp(g_cps_history[idx1] / max_cps, 0.0f, 1.0f);
-                            float val2 = std::clamp(g_cps_history[idx2] / max_cps, 0.0f, 1.0f);
-
-                            ImVec2 p1(graphPos.x + (i / 99.0f) * graphW, graphPos.y + graphH * (1.0f - val1 * 0.85f) - 4.0f);
-                            ImVec2 p2(graphPos.x + ((i + 1) / 99.0f) * graphW, graphPos.y + graphH * (1.0f - val2 * 0.85f) - 4.0f);
-
-                            // 填充渐变色
-                            ImVec2 poly[4] = { p1, p2, ImVec2(p2.x, graphPos.y + graphH - 2), ImVec2(p1.x, graphPos.y + graphH - 2) };
-                            dl->AddConvexPolyFilled(poly, 4, IM_COL32(0, 180, 255, 25));
-
-                            // 折线 glow
-                            dl->AddLine(p1, p2, IM_COL32(0, 220, 255, 255), 2.0f);
-                        }
-
-                        char limit_str[32];
-                        snprintf(limit_str, sizeof(limit_str), "峰值: %.0f CPS", max_cps);
-                        dl->AddText(ImVec2(graphPos.x + 8, graphPos.y + 4), IM_COL32(255, 255, 255, 120), limit_str);
-                    }
-
-                    // 多位置连点
-                    ImGui::TextColored(ImVec4(1.f, 0.85f, 0.3f, 1.f), (const char*)u8"点击位置数量: %d", (int)g_click_positions.size());
-                    if (ImGui::Button((const char*)u8"+ 添加点击位置")) { g_click_positions.push_back({g_click_positions.back().x, g_click_positions.back().y}); }
-                    ImGui::SameLine();
-                    if (ImGui::Button((const char*)u8"- 删除最后一个")) { if (g_click_positions.size() > 1) g_click_positions.pop_back(); }
-                    for (size_t i = 0; i < g_click_positions.size(); i++) {
-                        char label[32]; snprintf(label, sizeof(label), "位置 %zu", i+1);
-                        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.f, 1.f), "%s", label);
-                        SliderFloatFine((const char*)u8"X", &g_click_positions[i].x, 0.0f, (float)g_cached_view_width > 0 ? (float)g_cached_view_width : 1440.0f);
-                        SliderFloatFine((const char*)u8"Y", &g_click_positions[i].y, 0.0f, (float)g_cached_view_height > 0 ? (float)g_cached_view_height : 3200.0f);
-                        if (ImGui::Button("删除", ImVec2(60 * g_autoScale, 0))) {
-                            if (g_click_positions.size() > 1) g_click_positions.erase(g_click_positions.begin() + (int)i--);
-                        }
-                    }
-                }
                 break;
             case 2:
-                DrawSectionTitle((const char*)u8"全量监视");
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【主线核心基址】");
+                DrawSectionTitle((const char*)u8"链路诊断与状态监视");
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址链路】");
                 ImGui::Text("il2cppTrueBase: 0x%lx", g_il2cppTrueBase);
-                ImGui::Text("addr1: 0x%lx | segment: 0x%lx | my_id: %d | %s", g_dbg_addr1, g_dbg_segmentcsogame,
-                    g_my_player_id,
-                    g_is_in_match.load() ? (const char*)u8"对局中" : (const char*)u8"未在对局");
+                ImGui::Text("addr1 (Instance): 0x%lx %s", g_dbg_addr1, IsValidPtr(g_dbg_addr1) ? "[OK]" : "[x]");
+                ImGui::Text("addr2: 0x%lx %s", g_dbg_addr2, IsValidPtr(g_dbg_addr2) ? "[OK]" : "[x]");
+                ImGui::Text("addr3: 0x%lx %s", g_dbg_addr3, IsValidPtr(g_dbg_addr3) ? "[OK]" : "[x]");
+                ImGui::Text("addra: 0x%lx %s", g_dbg_addra, IsValidPtr(g_dbg_addra) ? "[OK]" : "[x]");
+                ImGui::Text("segmentCSOGame: 0x%lx %s", g_dbg_segmentcsogame, IsValidPtr(g_dbg_segmentcsogame) ? "[OK]" : "[x]");
+                ImGui::Text("本地玩家ID: %d | 对局状态: %s", g_my_player_id, g_is_in_match.load() ? "对局中" : "未在对局");
+                
                 DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库链全量遍历】");
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【核心Hook拦截状态】");
+                ImGui::Text("1. 商店监听 (func_shop_listen): %s", old_shop_listen ? "已挂钩 [OK]" : "未挂钩/偏移待校准 [x]");
+                ImGui::Text("2. 对局状态 (func_set_IsGameEnd): %s", orig_set_IsGameEnd ? "已挂钩 [OK]" : "未挂钩/偏移待校准 [x]");
+                ImGui::Text("3. 主线程管道 (SendWillRenderCanvases): %s", orig_SendWillRenderCanvases ? "已挂钩 [OK]" : "未挂钩 [x]");
+                ImGui::Text("4. 触摸输入拦截 (nativeInjectEvent): %s", old_nativeInjectEvent ? "已挂钩 [OK]" : "未挂钩 [x]");
+
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库数据调试】");
+                ImGui::Text("addr4=0x%lx | addr7=0x%lx (条目数: %zu)", g_dbg_addr4, g_dbg_addr7, g_dbg_list7_addrs.size());
                 ImGui::Indent();
-                for (size_t i = 0; i < g_dbg_list7_addrs.size(); i++) {
+                for (size_t i = 0; i < std::min((size_t)6, g_dbg_list7_addrs.size()); i++) {
                     uintptr_t a8 = g_dbg_list7_addrs[i];
                     ImGui::Text("addr7[%zu] -> addr8: 0x%lx", i, a8);
-                    if (g_dbg_list9_map.count(a8)) {
-                        ImGui::Indent();
-                        for (size_t j = 0; j < g_dbg_list9_map[a8].size(); j++) {
-                            uintptr_t a10 = g_dbg_list9_map[a8][j];
-                            if (IsValidPtr(a10)) {
-                                int hId = SAFE_READ_INT(a10, g_off.ph_heroId);
-                                if (hId > 0 && hId < 100000) ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "  -> ID=%d, 余=%d, 总=%d", hId, SAFE_READ_INT(a10, g_off.ph_remaining), SAFE_READ_INT(a10, g_off.ph_total));
-                                else ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  -> 无效 ID:%d", hId);
-                            }
-                        }
-                        ImGui::Unindent();
-                    }
                 }
+                if (g_dbg_list7_addrs.size() > 6) ImGui::Text("... (共 %zu 个条目)", g_dbg_list7_addrs.size());
                 ImGui::Unindent();
+
                 DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【商店格子地址 (5格)】");
-                ImGui::Text((const char*)u8"捕获进度: %zu / 5", g_shop_slots.size());
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【商店槽位地址 (5槽)】");
+                ImGui::Text("捕获进度: %zu / 5", g_shop_slots.size());
                 ImGui::Indent();
                 for (size_t i = 0; i < g_shop_slots.size(); i++)
                     ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.85f, 1.0f), "ShopSlot[%zu]: 0x%lx", i, g_shop_slots[i]);
                 for (size_t i = g_shop_slots.size(); i < 5; i++)
-                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "ShopSlot[%zu]: (未捕获)", i);
+                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "ShopSlot[%zu]: (等待游戏刷新商店...)", i);
                 ImGui::Unindent();
+
                 DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家遍历 addr12】");
-                ImGui::Text("发现合法玩家指针 %zu 条", g_dbg_player_addrs.size());
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家列表 (addr12)】");
+                ImGui::Text("addr11=0x%lx | addr12=0x%lx | 解析出玩家数: %zu", g_dbg_addr11, g_dbg_addr12, g_players.size());
                 ImGui::Indent();
-                for (size_t i = 0; i < g_dbg_player_addrs.size(); i++) ImGui::Text("Player[%zu]: 0x%lx", i, g_dbg_player_addrs[i]);
-                ImGui::Unindent();
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【addr23 头像排位】");
-                ImGui::Text((const char*)u8"addr23=0x%lx | 列表条目 %zu | 读到排位 %zu | 已匹配玩家 %d",
-                    g_dbg_addr23, g_dbg_list23_addrs.size(), g_dbg_avatar_ranks.size(),
-                    (int)std::count_if(g_players.begin(), g_players.end(), [](const PlayerInfo& p) { return p.avatar_rank > 0; }));
-                ImGui::Indent();
-                for (size_t i = 0; i < g_dbg_avatar_ranks.size(); i++) {
-                    const auto& ar = g_dbg_avatar_ranks[i];
-                    ImGui::TextColored(ar.matched_id >= 0 ? ImVec4(0.5f, 1.0f, 0.85f, 1.0f) : ImVec4(1.0f, 0.55f, 0.45f, 1.0f),
-                        "[%zu] raw=%d rank=%d pid=%d matched_id=%d", i, ar.raw_rank, ar.rank, ar.pid, ar.matched_id);
-                    ImGui::Text("      entry=0x%lx addr26=0x%lx", ar.entry, ar.addr26);
+                for (size_t i = 0; i < g_players.size(); i++) {
+                    const auto& pi = g_players[i];
+                    ImGui::Text("[%zu] ID=%d 昵称=%s 金币=%d 等级=%d 连胜=%d 连败=%d (addr13=0x%lx)", 
+                        i+1, pi.id, pi.name.c_str(), pi.money, pi.level, pi.win_streak, pi.lose_streak, pi.addr13_ptr);
                 }
-                if (g_dbg_list23_addrs.empty())
-                    ImGui::TextColored(ImVec4(1, 0.45f, 0.45f, 1), (const char*)u8"  ! list23 为空：检查 addr23 / struct_size / ptr_offset");
-                else if (g_dbg_avatar_ranks.empty())
-                    ImGui::TextColored(ImVec4(1, 0.45f, 0.45f, 1), (const char*)u8"  ! 有条目但读不到 rank：检查 addr26(0x68) / pi_avatar_rank(0x2DC)");
-                else if (std::none_of(g_players.begin(), g_players.end(), [](const PlayerInfo& p) { return p.avatar_rank > 0; }))
-                    ImGui::TextColored(ImVec4(1, 0.45f, 0.45f, 1), (const char*)u8"  ! rank 已读到但未匹配玩家：检查 addr26+0x248 玩家 id 是否与列表 id 一致");
                 ImGui::Unindent();
+
                 DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家 avatar_rank】");
-                ImGui::Indent();
-                for (auto& pi : g_players)
-                    ImGui::Text("id=%d rank=%d name=%s val=0x%lx addr13=0x%lx", pi.id, pi.avatar_rank, pi.name.c_str(), pi.val_ptr, pi.addr13_ptr);
-                ImGui::Unindent();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【下轮对手预测】");
+                if (g_next_opponents.empty()) ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "等待进入对局获取对手列表...");
+                else {
+                    for (size_t i = 0; i < g_next_opponents.size(); i++) {
+                        int opp_id = g_next_opponents[i];
+                        std::string opp_name = "未知";
+                        for (const auto& p : g_players) { if (p.id == opp_id) { opp_name = p.name; break; } }
+                        ImGui::Text("对手[%zu]: ID=%d (%s)", i + 1, opp_id, opp_name.c_str());
+                    }
+                }
+
                 DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【海克斯链】");
-                ImGui::Text("addr26: 0x%lx | hexctrl: 0x%lx", g_dbg_addr26, g_dbg_hexctrl);
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【海克斯与排位 (addr21~26)】");
+                ImGui::Text("addr21=0x%lx | addr23=0x%lx | addr26=0x%lx | hexctrl=0x%lx", g_dbg_addr21, g_dbg_addr23, g_dbg_addr26, g_dbg_hexctrl);
+                ImGui::Text("海克斯品质: [%d, %d, %d]", g_hex_qualities[0], g_hex_qualities[1], g_hex_qualities[2]);
                 break;
             case 3:
-                DrawSectionTitle((const char*)u8"偏移调试");
+                DrawSectionTitle((const char*)u8"偏移调试与实时诊断");
                 if (ImGui::Button((const char*)u8"保存全部配置", ImVec2(-1, 34 * g_autoScale * g_scale))) SaveConfig();
                 DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址与全局功能】");
-                DrawOffsetAdjuster("func_get_Instance", &g_off.func_get_Instance);
-                DrawOffsetAdjuster("addr2", &g_off.addr2);
-                DrawOffsetAdjuster("addr3", &g_off.addr3);
-                DrawOffsetAdjuster("addra", &g_off.addra);
-                DrawOffsetAdjuster("segmentcsogame", &g_off.segmentcsogame);
-                DrawOffsetAdjuster("segment_my_player_id", &g_off.segment_my_player_id);
-                DrawOffsetAdjuster("func_quit (极速退游)", &g_off.func_quit);
-                DrawOffsetAdjuster("func_set_IsGameEnd (对局状态)", &g_off.func_set_IsGameEnd);
-                DrawOffsetAdjuster("my_player_id (addr2视角)", &g_off.my_player_id);
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址链路】（改一个对应地址立刻显示）");
+                DrawOffsetAdjuster("func_get_Instance", &g_off.func_get_Instance, g_dbg_addr1, true);
+                DrawOffsetAdjuster("addr2", &g_off.addr2, g_dbg_addr2, true);
+                DrawOffsetAdjuster("addr3", &g_off.addr3, g_dbg_addr3, true);
+                DrawOffsetAdjuster("addra", &g_off.addra, g_dbg_addra, true);
+                DrawOffsetAdjuster("segmentcsogame", &g_off.segmentcsogame, g_dbg_segmentcsogame, true);
+                DrawOffsetAdjuster("segment_my_player_id", &g_off.segment_my_player_id, (uintptr_t)g_my_player_id, true);
+                DrawOffsetAdjuster("func_quit", &g_off.func_quit);
+                DrawOffsetAdjuster("func_set_IsGameEnd", &g_off.func_set_IsGameEnd);
+                DrawOffsetAdjuster("my_player_id (addr2)", &g_off.my_player_id);
                 DrawOffsetAdjuster("next_opponents_list", &g_off.next_opponents_list);
-                DrawOffsetAdjuster("func_reqbuyhero (自动拿牌)", &g_off.func_reqbuyhero);
+                DrawOffsetAdjuster("func_reqbuyhero", &g_off.func_reqbuyhero);
                 DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家字典链 (addr11~12)】");
-                DrawOffsetAdjuster("addr11", &g_off.addr11);
-                DrawOffsetAdjuster("addr12 (dict)", &g_off.addr12);
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家字典 (addr11~12)】");
+                DrawOffsetAdjuster("addr11", &g_off.addr11, g_dbg_addr11, true);
+                DrawOffsetAdjuster("addr12 (dict)", &g_off.addr12, g_dbg_addr12, true);
                 DrawOffsetAdjuster(" -> dict struct_size", &g_off.addr12_struct_size);
                 DrawOffsetAdjuster(" -> dict ptr_offset", &g_off.addr12_ptr_offset);
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家基本属性 (addr13)】");
-                DrawOffsetAdjuster("addr13 (从val偏移)", &g_off.addr13);
+                DrawOffsetAdjuster("addr13", &g_off.addr13, g_dbg_addr13, true);
                 DrawOffsetAdjuster("pi_name", &g_off.pi_name);
                 DrawOffsetAdjuster("pi_id", &g_off.pi_id);
                 DrawOffsetAdjuster("pi_is_bot", &g_off.pi_is_bot);
@@ -3089,51 +2937,49 @@ void DrawMainMenu() {
                 DrawOffsetAdjuster("pi_win_streak", &g_off.pi_win_streak);
                 DrawOffsetAdjuster("pi_lose_streak", &g_off.pi_lose_streak);
                 DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家商店、备战区与场上】");
-                DrawOffsetAdjuster("addr14 (商店基址)", &g_off.addr14);
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库字典链 (addr4~7)】");
+                DrawOffsetAdjuster("addr4", &g_off.addr4, g_dbg_addr4, true);
+                DrawOffsetAdjuster("addr5", &g_off.addr5, g_dbg_addr5, true);
+                DrawOffsetAdjuster("addr6", &g_off.addr6, g_dbg_addr6, true);
+                DrawOffsetAdjuster("addr7 (dict 数组)", &g_off.addr7, g_dbg_addr7, true);
+                DrawOffsetAdjuster(" -> addr7 struct_size", &g_off.addr7_struct_size);
+                DrawOffsetAdjuster(" -> addr7 ptr_offset", &g_off.addr7_ptr_offset);
+                DrawOffsetAdjuster("addr9 (dict 内部)", &g_off.addr9);
+                DrawOffsetAdjuster(" -> addr9 struct_size", &g_off.addr9_struct_size);
+                DrawOffsetAdjuster(" -> addr9 ptr_offset", &g_off.addr9_ptr_offset);
+                DrawOffsetAdjuster("ph_heroId", &g_off.ph_heroId);
+                DrawOffsetAdjuster("ph_remaining", &g_off.ph_remaining);
+                DrawOffsetAdjuster("ph_total", &g_off.ph_total);
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【海克斯与排位 (addr21~26)】");
+                DrawOffsetAdjuster("addr21", &g_off.addr21, g_dbg_addr21, true);
+                DrawOffsetAdjuster("addr22", &g_off.addr22, g_dbg_addr22, true);
+                DrawOffsetAdjuster("addr23", &g_off.addr23, g_dbg_addr23, true);
+                DrawOffsetAdjuster(" -> addr23 struct_size", &g_off.addr23_struct_size);
+                DrawOffsetAdjuster(" -> addr23 ptr_offset", &g_off.addr23_ptr_offset);
+                DrawOffsetAdjuster("addr26", &g_off.addr26, g_dbg_addr26, true);
+                DrawOffsetAdjuster("pi_avatar_rank", &g_off.pi_avatar_rank);
+                DrawOffsetAdjuster("pi_avatar_player_id", &g_off.pi_avatar_player_id);
+                DrawOffsetAdjuster("hexctrl", &g_off.hexctrl, g_dbg_hexctrl, true);
+                DrawOffsetAdjuster("func_get_hex", &g_off.func_get_hex);
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【商店、备战区与场上】");
+                DrawOffsetAdjuster("addr14 (商店)", &g_off.addr14);
                 DrawOffsetAdjuster("addr15", &g_off.addr15);
                 DrawOffsetAdjuster("addr16", &g_off.addr16);
                 DrawOffsetAdjuster("shop_hero_id", &g_off.shop_hero_id);
-                DrawOffsetAdjuster("addr17 (备战区基址)", &g_off.addr17);
+                DrawOffsetAdjuster("addr17 (备战)", &g_off.addr17);
                 DrawOffsetAdjuster("addr18", &g_off.addr18);
                 DrawOffsetAdjuster("bench_hero_id", &g_off.bench_hero_id);
-                DrawOffsetAdjuster("addr19 (场上基址)", &g_off.addr19);
+                DrawOffsetAdjuster("addr19 (场上)", &g_off.addr19);
                 DrawOffsetAdjuster("addr20", &g_off.addr20);
                 DrawOffsetAdjuster("board_hero_id", &g_off.board_hero_id);
                 DrawOffsetAdjuster("board_x", &g_off.board_x);
                 DrawOffsetAdjuster("board_y", &g_off.board_y);
                 DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库字典链 (addr4~9)】");
-                DrawOffsetAdjuster("addr4", &g_off.addr4);
-                DrawOffsetAdjuster("addr5", &g_off.addr5);
-                DrawOffsetAdjuster("addr6", &g_off.addr6);
-                DrawOffsetAdjuster("addr7 (dict 外层)", &g_off.addr7);
-                DrawOffsetAdjuster(" -> addr7 struct_size", &g_off.addr7_struct_size);
-                DrawOffsetAdjuster(" -> addr7 ptr_offset", &g_off.addr7_ptr_offset);
-                DrawOffsetAdjuster("addr9 (dict 内层)", &g_off.addr9);
-                DrawOffsetAdjuster(" -> addr9 struct_size", &g_off.addr9_struct_size);
-                DrawOffsetAdjuster(" -> addr9 ptr_offset", &g_off.addr9_ptr_offset);
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库底层数据 (addr10)】");
-                DrawOffsetAdjuster("ph_heroId (英雄ID)", &g_off.ph_heroId);
-                DrawOffsetAdjuster("ph_remaining (剩余数)", &g_off.ph_remaining);
-                DrawOffsetAdjuster("ph_total (总数)", &g_off.ph_total);
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【海克斯链 (addr21~26)】");
-                DrawOffsetAdjuster("addr21", &g_off.addr21);
-                DrawOffsetAdjuster("addr22", &g_off.addr22);
-                DrawOffsetAdjuster("addr23", &g_off.addr23);
-                DrawOffsetAdjuster(" -> addr23 struct_size", &g_off.addr23_struct_size);
-                DrawOffsetAdjuster(" -> addr23 ptr_offset", &g_off.addr23_ptr_offset);
-                DrawOffsetAdjuster("addr26 (每条+偏移)", &g_off.addr26);
-                DrawOffsetAdjuster("pi_avatar_rank (addr26内)", &g_off.pi_avatar_rank);
-                DrawOffsetAdjuster("pi_avatar_player_id (addr26+0x248)", &g_off.pi_avatar_player_id);
-                DrawOffsetAdjuster("hexctrl (addr26内)", &g_off.hexctrl);
-                DrawOffsetAdjuster("func_get_hex (函数)", &g_off.func_get_hex);
-                DrawGlassSeparator();
-                ImGui::TextColored(UITheme().primary, (const char*)u8"【自动拿牌 (新版)】");
-                DrawOffsetAdjuster("func_shop_listen (监听)", &g_off.func_shop_listen);
-                DrawOffsetAdjuster("func_buy_hero_new (单参数购买)", &g_off.func_buy_hero_new);
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【全局Hook】");
+                DrawOffsetAdjuster("func_shop_listen", &g_off.func_shop_listen);
+                DrawOffsetAdjuster("func_buy_hero_new", &g_off.func_buy_hero_new);
                 break;
             }
 
@@ -3160,117 +3006,6 @@ JavaVM* g_jvm = nullptr;
 jobject g_view_obj = nullptr;
 jobject g_context = nullptr;
 void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
-
-void InjectTouchClick(JNIEnv* env, jobject view, float x, float y) {
-    if (!env || !view || !old_nativeInjectEvent) return;
-    static jclass SystemClock = nullptr;
-    static jmethodID uptimeMillis = nullptr;
-    static jclass MotionEvent = nullptr;
-    static jmethodID obtainFull = nullptr;
-    static jmethodID obtainBasic = nullptr;
-    static jmethodID setSource = nullptr;
-
-    if (!SystemClock) {
-        jclass sc = env->FindClass("android/os/SystemClock");
-        if (sc) {
-            SystemClock = (jclass)env->NewGlobalRef(sc);
-            uptimeMillis = env->GetStaticMethodID(SystemClock, "uptimeMillis", "()J");
-            env->DeleteLocalRef(sc);
-        }
-
-        jclass me = env->FindClass("android/view/MotionEvent");
-        if (me) {
-            MotionEvent = (jclass)env->NewGlobalRef(me);
-            // obtain(long downTime, long eventTime, int action, float x, float y, float pressure, float size, int metaState, float xPrecision, float yPrecision, int deviceId, int edgeFlags)
-            obtainFull = env->GetStaticMethodID(MotionEvent, "obtain", "(JJIFFFFIFFII)Landroid/view/MotionEvent;");
-            if (!obtainFull) {
-                obtainBasic = env->GetStaticMethodID(MotionEvent, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
-            }
-            setSource = env->GetMethodID(MotionEvent, "setSource", "(I)V");
-            env->DeleteLocalRef(me);
-        }
-    }
-
-    if (!uptimeMillis || (!obtainFull && !obtainBasic)) return;
-
-    long time = env->CallStaticLongMethod(SystemClock, uptimeMillis);
-    
-    // ACTION_DOWN = 0, pressure = 1.0f
-    jobject eventDown = nullptr;
-    if (obtainFull) {
-        eventDown = env->CallStaticObjectMethod(MotionEvent, obtainFull, time, time, 0, (jfloat)x, (jfloat)y, 1.0f, 1.0f, 0, 1.0f, 1.0f, 0, 0);
-    } else {
-        eventDown = env->CallStaticObjectMethod(MotionEvent, obtainBasic, time, time, 0, (jfloat)x, (jfloat)y, 0);
-    }
-
-    if (eventDown) {
-        if (setSource) env->CallVoidMethod(eventDown, setSource, 4098); // 4098 = InputDevice.SOURCE_TOUCHSCREEN
-        old_nativeInjectEvent(env, view, eventDown);
-        // 注意：绝不能在此处调用 event.recycle()！
-        // 因为 Unity 引擎会在主线程异步读取 MotionEvent。如果立即 recycle()，会将其 mNativePtr 置 0，导致 Unity 读到全空数据而无反应。
-        env->DeleteLocalRef(eventDown);
-    }
-
-    // 触摸按下持续时间控制（0ms 为零延迟模式）
-    if (g_touch_duration_ms > 0.0f) {
-        std::this_thread::sleep_for(std::chrono::microseconds((long long)(g_touch_duration_ms * 1000.0f)));
-    }
-    long timeUp = env->CallStaticLongMethod(SystemClock, uptimeMillis);
-
-    // ACTION_UP = 1, pressure = 0.0f
-    jobject eventUp = nullptr;
-    if (obtainFull) {
-        eventUp = env->CallStaticObjectMethod(MotionEvent, obtainFull, time, timeUp, 1, (jfloat)x, (jfloat)y, 0.0f, 1.0f, 0, 1.0f, 1.0f, 0, 0);
-    } else {
-        eventUp = env->CallStaticObjectMethod(MotionEvent, obtainBasic, time, timeUp, 1, (jfloat)x, (jfloat)y, 0);
-    }
-
-    if (eventUp) {
-        if (setSource) env->CallVoidMethod(eventUp, setSource, 4098);
-        old_nativeInjectEvent(env, view, eventUp);
-        env->DeleteLocalRef(eventUp);
-    }
-
-    // 记录一次有效成功注入的点击
-    g_total_clicks_executed.fetch_add(1, std::memory_order_relaxed);
-}
-
-void AutoClickerThread() {
-    JNIEnv* env = nullptr;
-    bool attached = false;
-    while (true) {
-        if (!g_clicker_running.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
-        }
-
-        if (!g_jvm || !g_view_obj) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
-        }
-
-        if (!env) {
-            if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-                g_jvm->AttachCurrentThread(&env, nullptr);
-                attached = true;
-            }
-        }
-
-        if (env && g_view_obj) {
-            // 尽力最快注入
-            for (const auto& cp : g_click_positions) { InjectTouchClick(env, g_view_obj, cp.x, cp.y); }
-        }
-
-        float interval = g_click_interval_ms;
-        if (interval > 0) {
-            std::this_thread::sleep_for(std::chrono::microseconds((long long)(interval * 1000.0f)));
-        } else {
-            // 最快模式：不休眠或极短暂让出时间片，防止卡死
-            std::this_thread::yield();
-        }
-    }
-    if (attached && g_jvm) g_jvm->DetachCurrentThread();
-}
 
 extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) {
     if (!g_jvm) env->GetJavaVM(&g_jvm);
@@ -3334,10 +3069,7 @@ extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) 
 
                 if (action == 0) { // ACTION_DOWN
                     io.AddMouseButtonEvent(0, true);
-                    // 连点器：捕获 ACTION_DOWN 时的坐标作为点击目标
-                    if (!io.WantCaptureMouse) {
-                        g_click_positions.push_back({raw_x, raw_y});
-                    }
+                    
                 } else if (action == 1 || action == 3) { // ACTION_UP / ACTION_CANCEL
                     io.AddMouseButtonEvent(0, false);
                 }
@@ -3410,9 +3142,7 @@ void FindAndHookHiddenJNI() {
         if (found_func) break;
     }
     
-    // 启动连点器后台线程
-    std::thread(AutoClickerThread).detach();
-}
+    
 
 typedef void (*func_set_IsGameEnd_t)(void* thisObj, uint8_t isEnd);
 func_set_IsGameEnd_t orig_set_IsGameEnd = nullptr;
@@ -3513,6 +3243,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
     // 预留前 60 帧缓冲，等待游戏引擎完全加载 il2cpp 单例后再开始读取游戏数据，防止启动加载期空指针闪退
     if (g_current_frame > 60 && g_il2cppTrueBase != 0) {
+        ResolveDiagnosticPointers();
         UpdateMatchState();
 
         if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire))
@@ -3538,8 +3269,6 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     DrawQuitCapsule();
     DrawLockCapsule();
     DrawCardPoolCapsule();
-    DrawClickerCapsule();
-    DrawClickerFeedback();
     if (g_apply_saved_float_pos) g_apply_saved_float_pos = false;
 
     ImGui::Render();
