@@ -1190,9 +1190,9 @@ void ParseGameMemory() {
                         typedef int (*func_get_hex_t)(uintptr_t, int);
                         func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
                         if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
-                            int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0), 0);
-                            int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1), 0);
-                            int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2), 0);
+                            int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
+                            int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
+                            int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
                                 
                                 if (q0 > 0 || q1 > 0 || q2 > 0) {
                                     if (q0 == prev_q0.load() && q1 == prev_q1.load() && q2 == prev_q2.load()) {
