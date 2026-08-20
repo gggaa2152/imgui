@@ -1452,6 +1452,38 @@ static void RaiseCapsuleWindow(const char* name) {
     // 禁用 BringWindowToDisplayFront，防止在帧内遍历窗口列表时引起自循环递归/堆栈溢出 (SIGSEGV code -6)
 }
 
+inline void ExecuteRapidQuit() {
+    EnsureIl2CppThreadAttached();
+    uintptr_t seg = g_dbg_segmentcsogame;
+    int pid = g_my_player_id;
+    
+    // 如果全局缓存未就绪，则现场实时通过寻址链获取一次
+    if (!IsValidPtr(seg) || pid == 0) {
+        typedef void* (*func_get_Instance_t)(void*);
+        func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + g_off.func_get_Instance);
+        if (get_Instance && IsValidExecutableAddr((void*)get_Instance)) {
+            uintptr_t a1 = SAFE_CALL((uintptr_t)get_Instance(nullptr), (uintptr_t)0);
+            uintptr_t a2 = SAFE_READ_PTR(a1, g_off.addr2);
+            uintptr_t a3 = SAFE_READ_PTR(a2, g_off.addr3);
+            uintptr_t aa = SAFE_READ_PTR(a3, g_off.addra);
+            seg = SAFE_READ_PTR(aa, g_off.segmentcsogame);
+            if (IsValidPtr(seg)) {
+                pid = SAFE_READ_INT(seg, g_off.segment_my_player_id);
+            }
+        }
+    }
+
+    typedef void (*func_quit_t)(uintptr_t, int, int, void*);
+    func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
+
+    if (quit_func && IsValidExecutableAddr((void*)quit_func) && IsValidPtr(seg)) {
+        AddActionLog((const char*)u8"-> [极速退游] 执行 func_quit(seg=0x%lx, pid=%d, mode=0)", seg, pid);
+        SAFE_CALL_VOID(quit_func(seg, pid, 0, nullptr));
+    } else {
+        AddActionLog((const char*)u8"-> [退游失败] func_quit(0x%lx) 或 seg(0x%lx) 无效!", (uintptr_t)quit_func, seg);
+    }
+}
+
 void DrawQuitCapsule() {
     ImGuiIO& io = ImGui::GetIO();
     float sc = g_autoScale;
@@ -1483,18 +1515,18 @@ void DrawQuitCapsule() {
             AddActionLog((const char*)u8"-> [极速退游] 请在3秒内再次点击以确认退游...");
         } else {
             g_quit_confirm = 0;
-            g_Tasks.trigger_quit.store(true);
-            typedef void (*func_quit_t)(uintptr_t, int, int);
-            func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
-            if (quit_func && IsValidExecutableAddr((void*)quit_func) && IsValidPtr(g_dbg_segmentcsogame)) {
-                AddActionLog((const char*)u8"-> [极速退游] call func_quit(segment=0x%lx, player_id=%d, mode=0)", g_dbg_segmentcsogame, g_my_player_id);
-                SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 0));
-            } else {
-                AddActionLog((const char*)u8"-> [退游失败] func_quit(0x%lx)或segment(0x%lx)无效!", (uintptr_t)quit_func, g_dbg_segmentcsogame);
-            }
-            g_is_in_match.store(false, std::memory_order_release);
-            g_need_segment_gap_before_enter = true;
-            g_Tasks.trigger_game_end.store(true, std::memory_order_release);
+            ExecuteRapidQuit();
+
+
+
+
+
+
+
+
+
+
+
         }
     }
     if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0) && !g_floats_locked) {
