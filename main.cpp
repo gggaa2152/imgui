@@ -147,7 +147,7 @@ std::vector<uintptr_t> g_dbg_list7_addrs;
 std::map<uintptr_t, std::vector<uintptr_t>> g_dbg_list9_map;
 std::vector<uintptr_t> g_dbg_player_addrs;
 
-int g_my_player_id = 0;
+int g_my_player_id = -1;
 int g_hex_qualities[3] = {0, 0, 0};
 std::vector<int> g_next_opponents;
 
@@ -783,7 +783,7 @@ void ClearGameState() {
     g_heroesByCost.clear();
     g_players.clear();
     g_next_opponents.clear();
-    g_my_player_id = 0;
+    g_my_player_id = -1;
     g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
 
     g_dbg_list7_addrs.clear();
@@ -998,7 +998,7 @@ void ParseGameMemory() {
     if (IsValidPtr(g_dbg_segmentcsogame))
         g_my_player_id = SAFE_READ_INT(g_dbg_segmentcsogame, g_off.segment_my_player_id);
     else
-        g_my_player_id = 0;
+        g_my_player_id = -1;
     uintptr_t next_opp_addr = SAFE_READ_PTR(g_dbg_addr2, g_off.next_opponents_list);
     uintptr_t next_opp_list = SAFE_READ_PTR(next_opp_addr, 0x10);
     int next_opp_count = SAFE_READ_INT(next_opp_addr, 0x18); // List._size
@@ -1475,7 +1475,7 @@ inline void ExecuteRapidQuit() {
     int pid = g_my_player_id;
     
     // 如果全局缓存未就绪，则现场实时通过寻址链获取一次
-    if (!IsValidPtr(seg) || pid == 0) {
+    if (!IsValidPtr(seg) || pid < 0) {
         typedef void* (*func_get_Instance_t)(void*);
         func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + g_off.func_get_Instance);
         if (get_Instance && IsValidExecutableAddr((void*)get_Instance)) {
@@ -2057,7 +2057,10 @@ void DrawHexKeypadModal() {
 
 void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_addr = 0, bool show_resolved = false) {
     bool is_valid = false;
-    if (show_resolved) {
+    std::string s(label);
+    if (s.find("segment_my_player_id") != std::string::npos) {
+        is_valid = IsValidPtr(g_dbg_segmentcsogame) && (g_my_player_id >= 0 && g_my_player_id < 16);
+    } else if (show_resolved) {
         is_valid = IsValidPtr(resolved_addr) || (resolved_addr > 0 && resolved_addr < 0xFFFFFFFF);
     } else {
         std::string s(label);
@@ -2091,7 +2094,7 @@ void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_a
         else if (s.find("board_hero_id") != std::string::npos) is_valid = g_dbg_board_ok;
         else if (s.find("board_x") != std::string::npos || s.find("board_y") != std::string::npos) is_valid = g_dbg_board_pos_ok;
 
-        else if (s.find("my_player_id") != std::string::npos) is_valid = g_my_player_id > 0;
+        else if (s.find("my_player_id") != std::string::npos) is_valid = g_my_player_id >= 0;
         else if (s.find("next_opponents_list") != std::string::npos) is_valid = !g_next_opponents.empty();
         else if (s.find("hexctrl") != std::string::npos) is_valid = IsValidPtr(g_dbg_hexctrl);
         else is_valid = true;
@@ -2099,11 +2102,17 @@ void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_a
     ImVec4 label_col = is_valid ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
     
     ImGui::PushID(label);
-    ImGui::TextColored(label_col, "%-24s", label); 
+    std::string disp_label = label; size_t hash_pos = disp_label.find("##"); if (hash_pos != std::string::npos) disp_label = disp_label.substr(0, hash_pos); ImGui::TextColored(label_col, "%s", disp_label.c_str()); 
     
     if (show_resolved) {
         ImGui::SameLine();
-        if (IsValidPtr(resolved_addr)) {
+        if (s.find("segment_my_player_id") != std::string::npos) {
+            if (is_valid) {
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "-> ID: %d [OK]", g_my_player_id);
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "-> %d [x]", g_my_player_id);
+            }
+        } else if (IsValidPtr(resolved_addr)) {
             ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "-> 0x%lx [OK]", (unsigned long)resolved_addr);
         } else if (resolved_addr != 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "-> %lu [OK]", (unsigned long)resolved_addr);
@@ -3060,7 +3069,7 @@ void DrawMainMenu() {
                     PrintCol("addr3: 0x%lx %s", IsValidPtr(g_dbg_addr3), g_dbg_addr3, IsValidPtr(g_dbg_addr3) ? "[OK]" : "[x]");
                     PrintCol("addra: 0x%lx %s", IsValidPtr(g_dbg_addra), g_dbg_addra, IsValidPtr(g_dbg_addra) ? "[OK]" : "[x]");
                     PrintCol("segmentCSOGame: 0x%lx %s", IsValidPtr(g_dbg_segmentcsogame), g_dbg_segmentcsogame, IsValidPtr(g_dbg_segmentcsogame) ? "[OK]" : "[x]");
-                    PrintCol("真实ID: %d | 对局状态: %s", g_is_in_match.load() || g_my_player_id > 0, g_my_player_id, g_is_in_match.load() ? "对局中" : "未在对局");
+                    PrintCol("真实ID: %d | 对局状态: %s", g_is_in_match.load() || g_my_player_id >= 0, g_my_player_id, g_is_in_match.load() ? "对局中" : "未在对局");
                     
                     DrawGlassSeparator();
                     ImGui::TextColored(UITheme().primary, (const char*)u8"【核心Hook点状态】");
