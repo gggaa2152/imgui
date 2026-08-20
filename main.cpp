@@ -2641,6 +2641,63 @@ extern func_set_IsGameEnd_t orig_set_IsGameEnd;
 typedef void* (*func_SendWillRenderCanvases_t)();
 extern func_SendWillRenderCanvases_t orig_SendWillRenderCanvases;
 
+// ===== 悬浮调用链与参数日志 =====
+struct ActionLog {
+    std::string message;
+    std::chrono::time_point<std::chrono::steady_clock> spawn_time;
+};
+std::deque<ActionLog> g_action_logs;
+std::mutex g_log_mutex;
+
+void AddActionLog(const char* format, ...) {
+    char buf[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buf, sizeof(buf), format, args);
+    va_end(args);
+    
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    g_action_logs.push_back({std::string(buf), std::chrono::steady_clock::now()});
+    if (g_action_logs.size() > 8) {
+        g_action_logs.pop_front();
+    }
+}
+
+void DrawActionLogOverlay() {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    if (g_action_logs.empty()) return;
+
+    auto now = std::chrono::steady_clock::now();
+    while (!g_action_logs.empty()) {
+        float elapsed = std::chrono::duration<float>(now - g_action_logs.front().spawn_time).count();
+        if (elapsed > 6.0f) g_action_logs.pop_front();
+        else break;
+    }
+    
+    if (g_action_logs.empty()) return;
+
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f, 150.0f * g_autoScale * g_scale), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f * g_autoScale * g_scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 12.0f) * g_autoScale * g_scale);
+    
+    if (ImGui::Begin("ActionLogOverlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"⚡ 核心函数调用链与参数监视");
+        DrawGlassSeparator();
+        for (const auto& log : g_action_logs) {
+            float elapsed = std::chrono::duration<float>(now - log.spawn_time).count();
+            float fade = 1.0f;
+            if (elapsed > 4.5f) fade = 1.0f - ((elapsed - 4.5f) / 1.5f);
+            if (fade < 0.0f) fade = 0.0f;
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.8f, fade));
+            ImGui::TextUnformatted(log.message.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+}
+
 void DrawMainMenu() {
     ApplyFrostedTheme();
     if (g_menu_orb) {
