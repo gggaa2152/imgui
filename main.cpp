@@ -811,21 +811,29 @@ void ClearGameState() {
 }
 
 bool TryResolveSegmentCSOGame(uintptr_t* out_segment = nullptr) {
-    if (g_il2cppTrueBase == 0) return false;
+    if (g_il2cppTrueBase == 0 || g_off.func_get_Instance == 0) return false;
     typedef void* (*func_get_Instance_t)(void* method_info);
     func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
-    if (!get_Instance || !IsValidExecutableAddr((void*)get_Instance)) return false;
+    if (!get_Instance) return false;
 
     uintptr_t addr1 = SAFE_CALL((uintptr_t)get_Instance(nullptr), (uintptr_t)0);
+    g_dbg_addr1 = addr1;
     if (!IsValidPtr(addr1)) return false;
 
     uintptr_t addr2 = SAFE_READ_PTR(addr1, g_off.addr2);
+    g_dbg_addr2 = addr2;
     if (!IsValidPtr(addr2)) return false;
+
     uintptr_t addr3 = SAFE_READ_PTR(addr2, g_off.addr3);
+    g_dbg_addr3 = addr3;
     if (!IsValidPtr(addr3)) return false;
+
     uintptr_t addra = SAFE_READ_PTR(addr3, g_off.addra);
+    g_dbg_addra = addra;
     if (!IsValidPtr(addra)) return false;
+
     uintptr_t segment = SAFE_READ_PTR(addra, g_off.segmentcsogame);
+    g_dbg_segmentcsogame = segment;
     if (!IsValidPtr(segment)) return false;
 
     if (out_segment) *out_segment = segment;
@@ -926,12 +934,12 @@ static void ApplyAvatarRanksFromList23() {
 }
 
 void ParseGameMemory() {
-    if (g_il2cppTrueBase == 0) return;
+    if (g_il2cppTrueBase == 0 || g_off.func_get_Instance == 0) return;
     if (!g_is_in_match.load(std::memory_order_acquire)) return;
 
     typedef void* (*func_get_Instance_t)(void* method_info);
     func_get_Instance_t get_Instance = (func_get_Instance_t)(g_il2cppTrueBase + (uintptr_t)g_off.func_get_Instance);
-    if (!get_Instance || !IsValidExecutableAddr((void*)get_Instance)) return;
+    if (!get_Instance) return;
     
     // [主线基础寻址]
     g_dbg_addr1 = SAFE_CALL((uintptr_t)get_Instance(nullptr), (uintptr_t)0);
