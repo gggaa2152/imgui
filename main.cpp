@@ -409,6 +409,23 @@ inline bool IsValidExecutableAddr(void* addr) {
     }
     return false;
 }
+inline void EnsureIl2CppThreadAttached() {
+    typedef void* (*il2cpp_domain_get_t)();
+    typedef void* (*il2cpp_thread_attach_t)(void*);
+    static auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
+    static auto thread_attach = (il2cpp_thread_attach_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_thread_attach");
+    if (!domain_get) {
+        void* h = dlopen("libil2cpp.so", RTLD_LAZY);
+        if (h) {
+            domain_get = (il2cpp_domain_get_t)dlsym(h, "il2cpp_domain_get");
+            thread_attach = (il2cpp_thread_attach_t)dlsym(h, "il2cpp_thread_attach");
+        }
+    }
+    if (domain_get && thread_attach) {
+        void* domain = domain_get();
+        if (domain) thread_attach(domain);
+    }
+}
 
 inline int SafeDobbyHook(void* target, void* replace, void** origin) {
     if (!target || !replace) return -1;
