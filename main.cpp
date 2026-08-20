@@ -57,7 +57,7 @@ struct Offsets {
     uint32_t next_opponents_list = 0x248;
     uint32_t func_shop_listen = 0xA63FC44;
     uint32_t func_buy_hero_new = 0xA644B48;
-    uint32_t func_set_IsGameEnd = 0x8EE7570;
+    uint32_t func_set_IsGameEnd = 0x8EE7564;
     uint32_t func_SendWillRenderCanvases = 0x79BAD18;
     
     // 牌库字典链 (addr4~9)
@@ -434,25 +434,6 @@ inline int SafeDobbyHook(void* target, void* replace, void** origin) {
         LOGI("[!] SafeDobbyHook rejected invalid target address: %p", target);
         return -1;
     }
-    // ARM64 function prologue validation
-    uint32_t first_insn = 0;
-    if (!SafeReadMemory((uintptr_t)target, &first_insn, sizeof(first_insn))) {
-        LOGI("[!] SafeDobbyHook: unable to read target instruction at %p", target);
-        return -1;
-    }
-    bool looks_like_func_entry = false;
-    if ((first_insn & 0xFFE00000) == 0xA9800000) looks_like_func_entry = true; // STP pre-index
-    if ((first_insn & 0xFF0003FF) == 0xD10003FF) looks_like_func_entry = true; // SUB SP
-    if (first_insn == 0xD503233F || first_insn == 0xD503237F) looks_like_func_entry = true; // PACIASP/PACIBSP
-    if ((first_insn & 0xFFE0FFE0) == 0xAA0003E0) looks_like_func_entry = true; // MOV reg
-    if ((first_insn & 0xFC000000) == 0x14000000 || (first_insn & 0xFC000000) == 0x94000000) looks_like_func_entry = true; // B/BL
-    if (first_insn == 0xD503201F) looks_like_func_entry = true; // NOP
-    if ((first_insn & 0xFFC003E0) == 0xF90003E0) looks_like_func_entry = true; // STR [SP]
-    
-    if (!looks_like_func_entry) {
-        LOGI("[!] SafeDobbyHook rejected: address %p doesn't look like function entry (insn=0x%08X)", target, first_insn);
-        return -1;
-    }
     int ret = DobbyHook(target, replace, origin);
     if (ret == 0) {
         LOGI("[+] SafeDobbyHook successfully hooked target: %p", target);
@@ -461,6 +442,16 @@ inline int SafeDobbyHook(void* target, void* replace, void** origin) {
     }
     return ret;
 }
+
+
+
+
+
+
+
+
+
+
 
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
     if (addr < 0x10000000 || addr > 0x00007FFFFFFFFFFF) return false;
