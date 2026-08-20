@@ -130,6 +130,13 @@ uintptr_t g_dbg_addr1 = 0, g_dbg_addr2 = 0, g_dbg_addr3 = 0, g_dbg_addra = 0, g_
 uintptr_t g_dbg_addr4 = 0, g_dbg_addr5 = 0, g_dbg_addr6 = 0, g_dbg_addr7 = 0, g_dbg_addr9 = 0;
 uintptr_t g_dbg_addr11 = 0, g_dbg_addr12 = 0, g_dbg_addr13 = 0;
 uintptr_t g_dbg_addr21 = 0, g_dbg_addr22 = 0, g_dbg_addr23 = 0;
+uintptr_t g_dbg_addr14 = 0, g_dbg_addr15 = 0, g_dbg_addr16 = 0;
+uintptr_t g_dbg_addr17 = 0, g_dbg_addr18 = 0;
+uintptr_t g_dbg_addr19 = 0, g_dbg_addr20 = 0;
+bool g_dbg_shop_ok = false;
+bool g_dbg_bench_ok = false;
+bool g_dbg_board_ok = false;
+bool g_dbg_board_pos_ok = false;
 std::vector<uintptr_t> g_dbg_list23_addrs;
 struct AvatarRankProbe { uintptr_t entry = 0, addr26 = 0; int raw_rank = 0, rank = 0, pid = 0, matched_id = -1; };
 std::vector<AvatarRankProbe> g_dbg_avatar_ranks;
@@ -993,6 +1000,7 @@ void ParseGameMemory() {
     for (auto addr8 : list7) {
         if (++total_hero_reads > 80) break; // 熔断保护：防止野指针下无限读取卡死
         uintptr_t addr9 = SAFE_READ_PTR(addr8, g_off.addr9);
+        if (g_dbg_addr9 == 0 && IsValidPtr(addr9)) g_dbg_addr9 = addr9;
         auto list9 = GetStructArrayPointers(addr9, 60, g_off.addr9_struct_size, g_off.addr9_ptr_offset);
         g_dbg_list9_map[addr8] = list9;
 
@@ -1036,6 +1044,14 @@ void ParseGameMemory() {
         }
     }
 
+    g_dbg_addr14 = 0; g_dbg_addr15 = 0; g_dbg_addr16 = 0;
+    g_dbg_addr17 = 0; g_dbg_addr18 = 0;
+    g_dbg_addr19 = 0; g_dbg_addr20 = 0;
+    g_dbg_shop_ok = false;
+    g_dbg_bench_ok = false;
+    g_dbg_board_ok = false;
+    g_dbg_board_pos_ok = false;
+
     for (auto val : g_dbg_player_addrs) {
         PlayerInfo pi;
         pi.val_ptr = val;
@@ -1051,22 +1067,26 @@ void ParseGameMemory() {
         pi.lose_streak = SAFE_READ_INT(val, g_off.pi_lose_streak);
         pi.level = SAFE_READ_INT(val, g_off.pi_level);
         
-        // 商店
+        // 商店链条
         uintptr_t addr14 = SAFE_READ_PTR(val, g_off.addr14);
+        if (IsValidPtr(addr14)) g_dbg_addr14 = addr14;
         uintptr_t addr15 = SAFE_READ_PTR(addr14, g_off.addr15);
+        if (IsValidPtr(addr15)) g_dbg_addr15 = addr15;
         auto shopItems = GetPointersInArray(addr15, 5);
         for (size_t i = 0; i < shopItems.size(); i++) {
             uintptr_t addr16 = SAFE_READ_PTR(shopItems[i], g_off.addr16);
+            if (IsValidPtr(addr16)) g_dbg_addr16 = addr16;
             int shop_hero_id = SAFE_READ_INT(addr16, g_off.shop_hero_id);
+            if (shop_hero_id > 0 && shop_hero_id < 2000) g_dbg_shop_ok = true;
             pi.shop.push_back(shop_hero_id);
             
-            // 自动拿牌
+            // 自动购买
             if (shop_hero_id > 0 && pi.id == g_my_player_id && g_heroAutoBuyChecked[shop_hero_id]) {
                 uintptr_t slot_addr = 0;
                 if (g_shop_listen_done.load() && i < g_shop_slots.size())
                     slot_addr = g_shop_slots[i];
                 else if (IsValidPtr(shopItems[i]))
-                    slot_addr = shopItems[i]; // 中途注入：从内存链读取商店格子地址
+                    slot_addr = shopItems[i];
                 if (IsValidPtr(slot_addr)) {
                     extern int g_current_frame;
                     static std::map<uintptr_t, int> last_buy_frame;
@@ -1079,27 +1099,35 @@ void ParseGameMemory() {
             }
         }
         
-        // 备战区
+        // 备战席链条
         uintptr_t addr17 = SAFE_READ_PTR(val, g_off.addr17);
+        if (IsValidPtr(addr17)) g_dbg_addr17 = addr17;
         uintptr_t addr18 = SAFE_READ_PTR(addr17, g_off.addr18);
+        if (IsValidPtr(addr18)) g_dbg_addr18 = addr18;
         auto benchItems = GetPointersInArray(addr18, 10);
-        for (auto b_item : benchItems) pi.bench.push_back(SAFE_READ_INT(b_item, g_off.bench_hero_id));
+        for (auto b_item : benchItems) {
+            int b_hid = SAFE_READ_INT(b_item, g_off.bench_hero_id);
+            if (b_hid > 0 && b_hid < 2000) g_dbg_bench_ok = true;
+            pi.bench.push_back(b_hid);
+        }
         
-        // 场上
+        // 场上棋盘链条
         uintptr_t addr19 = SAFE_READ_PTR(val, g_off.addr19);
+        if (IsValidPtr(addr19)) g_dbg_addr19 = addr19;
         uintptr_t addr20 = SAFE_READ_PTR(addr19, g_off.addr20);
+        if (IsValidPtr(addr20)) g_dbg_addr20 = addr20;
         auto boardItems = GetPointersInArray(addr20, 30);
         for (auto bd_item : boardItems) {
             BoardHero bh;
             bh.heroId = SAFE_READ_INT(bd_item, g_off.board_hero_id);
             bh.x = SAFE_READ_INT(bd_item, g_off.board_x);
             bh.y = SAFE_READ_INT(bd_item, g_off.board_y);
+            if (bh.heroId > 0 && bh.heroId < 2000) g_dbg_board_ok = true;
+            if (bh.x >= 0 && bh.x < 8 && bh.y >= 0 && bh.y < 8) g_dbg_board_pos_ok = true;
             pi.board.push_back(bh);
         }
         g_players.push_back(pi);
     }
-
-    // [海克斯预测]
     g_dbg_addr21 = SAFE_READ_PTR(g_dbg_segmentcsogame, g_off.addr21);
     g_dbg_addr22 = SAFE_READ_PTR(g_dbg_addr21, g_off.addr22);
     g_dbg_addr23 = SAFE_READ_PTR(g_dbg_addr22, g_off.addr23);
@@ -1426,7 +1454,7 @@ static void RaiseCapsuleWindow(const char* name) {
 void DrawQuitCapsule() {
     ImGuiIO& io = ImGui::GetIO();
     float sc = g_autoScale;
-    const char* label = (g_quit_confirm == 0) ? (const char*)u8"退出本局" : (const char*)u8"再次点击确认";
+    const char* label = (g_quit_confirm == 0) ? (const char*)u8"极速退游" : (const char*)u8"再次点击确认";
     ImVec2 txtSz = ImGui::CalcTextSize(label);
     float padX = 22.0f * sc, padY = 12.0f * sc;
     float capW = txtSz.x + padX * 2.0f;
@@ -1451,9 +1479,21 @@ void DrawQuitCapsule() {
         if (g_quit_confirm == 0) {
             g_quit_confirm = 1;
             g_quit_timer = 3.0f;
+            AddActionLog((const char*)u8"-> [极速退游] 请在3秒内再次点击以确认退游...");
         } else {
-            g_Tasks.trigger_quit.store(true);
             g_quit_confirm = 0;
+            g_Tasks.trigger_quit.store(true);
+            typedef void (*func_quit_t)(uintptr_t, int, int);
+            func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
+            if (quit_func && IsValidExecutableAddr((void*)quit_func) && IsValidPtr(g_dbg_segmentcsogame)) {
+                AddActionLog((const char*)u8"-> [极速退游] call func_quit(segment=0x%lx, player_id=%d, mode=1)", g_dbg_segmentcsogame, g_my_player_id);
+                SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 1));
+            } else {
+                AddActionLog((const char*)u8"-> [退游失败] func_quit(0x%lx)或segment(0x%lx)无效!", (uintptr_t)quit_func, g_dbg_segmentcsogame);
+            }
+            g_is_in_match.store(false, std::memory_order_release);
+            g_need_segment_gap_before_enter = true;
+            g_Tasks.trigger_game_end.store(true, std::memory_order_release);
         }
     }
     if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0) && !g_floats_locked) {
@@ -1972,29 +2012,44 @@ void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_a
     } else {
         std::string s(label);
         if (s.find("func_") == 0) is_valid = IsValidExecutableAddr((void*)(g_il2cppTrueBase + *value));
-        else if (s.find("pi_") == 0) is_valid = IsValidPtr(g_dbg_addr13);
-        else if (s.find("ph_") == 0) is_valid = IsValidPtr(g_dbg_addr7);
-        else if (s.find("dict struct_size") != std::string::npos || s.find("dict ptr_offset") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr12) || IsValidPtr(g_dbg_addr7);
-        else if (s.find("addr7 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr7);
+        else if (s.find("pi_name") != std::string::npos) is_valid = !g_players.empty() && !g_players[0].name.empty();
+        else if (s.find("pi_id") != std::string::npos) is_valid = !g_players.empty() && g_players[0].id > 0;
+        else if (s.find("pi_level") != std::string::npos) is_valid = !g_players.empty() && g_players[0].level >= 1 && g_players[0].level <= 11;
+        else if (s.find("pi_money") != std::string::npos) is_valid = !g_players.empty() && g_players[0].money >= 0 && g_players[0].money < 500;
+        else if (s.find("pi_win_streak") != std::string::npos || s.find("pi_lose_streak") != std::string::npos || s.find("pi_is_bot") != std::string::npos) is_valid = !g_players.empty();
+        else if (s.find("pi_avatar_rank") != std::string::npos || s.find("pi_avatar_player_id") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr26);
+        else if (s.find("ph_") == 0) is_valid = !g_hero_pool.empty() || IsValidPtr(g_dbg_addr7);
+        else if (s.find("dict struct_size") != std::string::npos || s.find("dict ptr_offset") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr12) && !g_players.empty();
+        else if (s.find("addr7 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr7) && !g_dbg_list7_addrs.empty();
         else if (s.find("addr9 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr9);
-        else if (s.find("addr23 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr23);
-        else if (s.find("shop_hero_id") != std::string::npos) is_valid = g_shop_slots.size() > 0;
-        else if (s.find("bench_hero_id") != std::string::npos) is_valid = g_is_in_match.load();
-        else if (s.find("board_") != std::string::npos) is_valid = g_is_in_match.load();
-        else if (s.find("addr15") != std::string::npos || s.find("addr16") != std::string::npos) is_valid = g_shop_slots.size() > 0;
-        else if (s.find("addr17") != std::string::npos || s.find("addr18") != std::string::npos) is_valid = g_is_in_match.load();
-        else if (s.find("addr19") != std::string::npos || s.find("addr20") != std::string::npos) is_valid = g_is_in_match.load();
+        else if (s.find("addr23 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr23) && !g_dbg_list23_addrs.empty();
+        
+        // 商店链条判定
+        else if (s.find("addr14") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr14);
+        else if (s.find("addr15") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr15);
+        else if (s.find("addr16") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr16);
+        else if (s.find("shop_hero_id") != std::string::npos) is_valid = g_dbg_shop_ok;
+
+        // 备战席链条判定
+        else if (s.find("addr17") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr17);
+        else if (s.find("addr18") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr18);
+        else if (s.find("bench_hero_id") != std::string::npos) is_valid = g_dbg_bench_ok;
+
+        // 场上棋盘链条判定
+        else if (s.find("addr19") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr19);
+        else if (s.find("addr20") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr20);
+        else if (s.find("board_hero_id") != std::string::npos) is_valid = g_dbg_board_ok;
+        else if (s.find("board_x") != std::string::npos || s.find("board_y") != std::string::npos) is_valid = g_dbg_board_pos_ok;
+
         else if (s.find("my_player_id") != std::string::npos) is_valid = g_my_player_id > 0;
         else if (s.find("next_opponents_list") != std::string::npos) is_valid = !g_next_opponents.empty();
         else if (s.find("hexctrl") != std::string::npos) is_valid = IsValidPtr(g_dbg_hexctrl);
-        else if (s.find("addr14") != std::string::npos) is_valid = g_shop_slots.size() > 0;
         else is_valid = true;
     }
     ImVec4 label_col = is_valid ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
     
     ImGui::PushID(label);
-    ImGui::TextColored(label_col, "%-24s", label);
-
+    ImGui::TextColored(label_col, "%-24s", label); 
     
     if (show_resolved) {
         ImGui::SameLine();
@@ -2003,10 +2058,9 @@ void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_a
         } else if (resolved_addr != 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "-> %lu [OK]", (unsigned long)resolved_addr);
         } else {
-            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 0.8f), "-> 0x0 [x]");
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "-> 0x0 [x]");
         }
     }
-
     char hex_str[32];
     snprintf(hex_str, sizeof(hex_str), "0x%X", *value);
 
@@ -2703,25 +2757,33 @@ void DrawActionLogOverlay() {
     
     if (g_action_logs.empty()) return;
 
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f, 150.0f * g_autoScale * g_scale), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
-    ImGui::SetNextWindowBgAlpha(0.85f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f * g_autoScale * g_scale);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 12.0f) * g_autoScale * g_scale);
+    ImGuiIO& io = ImGui::GetIO();
+    float dispW = io.DisplaySize.x > 0 ? io.DisplaySize.x : (float)g_gl_width;
+    float posX = dispW * 0.5f;
+    float posY = 75.0f * g_autoScale;
+
+    ImGui::SetNextWindowPos(ImVec2(posX, posY), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.92f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f * g_autoScale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 10.0f) * g_autoScale);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.10f, 0.16f, 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.7f, 1.0f, 0.6f));
     
-    if (ImGui::Begin("ActionLogOverlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs)) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"⚡ 核心函数调用链与参数监视");
+    if (ImGui::Begin("##ActionLogToastOverlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "%s", (const char*)u8"⚡ 调用链与参数实时监视");
         DrawGlassSeparator();
         for (const auto& log : g_action_logs) {
             float elapsed = std::chrono::duration<float>(now - log.spawn_time).count();
             float fade = 1.0f;
             if (elapsed > 4.5f) fade = 1.0f - ((elapsed - 4.5f) / 1.5f);
-            if (fade < 0.0f) fade = 0.0f;
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.8f, fade));
+            if (fade < 0.1f) fade = 0.1f;
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 1.0f, 0.65f, fade));
             ImGui::TextUnformatted(log.message.c_str());
             ImGui::PopStyleColor();
         }
     }
     ImGui::End();
+    ImGui::PopStyleColor(2);
     ImGui::PopStyleVar(2);
 }
 
@@ -2938,6 +3000,9 @@ void DrawMainMenu() {
                     };
 
                     DrawSectionTitle((const char*)u8"链路诊断与状态监视");
+                    if (ImGui::Button((const char*)u8"⚡ 点击测试悬浮调用日志", ImVec2(-1, 32 * g_autoScale))) { 
+                        AddActionLog((const char*)u8"-> [测试] 悬浮调用链与参数监视正常工作!"); 
+                    }
                     ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址链路】");
                     PrintCol("il2cppTrueBase: 0x%lx", g_il2cppTrueBase > 0, g_il2cppTrueBase);
                     PrintCol("addr1 (Instance): 0x%lx %s", IsValidPtr(g_dbg_addr1), g_dbg_addr1, IsValidPtr(g_dbg_addr1) ? "[OK]" : "[x]");
@@ -3015,8 +3080,8 @@ void DrawMainMenu() {
                 DrawOffsetAdjuster("addra", &g_off.addra, g_dbg_addra, true);
                 DrawOffsetAdjuster("segmentcsogame", &g_off.segmentcsogame, g_dbg_segmentcsogame, true);
                 DrawOffsetAdjuster("segment_my_player_id", &g_off.segment_my_player_id, (uintptr_t)g_my_player_id, true);
-                DrawOffsetAdjuster("func_quit", &g_off.func_quit);
-                DrawOffsetAdjuster("func_set_IsGameEnd", &g_off.func_set_IsGameEnd);
+                DrawOffsetAdjuster("func_quit", &g_off.func_quit, (uintptr_t)(g_il2cppTrueBase + g_off.func_quit), true);
+                DrawOffsetAdjuster("func_set_IsGameEnd", &g_off.func_set_IsGameEnd, (uintptr_t)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), true);
                 DrawOffsetAdjuster("my_player_id (addr2)", &g_off.my_player_id);
                 DrawOffsetAdjuster("next_opponents_list", &g_off.next_opponents_list);
                 DrawGlassSeparator();
@@ -3043,7 +3108,7 @@ void DrawMainMenu() {
                 DrawOffsetAdjuster("addr7 (dict 数组)", &g_off.addr7, g_dbg_addr7, true);
                 DrawOffsetAdjuster(" -> addr7 struct_size", &g_off.addr7_struct_size);
                 DrawOffsetAdjuster(" -> addr7 ptr_offset", &g_off.addr7_ptr_offset);
-                DrawOffsetAdjuster("addr9 (dict 内部)", &g_off.addr9);
+                DrawOffsetAdjuster("addr9 (dict 内部)", &g_off.addr9, g_dbg_addr9, true);
                 DrawOffsetAdjuster(" -> addr9 struct_size", &g_off.addr9_struct_size);
                 DrawOffsetAdjuster(" -> addr9 ptr_offset", &g_off.addr9_ptr_offset);
                 DrawOffsetAdjuster("ph_heroId", &g_off.ph_heroId);
@@ -3060,25 +3125,25 @@ void DrawMainMenu() {
                 DrawOffsetAdjuster("pi_avatar_rank", &g_off.pi_avatar_rank);
                 DrawOffsetAdjuster("pi_avatar_player_id", &g_off.pi_avatar_player_id);
                 DrawOffsetAdjuster("hexctrl", &g_off.hexctrl, g_dbg_hexctrl, true);
-                DrawOffsetAdjuster("func_get_hex", &g_off.func_get_hex);
+                DrawOffsetAdjuster("func_get_hex", &g_off.func_get_hex, (uintptr_t)(g_il2cppTrueBase + g_off.func_get_hex), true);
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【商店、备战区与场上】");
-                DrawOffsetAdjuster("addr14 (商店)", &g_off.addr14);
-                DrawOffsetAdjuster("addr15", &g_off.addr15);
-                DrawOffsetAdjuster("addr16", &g_off.addr16);
+                DrawOffsetAdjuster("addr14 (商店)", &g_off.addr14, g_dbg_addr14, true);
+                DrawOffsetAdjuster("addr15", &g_off.addr15, g_dbg_addr15, true);
+                DrawOffsetAdjuster("addr16", &g_off.addr16, g_dbg_addr16, true);
                 DrawOffsetAdjuster("shop_hero_id", &g_off.shop_hero_id);
-                DrawOffsetAdjuster("addr17 (备战)", &g_off.addr17);
-                DrawOffsetAdjuster("addr18", &g_off.addr18);
+                DrawOffsetAdjuster("addr17 (备战)", &g_off.addr17, g_dbg_addr17, true);
+                DrawOffsetAdjuster("addr18", &g_off.addr18, g_dbg_addr18, true);
                 DrawOffsetAdjuster("bench_hero_id", &g_off.bench_hero_id);
-                DrawOffsetAdjuster("addr19 (场上)", &g_off.addr19);
-                DrawOffsetAdjuster("addr20", &g_off.addr20);
+                DrawOffsetAdjuster("addr19 (场上)", &g_off.addr19, g_dbg_addr19, true);
+                DrawOffsetAdjuster("addr20", &g_off.addr20, g_dbg_addr20, true);
                 DrawOffsetAdjuster("board_hero_id", &g_off.board_hero_id);
                 DrawOffsetAdjuster("board_x", &g_off.board_x);
                 DrawOffsetAdjuster("board_y", &g_off.board_y);
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【全局Hook】");
-                DrawOffsetAdjuster("func_shop_listen", &g_off.func_shop_listen);
-                DrawOffsetAdjuster("func_buy_hero_new", &g_off.func_buy_hero_new);
+                DrawOffsetAdjuster("func_shop_listen", &g_off.func_shop_listen, (uintptr_t)(g_il2cppTrueBase + g_off.func_shop_listen), true);
+                DrawOffsetAdjuster("func_buy_hero_new", &g_off.func_buy_hero_new, (uintptr_t)(g_il2cppTrueBase + g_off.func_buy_hero_new), true);
                 break;
             }
 
@@ -3383,6 +3448,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     DrawQuitCapsule();
     DrawLockCapsule();
     DrawCardPoolCapsule();
+    DrawActionLogOverlay();
     if (g_apply_saved_float_pos) g_apply_saved_float_pos = false;
 
     ImGui::Render();
@@ -3485,6 +3551,24 @@ void* Il2CppInitThread(void*) {
     UpdateIl2CppExecRegions();
 
     LoadConfig();
+    // 自动挂载核心 Hook
+    if (g_off.func_shop_listen != 0 && old_shop_listen == nullptr) {
+        void* target = (void*)(g_il2cppTrueBase + g_off.func_shop_listen);
+        SafeDobbyHook(target, (void*)hook_shop_listen, (void**)&old_shop_listen);
+    }
+    if (g_off.func_set_IsGameEnd != 0 && orig_set_IsGameEnd == nullptr) {
+        void* target = (void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd);
+        SafeDobbyHook(target, (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
+    }
+    void* unity_handle = dlopen("libunity.so", RTLD_LAZY);
+    void* canvas_render_ptr = DobbySymbolResolver("libunity.so", "_ZN6Canvas22SendWillRenderCanvasesEv");
+    if (!canvas_render_ptr && unity_handle) {
+        canvas_render_ptr = dlsym(unity_handle, "_ZN6Canvas22SendWillRenderCanvasesEv");
+    }
+    if (canvas_render_ptr && orig_SendWillRenderCanvases == nullptr) {
+        SafeDobbyHook(canvas_render_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
+    }
+    AddActionLog((const char*)u8"-> [系统] 助手核心与调用监视系统已就绪");
     EnsureTextureWorkerStarted();
     return nullptr;
 }
