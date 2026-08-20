@@ -330,6 +330,9 @@ uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x
     return 0;
 }
 
+// Forward declaration for SafeReadMemory (used by SafeDobbyHook below)
+bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size);
+
 // -------------------- Anti-Crash Signal Guard & Safe Execution --------------------
 static thread_local sigjmp_buf g_segv_jmp_buf;
 static thread_local bool g_segv_guard_active = false;
@@ -1148,7 +1151,7 @@ void ParseGameMemory() {
                                 g_hex_qualities[0] = q0;
                                 g_hex_qualities[1] = q1;
                                 g_hex_qualities[2] = q2;
-                            } catch (...) {}
+
                         }
                     }).detach();
                 }
