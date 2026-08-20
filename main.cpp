@@ -190,6 +190,7 @@ struct PlayerInfo {
     std::vector<BoardHero> board;
 };
 std::vector<PlayerInfo> g_players;
+void AddActionLog(const char* format, ...);
 
 std::atomic<bool> g_is_in_match{false};
 std::atomic<bool> g_match_enter_pending{false};
@@ -2018,7 +2019,7 @@ void DrawOffsetAdjuster(const char* label, uint32_t* value, uintptr_t resolved_a
         else if (s.find("pi_money") != std::string::npos) is_valid = !g_players.empty() && g_players[0].money >= 0 && g_players[0].money < 500;
         else if (s.find("pi_win_streak") != std::string::npos || s.find("pi_lose_streak") != std::string::npos || s.find("pi_is_bot") != std::string::npos) is_valid = !g_players.empty();
         else if (s.find("pi_avatar_rank") != std::string::npos || s.find("pi_avatar_player_id") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr26);
-        else if (s.find("ph_") == 0) is_valid = !g_hero_pool.empty() || IsValidPtr(g_dbg_addr7);
+        else if (s.find("ph_") == 0) is_valid = !g_poolHeroes.empty() || IsValidPtr(g_dbg_addr7);
         else if (s.find("dict struct_size") != std::string::npos || s.find("dict ptr_offset") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr12) && !g_players.empty();
         else if (s.find("addr7 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr7) && !g_dbg_list7_addrs.empty();
         else if (s.find("addr9 ") != std::string::npos) is_valid = IsValidPtr(g_dbg_addr9);
