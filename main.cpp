@@ -298,7 +298,8 @@ struct MainThreadTasks {
     std::atomic<bool> trigger_quit{false};
     std::atomic<bool> trigger_game_end{false};
     std::mutex buy_mutex;
-    std::vector<uintptr_t> buy_slots;
+    struct BuySlotTask { uintptr_t slot_addr; int hero_id; };
+    std::vector<BuySlotTask> buy_slots;
 } g_Tasks;
 
 std::vector<uintptr_t> g_shop_slots;
@@ -1103,7 +1104,7 @@ void ParseGameMemory() {
                     if (g_current_frame - last_buy_frame[slot_addr] > 10) { 
                         last_buy_frame[slot_addr] = g_current_frame;
                         std::lock_guard<std::mutex> lock(g_Tasks.buy_mutex);
-                        g_Tasks.buy_slots.push_back(slot_addr);
+                        g_Tasks.buy_slots.push_back({ slot_addr, shop_hero_id });
                     }
                 }
             }
@@ -3380,14 +3381,14 @@ void* hook_SendWillRenderCanvases() {
             typedef void (*func_buy_new_t)(void*);
             func_buy_new_t buy_hero = (func_buy_new_t)(g_il2cppTrueBase + g_off.func_buy_hero_new);
             if (buy_hero && IsValidExecutableAddr((void*)buy_hero)) {
-                for (uintptr_t slot_addr : g_Tasks.buy_slots) {
-                    if (IsValidPtr(slot_addr)) { 
-                        uintptr_t a16 = SAFE_READ_PTR(slot_addr, g_off.addr16);
-                        int hero_id = IsValidPtr(a16) ? SAFE_READ_INT(a16, g_off.shop_hero_id) : SAFE_READ_INT(slot_addr, g_off.shop_hero_id);
-                        AddActionLog((const char*)u8"-> [自动购买] call buy_hero_new(slot_addr=0x%lx) | hero_id=%d", slot_addr, hero_id);
-                        SAFE_CALL_VOID(buy_hero((void*)slot_addr)); 
+                for (const auto& item : g_Tasks.buy_slots) {
+                    if (IsValidPtr(item.slot_addr)) {
+
+
+                        AddActionLog((const char*)u8"-> [自动购买] call buy_hero_new(slot_addr=0x%lx) | hero_id=%d", item.slot_addr, item.hero_id);
+                        SAFE_CALL_VOID(buy_hero((void*)item.slot_addr));
                     } else {
-                        AddActionLog((const char*)u8"-> [自动购买失败] slot_addr(0x%lx) 指针无效!", slot_addr);
+                        AddActionLog((const char*)u8"-> [自动购买失败] slot_addr(0x%lx) 指针无效!", item.slot_addr);
                     }
                 }
             } else {
