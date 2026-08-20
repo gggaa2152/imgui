@@ -57,7 +57,8 @@ struct Offsets {
     uint32_t next_opponents_list = 0x248;
     uint32_t func_shop_listen = 0xA63FC44;
     uint32_t func_buy_hero_new = 0xA644B48;
-    uint32_t func_set_IsGameEnd = 0x6F489C8;
+    uint32_t func_set_IsGameEnd = 0x8EE7570;
+    uint32_t func_SendWillRenderCanvases = 0x79BAD18;
     
     // 牌库字典链 (addr4~9)
     uint32_t addr4 = 0x250;
@@ -583,7 +584,7 @@ void SaveConfig() {
         WRITE_OFF_32(func_get_Instance); WRITE_OFF_32(addr2); WRITE_OFF_32(addr3); WRITE_OFF_32(addra); WRITE_OFF_32(segmentcsogame);
         WRITE_OFF_32(func_quit); WRITE_OFF_32(my_player_id); WRITE_OFF_32(segment_my_player_id); WRITE_OFF_32(next_opponents_list);
         WRITE_OFF_32(func_shop_listen); WRITE_OFF_32(func_buy_hero_new);
-        WRITE_OFF_32(func_set_IsGameEnd);
+        WRITE_OFF_32(func_set_IsGameEnd); WRITE_OFF_32(func_SendWillRenderCanvases);
         
         out << "\n[牌库字典链]\n";
         WRITE_OFF_32(addr4); WRITE_OFF_32(addr5); WRITE_OFF_32(addr6); WRITE_OFF_32(addr7);
@@ -688,7 +689,7 @@ void LoadConfig() {
                 #define PARSE_OFF_32(name) if (key == #name) g_off.name = val;
                 
                 PARSE_OFF_32(func_get_Instance) PARSE_OFF_32(addr2) PARSE_OFF_32(addr3) PARSE_OFF_32(addra) PARSE_OFF_32(segmentcsogame)
-                PARSE_OFF_32(func_quit) PARSE_OFF_32(my_player_id) PARSE_OFF_32(segment_my_player_id) PARSE_OFF_32(next_opponents_list) PARSE_OFF_32(func_shop_listen) PARSE_OFF_32(func_buy_hero_new) PARSE_OFF_32(func_set_IsGameEnd)
+                PARSE_OFF_32(func_quit) PARSE_OFF_32(my_player_id) PARSE_OFF_32(segment_my_player_id) PARSE_OFF_32(next_opponents_list) PARSE_OFF_32(func_shop_listen) PARSE_OFF_32(func_buy_hero_new) PARSE_OFF_32(func_set_IsGameEnd) PARSE_OFF_32(func_SendWillRenderCanvases)
                 PARSE_OFF_32(addr4) PARSE_OFF_32(addr5) PARSE_OFF_32(addr6) PARSE_OFF_32(addr7)
                 PARSE_OFF_32(addr7_struct_size) PARSE_OFF_32(addr7_ptr_offset)
                 PARSE_OFF_32(addr9) PARSE_OFF_32(addr9_struct_size) PARSE_OFF_32(addr9_ptr_offset)
@@ -3194,6 +3195,7 @@ void DrawMainMenu() {
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【全局Hook】");
                 DrawOffsetAdjuster("func_shop_listen", &g_off.func_shop_listen, (uintptr_t)(g_il2cppTrueBase + g_off.func_shop_listen), true);
                 DrawOffsetAdjuster("func_buy_hero_new", &g_off.func_buy_hero_new, (uintptr_t)(g_il2cppTrueBase + g_off.func_buy_hero_new), true);
+                DrawOffsetAdjuster("func_SendWillRenderCanvases", &g_off.func_SendWillRenderCanvases, (uintptr_t)(g_il2cppTrueBase + g_off.func_SendWillRenderCanvases), true);
                 break;
             }
 
@@ -3610,14 +3612,19 @@ void* Il2CppInitThread(void*) {
         void* target = (void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd);
         SafeDobbyHook(target, (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
     }
-    void* unity_handle = dlopen("libunity.so", RTLD_LAZY);
-    void* canvas_render_ptr = DobbySymbolResolver("libunity.so", "_ZN6Canvas22SendWillRenderCanvasesEv");
-    if (!canvas_render_ptr && unity_handle) {
-        canvas_render_ptr = dlsym(unity_handle, "_ZN6Canvas22SendWillRenderCanvasesEv");
+    if (g_off.func_SendWillRenderCanvases != 0 && orig_SendWillRenderCanvases == nullptr) {
+        void* target = (void*)(g_il2cppTrueBase + g_off.func_SendWillRenderCanvases);
+        SafeDobbyHook(target, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
     }
-    if (canvas_render_ptr && orig_SendWillRenderCanvases == nullptr) {
-        SafeDobbyHook(canvas_render_ptr, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
-    }
+
+
+
+
+
+
+
+
+
     AddActionLog((const char*)u8"-> [系统] 助手核心与调用监视系统已就绪");
     EnsureTextureWorkerStarted();
     return nullptr;
