@@ -127,7 +127,7 @@ struct Offsets {
 Offsets g_off;
 
 uintptr_t g_dbg_addr1 = 0, g_dbg_addr2 = 0, g_dbg_addr3 = 0, g_dbg_addra = 0, g_dbg_segmentcsogame = 0;
-uintptr_t g_dbg_addr4 = 0, g_dbg_addr5 = 0, g_dbg_addr6 = 0, g_dbg_addr7 = 0;
+uintptr_t g_dbg_addr4 = 0, g_dbg_addr5 = 0, g_dbg_addr6 = 0, g_dbg_addr7 = 0, g_dbg_addr9 = 0;
 uintptr_t g_dbg_addr11 = 0, g_dbg_addr12 = 0, g_dbg_addr13 = 0;
 uintptr_t g_dbg_addr21 = 0, g_dbg_addr22 = 0, g_dbg_addr23 = 0;
 std::vector<uintptr_t> g_dbg_list23_addrs;
@@ -2927,7 +2927,7 @@ void DrawMainMenu() {
                 break;
             case 2:
                 {
-                    auto PrintCol = [](const char* fmt, bool ok, ...) {
+                    auto PrintCol = [](const char* fmt, int ok, ...) {
                         va_list args;
                         va_start(args, ok);
                         ImVec4 col = ok ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
@@ -3086,11 +3086,11 @@ void DrawMainMenu() {
         }
     }
     ImGui::End();
+    DrawActionLogOverlay();
 }
-    } 
-    ImGui::End(); 
-    DrawActionLogOverlay(); 
-}
+
+
+
 int g_current_frame = 0;
 std::atomic<bool> g_engine_rendering{false};
 std::atomic<int> g_active_renderer{0}; // 0=未知, 1=OpenGL ES, 2=Vulkan
