@@ -512,9 +512,11 @@ std::string ReadIl2CppString(uintptr_t strAddr) {
 std::vector<uintptr_t> GetStructArrayPointers(uintptr_t arrayAddr, int maxCount, int structSize, int ptrOffset) {
     std::vector<uintptr_t> res;
     if (!IsValidPtr(arrayAddr)) return res;
+    if (structSize < 4 || structSize > 0x1000) return res;
+    if (ptrOffset < 0 || ptrOffset >= structSize) return res;
     int count = SAFE_READ_INT(arrayAddr, 0x18);
-    if (count <= 0 || count > maxCount * 10) return res;
-    int readLimit = (maxCount <= 0) ? count : std::min(count, maxCount);
+    if (count <= 0 || count > 200) return res;
+    int readLimit = (maxCount <= 0) ? count : std::min(count, std::min(maxCount, 80));
     for (int i = 0; i < readLimit; i++) {
         uintptr_t ptr = SAFE_READ_PTR(arrayAddr, 0x20 + i * structSize + ptrOffset);
         if (IsValidPtr(ptr)) res.push_back(ptr);
@@ -526,8 +528,8 @@ std::vector<uintptr_t> GetPointersInArray(uintptr_t arrayAddr, int maxCount) {
     std::vector<uintptr_t> res;
     if (!IsValidPtr(arrayAddr)) return res;
     int count = SAFE_READ_INT(arrayAddr, 0x18);
-    if (count <= 0 || count > maxCount * 10) return res; 
-    int readLimit = std::min(count, maxCount);
+    if (count <= 0 || count > 200) return res; 
+    int readLimit = std::min(count, std::min(maxCount, 60));
     for (int i = 0; i < readLimit; i++) {
         uintptr_t ptr = SAFE_READ_PTR(arrayAddr, 0x20 + i * 8);
         if (IsValidPtr(ptr)) res.push_back(ptr);
@@ -539,8 +541,8 @@ std::vector<int> GetIntsInArray(uintptr_t arrayAddr, int maxCount) {
     std::vector<int> res;
     if (!IsValidPtr(arrayAddr)) return res;
     int count = SAFE_READ_INT(arrayAddr, 0x18);
-    if (count <= 0 || count > maxCount * 10) return res; 
-    int readLimit = std::min(count, maxCount);
+    if (count <= 0 || count > 200) return res; 
+    int readLimit = std::min(count, std::min(maxCount, 60));
     for (int i = 0; i < readLimit; i++) {
         int val = SAFE_READ_INT(arrayAddr, 0x20 + i * 4); 
         res.push_back(val);
@@ -976,13 +978,15 @@ void ParseGameMemory() {
     g_dbg_addr6 = SAFE_READ_PTR(g_dbg_addr5, g_off.addr6);
     g_dbg_addr7 = SAFE_READ_PTR(g_dbg_addr6, g_off.addr7);
     
-    auto list7 = GetStructArrayPointers(g_dbg_addr7, 2000, g_off.addr7_struct_size, g_off.addr7_ptr_offset);
+    auto list7 = GetStructArrayPointers(g_dbg_addr7, 60, g_off.addr7_struct_size, g_off.addr7_ptr_offset);
     g_dbg_list7_addrs = list7;
     g_dbg_list9_map.clear();
 
+    int total_hero_reads = 0;
     for (auto addr8 : list7) {
+        if (++total_hero_reads > 80) break; // 熔断保护：防止野指针下无限读取卡死
         uintptr_t addr9 = SAFE_READ_PTR(addr8, g_off.addr9);
-        auto list9 = GetStructArrayPointers(addr9, 2000, g_off.addr9_struct_size, g_off.addr9_ptr_offset);
+        auto list9 = GetStructArrayPointers(addr9, 60, g_off.addr9_struct_size, g_off.addr9_ptr_offset);
         g_dbg_list9_map[addr8] = list9;
 
         for (auto addr10 : list9) {
@@ -1004,8 +1008,8 @@ void ParseGameMemory() {
     
     if (IsValidPtr(g_dbg_addr12)) {
         int capacity = SAFE_READ_INT(g_dbg_addr12, 0x18);
-        if (capacity > 0 && capacity < 200) {
-            for (int offset = 0x20; offset < 0x20 + capacity * 0x20; offset += 8) {
+        if (capacity > 0 && capacity <= 32) {
+            for (int offset = 0x20; offset < 0x20 + capacity * 0x20 && offset < 0x20 + 32 * 0x20; offset += 8) {
                 uintptr_t p_val = SAFE_READ_PTR(g_dbg_addr12, offset);
                 if (IsValidPtr(p_val)) {
                     uintptr_t addr13 = SAFE_READ_PTR(p_val, g_off.addr13);
@@ -1878,26 +1882,179 @@ font_done:
     LOGI("[+] Font setup complete. g_mainFont=%p", (void*)g_mainFont);
 }
 
+// --------------------------------------------------------
+// MODULE: Hex Virtual Keypad Popup (十六进制虚拟小键盘)
+// --------------------------------------------------------
+struct HexKeypadState {
+    bool open = false;
+    std::string target_name;
+    uint32_t* target_val_ptr = nullptr;
+    char input_buf[32] = {0};
+} g_hexKeypad;
+
+inline void OpenHexKeypad(const char* name, uint32_t* value_ptr) {
+    g_hexKeypad.open = true;
+    g_hexKeypad.target_name = name ? name : "偏移调整";
+    g_hexKeypad.target_val_ptr = value_ptr;
+    if (value_ptr) {
+        snprintf(g_hexKeypad.input_buf, sizeof(g_hexKeypad.input_buf), "0x%X", *value_ptr);
+    } else {
+        g_hexKeypad.input_buf[0] = '\0';
+    }
+}
+
+void DrawHexKeypadModal() {
+    if (!g_hexKeypad.open || !g_hexKeypad.target_val_ptr) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 center(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(460 * g_autoScale * g_scale, 440 * g_autoScale * g_scale), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize;
+    std::string title = (const char*)u8"✏️ 输入十六进制偏移###HexKeypadModal";
+
+    if (ImGui::Begin(title.c_str(), &g_hexKeypad.open, flags)) {
+        ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), (const char*)u8"正在编辑: %s", g_hexKeypad.target_name.c_str());
+        ImGui::Spacing();
+
+        // Display input box
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8 * g_autoScale, 8 * g_autoScale));
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputText("##hex_input_str", g_hexKeypad.input_buf, sizeof(g_hexKeypad.input_buf), ImGuiInputTextFlags_CharsHexadecimal);
+        ImGui::PopStyleVar();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Quick add/sub step buttons
+        float avail_w = ImGui::GetContentRegionAvail().x;
+        float quick_btn_w = (avail_w - 5 * 6 * g_autoScale) / 6.0f;
+        auto QuickStep = [&](int delta) {
+            uint32_t current = (uint32_t)strtoul(g_hexKeypad.input_buf, nullptr, 16);
+            current += delta;
+            snprintf(g_hexKeypad.input_buf, sizeof(g_hexKeypad.input_buf), "0x%X", current);
+        };
+
+        if (ImGui::Button("-0x1000", ImVec2(quick_btn_w, 28 * g_autoScale))) QuickStep(-0x1000);
+        ImGui::SameLine();
+        if (ImGui::Button("-0x100", ImVec2(quick_btn_w, 28 * g_autoScale))) QuickStep(-0x100);
+        ImGui::SameLine();
+        if (ImGui::Button("-0x10", ImVec2(quick_btn_w, 28 * g_autoScale))) QuickStep(-0x10);
+        ImGui::SameLine();
+        if (ImGui::Button("+0x10", ImVec2(quick_btn_w, 28 * g_autoScale))) QuickStep(0x10);
+        ImGui::SameLine();
+        if (ImGui::Button("+0x100", ImVec2(quick_btn_w, 28 * g_autoScale))) QuickStep(0x100);
+        ImGui::SameLine();
+        if (ImGui::Button("+0x1000", ImVec2(quick_btn_w, 28 * g_autoScale))) QuickStep(0x1000);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Hex Keypad Grid (4x4)
+        float pad_btn_w = (avail_w - 3 * 6 * g_autoScale) / 4.0f;
+        float pad_btn_h = 38 * g_autoScale * g_scale;
+
+        auto AppendChar = [&](char c) {
+            size_t len = strlen(g_hexKeypad.input_buf);
+            if (len < sizeof(g_hexKeypad.input_buf) - 2) {
+                g_hexKeypad.input_buf[len] = c;
+                g_hexKeypad.input_buf[len + 1] = '\0';
+            }
+        };
+
+        const char* hex_keys[4][4] = {
+            {"1", "2", "3", "A"},
+            {"4", "5", "6", "B"},
+            {"7", "8", "9", "C"},
+            {"0", "D", "E", "F"}
+        };
+
+        for (int r = 0; r < 4; r++) {
+            for (int c = 0; c < 4; c++) {
+                if (c > 0) ImGui::SameLine();
+                if (ImGui::Button(hex_keys[r][c], ImVec2(pad_btn_w, pad_btn_h))) {
+                    AppendChar(hex_keys[r][c][0]);
+                }
+            }
+        }
+
+        ImGui::Spacing();
+        float action_btn_w = (avail_w - 2 * 6 * g_autoScale) / 3.0f;
+        if (ImGui::Button("0x", ImVec2(action_btn_w, 32 * g_autoScale))) {
+            if (strncmp(g_hexKeypad.input_buf, "0x", 2) != 0 && strncmp(g_hexKeypad.input_buf, "0X", 2) != 0) {
+                char temp[32];
+                snprintf(temp, sizeof(temp), "0x%s", g_hexKeypad.input_buf);
+                strncpy(g_hexKeypad.input_buf, temp, sizeof(g_hexKeypad.input_buf));
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button((const char*)u8"← 退格", ImVec2(action_btn_w, 32 * g_autoScale))) {
+            size_t len = strlen(g_hexKeypad.input_buf);
+            if (len > 0) {
+                g_hexKeypad.input_buf[len - 1] = '\0';
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button((const char*)u8"清空 CE", ImVec2(action_btn_w, 32 * g_autoScale))) {
+            g_hexKeypad.input_buf[0] = '\0';
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float confirm_w = (avail_w - 8 * g_autoScale) / 2.0f;
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.6f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.75f, 0.35f, 1.0f));
+        if (ImGui::Button((const char*)u8"✓ 确定应用并保存", ImVec2(confirm_w, 40 * g_autoScale))) {
+            uint32_t val = (uint32_t)strtoul(g_hexKeypad.input_buf, nullptr, 16);
+            *g_hexKeypad.target_val_ptr = val;
+            SaveConfig();
+            g_hexKeypad.open = false;
+        }
+        ImGui::PopStyleColor(2);
+
+        ImGui::SameLine();
+        if (ImGui::Button((const char*)u8"✗ 取消", ImVec2(confirm_w, 40 * g_autoScale))) {
+            g_hexKeypad.open = false;
+        }
+    }
+    ImGui::End();
+}
+
 void DrawOffsetAdjuster(const char* label, uint32_t* value) {
     ImGui::PushID(label);
-    ImGui::Text("%-35s", label); 
-    float controls_width = (36 * 4 + 75 + 4 * 4) * g_autoScale * g_scale; 
+    ImGui::Text("%-32s", label); 
+    
+    char hex_str[32];
+    snprintf(hex_str, sizeof(hex_str), "0x%X", *value);
+
+    float btn_w = 34 * g_autoScale * g_scale;
+    float hex_btn_w = 95 * g_autoScale * g_scale;
+    float controls_width = (btn_w * 4 + hex_btn_w + 4 * 4 * g_autoScale * g_scale); 
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - controls_width);
     
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4 * g_autoScale * g_scale, 0));
-    if (ImGui::Button("-10", ImVec2(36 * g_autoScale * g_scale, 0))) *value -= 0x10;
+    if (ImGui::Button("-10", ImVec2(btn_w, 0))) { *value -= 0x10; SaveConfig(); }
     ImGui::SameLine();
-    if (ImGui::Button("-1", ImVec2(36 * g_autoScale * g_scale, 0))) *value -= 0x1;
+    if (ImGui::Button("-1", ImVec2(btn_w, 0))) { *value -= 0x1; SaveConfig(); }
     ImGui::SameLine();
     
-    ImGui::SetNextItemWidth(75 * g_autoScale * g_scale);
-    int temp_val = *value;
-    if (ImGui::InputInt("##val", &temp_val, 0, 0, ImGuiInputTextFlags_CharsHexadecimal)) *value = temp_val;
+    // Hex button that opens the keypad on click!
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.35f, 0.5f, 0.8f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.45f, 0.65f, 1.0f));
+    if (ImGui::Button(hex_str, ImVec2(hex_btn_w, 0))) {
+        OpenHexKeypad(label, value);
+    }
+    ImGui::PopStyleColor(2);
     
     ImGui::SameLine();
-    if (ImGui::Button("+1", ImVec2(36 * g_autoScale * g_scale, 0))) *value += 0x1;
+    if (ImGui::Button("+1", ImVec2(btn_w, 0))) { *value += 0x1; SaveConfig(); }
     ImGui::SameLine();
-    if (ImGui::Button("+10", ImVec2(36 * g_autoScale * g_scale, 0))) *value += 0x10;
+    if (ImGui::Button("+10", ImVec2(btn_w, 0))) { *value += 0x10; SaveConfig(); }
     ImGui::PopStyleVar();
     ImGui::PopID();
 }
@@ -3371,6 +3528,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     ImGui::NewFrame();
 
     DrawMainMenu();
+    DrawHexKeypadModal();
     DrawCardPoolWindow();
     DrawPlayerDataWindow();
     DrawOpponentBoardWindow();
