@@ -47,7 +47,7 @@ bool g_show_menu = true;
 // 采用了你最新调试出的精准偏移
 struct Offsets {
     // 【主线基础寻址】
-    uint32_t func_get_Instance = 0x80EF374;
+    uint32_t func_get_Instance = 0x9339D64;
     uint32_t addr2 = 0x10;
     uint32_t addr3 = 0x20;
     uint32_t addra = 0x10;
