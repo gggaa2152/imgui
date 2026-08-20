@@ -2985,6 +2985,7 @@ void DrawMainMenu() {
                 }
                 break;
             case 1:
+                {
                 DrawSectionTitle((const char*)u8"自动拿牌");
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"商店格子捕获进度: %zu / 5", g_shop_slots.size());
                 if (g_shop_listen_done.load()) ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), (const char*)u8"已成功获取5个格子地址，就绪！");
@@ -3078,6 +3079,7 @@ void DrawMainMenu() {
                         }
                         ImGui::NewLine();
                     }
+                }
                 }
                 break;
             case 2:
