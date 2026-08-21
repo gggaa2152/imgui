@@ -3710,28 +3710,48 @@ void DrawSymbolResolverUI() {
     float sc = g_autoScale * g_scale;
     ImGui::SetWindowFontScale(sc);
 
+    float avail_x = ImGui::GetContentRegionAvail().x;
+    float btn_w = 60.0f * sc;
+
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
-    ImGui::SetNextItemWidth(250.0f * sc);
-    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"[键盘]##1")) { g_vkbd_target = g_root_class_input; g_vkbd_target_size = sizeof(g_root_class_input); g_show_vkbd = true; }
+    ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
+    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"[键盘]##1", ImVec2(btn_w, 0))) { g_vkbd_target = g_root_class_input; g_vkbd_target_size = sizeof(g_root_class_input); g_show_vkbd = true; }
 
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名或字段名):");
-    ImGui::SetNextItemWidth(250.0f * sc);
-    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"[键盘]##2")) { g_vkbd_target = g_class_search_input; g_vkbd_target_size = sizeof(g_class_search_input); g_show_vkbd = true; }
+    ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
+    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"[键盘]##2", ImVec2(btn_w, 0))) { g_vkbd_target = g_class_search_input; g_vkbd_target_size = sizeof(g_class_search_input); g_show_vkbd = true; }
 
     ImGui::Spacing();
     
-    if (ImGui::Button((const char*)u8"> 开始自动寻址！", ImVec2(300 * sc, 35 * sc))) {
+    if (ImGui::Button((const char*)u8"> 开始自动寻址！", ImVec2(avail_x, 40 * sc))) {
         uintptr_t rootObj = g_dbg_addr1; // Default to hero entity
         if (strlen(g_root_class_input) > 0) {
             uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
             if (singletonObj != 0) {
                 rootObj = singletonObj;
+                g_dbg_addr1 = singletonObj; // Cache it
                 AddActionLog((const char*)u8"-> [单例解析] 成功获取 %s 单例实例: 0x%lx", g_root_class_input, singletonObj);
             } else {
-                AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例，回退到英雄实体起步。", g_root_class_input);
+                rootObj = 0; // Force to 0 so we know it failed
+                AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例", g_root_class_input);
             }
         }
-        g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8); // depth 8
+        if (rootObj != 0) {
+            g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8); // depth 8
+        } else {
+            g_lastPathResult.found = false;
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(0.0f); // Enable text wrapping globally for results
+
+    if (strlen(g_root_class_input) > 0) {
+        if (g_dbg_addr1 != 0 && GetSingletonInstance(g_root_class_input) != 0) {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪] %s = 0x%lx", g_root_class_input, GetSingletonInstance(g_root_class_input));
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[起点异常] 无法获取 %s 单例，请检查拼写或等待游戏加载完成。", g_root_class_input);
+        }
     }
 
     if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
@@ -3743,7 +3763,6 @@ void DrawSymbolResolverUI() {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 找到一条最短寻址路径：");
         ImGui::Indent(10.0f * sc);
-        ImGui::PushTextWrapPos(0.0f); // Enable text wrapping
         
         if (g_lastPathResult.steps.empty()) {
             ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", g_lastPathResult.targetInstance);
@@ -3766,9 +3785,10 @@ void DrawSymbolResolverUI() {
             ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
         }
         
-        ImGui::PopTextWrapPos(); // Disable text wrapping
         ImGui::Unindent(10.0f * sc);
     }
+    
+    ImGui::PopTextWrapPos(); // Disable text wrapping
 }void DrawMainMenu() {
     ApplyFrostedTheme();
     if (g_menu_orb) {
