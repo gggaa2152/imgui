@@ -3360,36 +3360,547 @@ static size_t g_vkbd_target_size = 0;
 static bool g_show_vkbd = false;
 static bool g_vkbd_caps = false;
 
+// ==========================================
+// 中文拼音输入法引擎 (Embedded Chinese Pinyin IME)
+// ==========================================
+static bool g_vkbd_chinese_mode = true;
+static std::string g_vkbd_pinyin_buf = "";
+static int g_candidate_page = 0;
+
+struct PinyinEntry {
+    const char* pinyin;
+    const char* candidates[14];
+};
+
+static const PinyinEntry g_pinyin_table[] = {
+    {"wo", {"我", "握", "窝", "卧", "喔", "沃", "涡", nullptr}},
+    {"wode", {"我的", nullptr}},
+    {"woshi", {"我是", nullptr}},
+    {"xiaoming", {"小明", nullptr}},
+    {"jinbi", {"金币", nullptr}},
+    {"wanjia", {"玩家", nullptr}},
+    {"mingzi", {"名字", nullptr}},
+    {"xueliang", {"血量", nullptr}},
+    {"gongji", {"攻击", nullptr}},
+    {"dengji", {"等级", nullptr}},
+    {"yingxiong", {"英雄", nullptr}},
+    {"qizi", {"棋子", nullptr}},
+    {"shuxing", {"属性", nullptr}},
+    {"moxing", {"模型", nullptr}},
+    {"shuju", {"数据", nullptr}},
+    {"duiwu", {"队伍", nullptr}},
+    {"zhuangbei", {"装备", nullptr}},
+    {"a", {"啊", "阿", "呵", nullptr}},
+    {"ai", {"爱", "矮", "挨", "哎", "碍", nullptr}},
+    {"an", {"按", "安", "暗", "案", nullptr}},
+    {"ang", {"昂", nullptr}},
+    {"ao", {"奥", "傲", "熬", "凹", nullptr}},
+    {"ba", {"把", "八", "吧", "爸", "拔", nullptr}},
+    {"bai", {"百", "白", "败", "拜", nullptr}},
+    {"ban", {"半", "办", "班", "版", "板", nullptr}},
+    {"bang", {"帮", "棒", "榜", "绑", nullptr}},
+    {"bao", {"包", "宝", "保", "报", "暴", nullptr}},
+    {"bei", {"被", "北", "倍", "杯", "备", nullptr}},
+    {"ben", {"本", "奔", "笨", nullptr}},
+    {"beng", {"崩", "蹦", "泵", nullptr}},
+    {"bi", {"币", "比", "必", "闭", "笔", "壁", "避", nullptr}},
+    {"bian", {"变", "边", "便", "编", nullptr}},
+    {"biao", {"表", "标", "飙", nullptr}},
+    {"bie", {"别", "瘪", nullptr}},
+    {"bin", {"宾", "滨", nullptr}},
+    {"bing", {"兵", "冰", "并", "病", nullptr}},
+    {"bo", {"波", "博", "拨", "播", nullptr}},
+    {"bu", {"不", "部", "步", "补", "布", nullptr}},
+    {"ca", {"擦", nullptr}},
+    {"cai", {"财", "才", "彩", "采", "踩", "裁", nullptr}},
+    {"can", {"参", "残", "餐", "惨", nullptr}},
+    {"cang", {"藏", "仓", "苍", nullptr}},
+    {"cao", {"草", "操", "槽", nullptr}},
+    {"ce", {"策", "测", "侧", "册", nullptr}},
+    {"cen", {"参", nullptr}},
+    {"ceng", {"层", "曾", nullptr}},
+    {"cha", {"查", "差", "插", "茶", nullptr}},
+    {"chai", {"拆", "柴", nullptr}},
+    {"chan", {"产", "缠", "颤", nullptr}},
+    {"chang", {"长", "场", "常", "唱", nullptr}},
+    {"chao", {"超", "朝", "抄", "潮", nullptr}},
+    {"che", {"车", "撤", "扯", nullptr}},
+    {"chen", {"沉", "陈", "晨", nullptr}},
+    {"cheng", {"成", "城", "称", "程", "乘", nullptr}},
+    {"chi", {"吃", "持", "迟", "池", "尺", nullptr}},
+    {"chong", {"充", "冲", "重", "虫", nullptr}},
+    {"chou", {"抽", "愁", "仇", "臭", nullptr}},
+    {"chu", {"出", "初", "除", "处", "储", nullptr}},
+    {"chuan", {"穿", "传", "船", nullptr}},
+    {"chuang", {"创", "床", "闯", nullptr}},
+    {"chui", {"吹", "锤", nullptr}},
+    {"chun", {"春", "纯", "蠢", nullptr}},
+    {"chuo", {"戳", nullptr}},
+    {"ci", {"此", "次", "词", "刺", nullptr}},
+    {"cong", {"从", "聪", "匆", nullptr}},
+    {"cou", {"凑", nullptr}},
+    {"cu", {"粗", "促", "醋", nullptr}},
+    {"cuan", {"窜", "攒", nullptr}},
+    {"cui", {"催", "脆", "翠", nullptr}},
+    {"cun", {"存", "村", "寸", nullptr}},
+    {"cuo", {"错", "挫", "措", nullptr}},
+    {"da", {"大", "打", "达", "答", nullptr}},
+    {"dai", {"带", "代", "待", "袋", "呆", nullptr}},
+    {"dan", {"但", "单", "蛋", "淡", "担", nullptr}},
+    {"dang", {"当", "党", "挡", "荡", nullptr}},
+    {"dao", {"到", "道", "倒", "刀", "岛", nullptr}},
+    {"de", {"的", "得", "德", nullptr}},
+    {"deng", {"等", "灯", "登", "邓", nullptr}},
+    {"di", {"第", "地", "低", "底", "敌", "帝", nullptr}},
+    {"dian", {"点", "电", "店", "典", "垫", nullptr}},
+    {"diao", {"掉", "调", "吊", "钓", nullptr}},
+    {"die", {"跌", "叠", "爹", "蝶", nullptr}},
+    {"ding", {"定", "顶", "订", "丁", nullptr}},
+    {"diu", {"丢", nullptr}},
+    {"dong", {"动", "东", "懂", "洞", "冬", nullptr}},
+    {"dou", {"斗", "都", "豆", "抖", nullptr}},
+    {"du", {"度", "读", "独", "毒", "渡", nullptr}},
+    {"duan", {"段", "断", "短", "端", nullptr}},
+    {"dui", {"对", "队", "堆", "追", nullptr}},
+    {"dun", {"顿", "吨", "盾", "蹲", nullptr}},
+    {"duo", {"多", "夺", "躲", "朵", nullptr}},
+    {"e", {"饿", "恶", "额", "俄", nullptr}},
+    {"en", {"嗯", "恩", nullptr}},
+    {"er", {"二", "儿", "而", "耳", nullptr}},
+    {"fa", {"发", "法", "罚", "伐", nullptr}},
+    {"fan", {"反", "范", "犯", "翻", "烦", nullptr}},
+    {"fang", {"放", "方", "防", "房", "访", nullptr}},
+    {"fei", {"非", "飞", "费", "废", "肥", nullptr}},
+    {"fen", {"分", "份", "粉", "纷", "奋", nullptr}},
+    {"feng", {"封", "风", "峰", "锋", "凤", nullptr}},
+    {"fo", {"佛", nullptr}},
+    {"fou", {"否", nullptr}},
+    {"fu", {"服", "复", "副", "富", "负", "付", "符", nullptr}},
+    {"ga", {"嘎", "尬", nullptr}},
+    {"gai", {"该", "改", "盖", "概", nullptr}},
+    {"gan", {"干", "敢", "感", "赶", "甘", nullptr}},
+    {"gang", {"刚", "钢", "港", "岗", nullptr}},
+    {"gao", {"高", "告", "搞", "稿", nullptr}},
+    {"ge", {"个", "各", "歌", "格", "哥", "割", nullptr}},
+    {"gei", {"给", nullptr}},
+    {"gen", {"跟", "根", nullptr}},
+    {"geng", {"更", "耕", "梗", nullptr}},
+    {"gong", {"工", "公", "共", "功", "攻", "弓", nullptr}},
+    {"gou", {"够", "狗", "购", "构", "勾", nullptr}},
+    {"gu", {"古", "股", "骨", "顾", "故", "孤", nullptr}},
+    {"gua", {"挂", "刮", "瓜", nullptr}},
+    {"guai", {"怪", "乖", "拐", nullptr}},
+    {"guan", {"关", "管", "官", "馆", "贯", "冠", nullptr}},
+    {"guang", {"光", "广", "逛", nullptr}},
+    {"gui", {"规", "贵", "鬼", "归", "轨", nullptr}},
+    {"gun", {"滚", "棍", nullptr}},
+    {"guo", {"国", "过", "果", "裹", "锅", nullptr}},
+    {"ha", {"哈", "蛤", nullptr}},
+    {"hai", {"海", "害", "还", "孩", nullptr}},
+    {"han", {"喊", "寒", "汗", "汉", "含", nullptr}},
+    {"hang", {"行", "航", "巷", nullptr}},
+    {"hao", {"好", "号", "毫", "豪", "耗", nullptr}},
+    {"he", {"和", "何", "合", "喝", "盒", "河", nullptr}},
+    {"hei", {"黑", "嘿", nullptr}},
+    {"hen", {"很", "狠", "恨", nullptr}},
+    {"heng", {"横", "恒", "哼", nullptr}},
+    {"hong", {"红", "宏", "洪", "轰", nullptr}},
+    {"hou", {"后", "候", "厚", "猴", nullptr}},
+    {"hu", {"护", "户", "互", "湖", "呼", "忽", nullptr}},
+    {"hua", {"话", "画", "华", "化", "花", "滑", nullptr}},
+    {"huai", {"坏", "怀", "淮", nullptr}},
+    {"huan", {"换", "还", "环", "缓", "幻", "欢", nullptr}},
+    {"huang", {"黄", "慌", "皇", "荒", nullptr}},
+    {"hui", {"会", "回", "灰", "挥", "辉", "毁", nullptr}},
+    {"hun", {"混", "魂", "婚", nullptr}},
+    {"huo", {"或", "活", "火", "获", "货", nullptr}},
+    {"ji", {"机", "级", "基", "极", "击", "集", "计", "记", "技", "即", "急", nullptr}},
+    {"jia", {"加", "家", "价", "假", "架", "甲", "夹", nullptr}},
+    {"jian", {"件", "见", "间", "建", "检", "减", "尖", "简", "剑", nullptr}},
+    {"jiang", {"将", "奖", "降", "讲", "江", nullptr}},
+    {"jiao", {"角", "交", "叫", "脚", "教", "较", "焦", nullptr}},
+    {"jie", {"结", "节", "界", "接", "解", "阶", "借", "截", nullptr}},
+    {"jin", {"金", "进", "近", "仅", "今", "紧", "禁", "斤", nullptr}},
+    {"jing", {"精", "经", "警", "竞", "境", "静", "惊", "净", nullptr}},
+    {"jiu", {"就", "九", "酒", "旧", "久", "救", nullptr}},
+    {"ju", {"局", "具", "据", "巨", "聚", "剧", "居", "举", nullptr}},
+    {"juan", {"卷", "捐", "券", nullptr}},
+    {"jue", {"决", "绝", "觉", "角色", "掘", nullptr}},
+    {"jun", {"军", "均", "君", "俊", nullptr}},
+    {"ka", {"卡", "咖", nullptr}},
+    {"kai", {"开", "凯", "楷", nullptr}},
+    {"kan", {"看", "砍", "刊", nullptr}},
+    {"kang", {"抗", "康", "扛", nullptr}},
+    {"kao", {"考", "靠", "烤", nullptr}},
+    {"ke", {"可", "克", "科", "客", "课", "刻", nullptr}},
+    {"ken", {"肯", "啃", nullptr}},
+    {"keng", {"坑", nullptr}},
+    {"kong", {"空", "控", "孔", "恐", nullptr}},
+    {"kou", {"口", "扣", nullptr}},
+    {"ku", {"苦", "库", "哭", "裤", nullptr}},
+    {"kua", {"跨", "夸", nullptr}},
+    {"kuai", {"快", "块", "筷", nullptr}},
+    {"kuan", {"宽", "款", nullptr}},
+    {"kuang", {"况", "框", "狂", "矿", nullptr}},
+    {"kui", {"亏", "愧", "盔", nullptr}},
+    {"kun", {"困", "捆", "昆", nullptr}},
+    {"kuo", {"阔", "扩", "括", nullptr}},
+    {"la", {"拉", "啦", "辣", "落", nullptr}},
+    {"lai", {"来", "赖", nullptr}},
+    {"lan", {"蓝", "览", "拦", "栏", "懒", nullptr}},
+    {"lang", {"浪", "狼", "郎", nullptr}},
+    {"lao", {"老", "劳", "捞", nullptr}},
+    {"le", {"了", "乐", "勒", nullptr}},
+    {"lei", {"类", "雷", "累", "泪", nullptr}},
+    {"leng", {"冷", "愣", nullptr}},
+    {"li", {"力", "利", "立", "里", "理", "历", "例", "离", nullptr}},
+    {"lia", {"俩", nullptr}},
+    {"lian", {"连", "练", "脸", "联", "恋", "链", nullptr}},
+    {"liang", {"量", "两", "亮", "良", "粮", "凉", nullptr}},
+    {"liao", {"了", "料", "聊", "疗", nullptr}},
+    {"lie", {"列", "烈", "猎", "劣", nullptr}},
+    {"lin", {"林", "临", "邻", "琳", nullptr}},
+    {"ling", {"令", "另", "零", "领", "灵", "凌", nullptr}},
+    {"liu", {"六", "流", "留", "溜", "柳", nullptr}},
+    {"long", {"龙", "隆", "垄", "笼", nullptr}},
+    {"lou", {"楼", "漏", "露", nullptr}},
+    {"lu", {"路", "录", "陆", "露", "鲁", nullptr}},
+    {"luan", {"乱", "卵", nullptr}},
+    {"lun", {"论", "轮", "伦", nullptr}},
+    {"luo", {"落", "罗", "络", "洛", nullptr}},
+    {"lv", {"率", "绿", "滤", "旅", "履", nullptr}},
+    {"ma", {"吗", "妈", "马", "嘛", "码", "麻", nullptr}},
+    {"mai", {"买", "卖", "迈", "麦", nullptr}},
+    {"man", {"慢", "满", "漫", "蛮", nullptr}},
+    {"mang", {"忙", "盲", "芒", nullptr}},
+    {"mao", {"猫", "毛", "冒", "贸", "矛", nullptr}},
+    {"me", {"么", "麽", nullptr}},
+    {"mei", {"没", "美", "每", "妹", "煤", "梅", nullptr}},
+    {"men", {"们", "门", "闷", nullptr}},
+    {"meng", {"梦", "猛", "蒙", "盟", nullptr}},
+    {"mi", {"米", "密", "迷", "秘", "蜜", nullptr}},
+    {"mian", {"面", "免", "棉", "眠", nullptr}},
+    {"miao", {"秒", "妙", "描", "苗", nullptr}},
+    {"mie", {"灭", nullptr}},
+    {"min", {"民", "敏", "闵", nullptr}},
+    {"ming", {"名", "明", "命", "鸣", nullptr}},
+    {"mo", {"模", "末", "莫", "摩", "魔", "墨", nullptr}},
+    {"mou", {"某", "谋", nullptr}},
+    {"mu", {"目", "木", "母", "墓", "幕", "暮", nullptr}},
+    {"na", {"那", "拿", "哪", "呐", nullptr}},
+    {"nai", {"乃", "奶", "耐", nullptr}},
+    {"nan", {"难", "南", "男", nullptr}},
+    {"nao", {"脑", "闹", nullptr}},
+    {"ne", {"呢", "哪", nullptr}},
+    {"nei", {"内", "那", nullptr}},
+    {"nen", {"嫩", nullptr}},
+    {"neng", {"能", nullptr}},
+    {"ni", {"你", "泥", "拟", "逆", "呢", nullptr}},
+    {"nian", {"年", "念", "粘", nullptr}},
+    {"niang", {"娘", nullptr}},
+    {"niao", {"鸟", "尿", nullptr}},
+    {"nie", {"捏", "聂", nullptr}},
+    {"nin", {"您", nullptr}},
+    {"ning", {"宁", "凝", "拧", nullptr}},
+    {"niu", {"牛", "纽", "扭", nullptr}},
+    {"nong", {"农", "弄", "浓", nullptr}},
+    {"nu", {"奴", "怒", "努", nullptr}},
+    {"nv", {"女", nullptr}},
+    {"o", {"哦", "噢", nullptr}},
+    {"ou", {"偶", "欧", "殴", nullptr}},
+    {"pa", {"怕", "爬", "帕", nullptr}},
+    {"pai", {"排", "派", "牌", "拍", nullptr}},
+    {"pan", {"判", "盘", "盼", nullptr}},
+    {"pang", {"旁", "胖", nullptr}},
+    {"pao", {"跑", "炮", "抛", "泡", nullptr}},
+    {"pei", {"配", "陪", "赔", "培", nullptr}},
+    {"pen", {"喷", "盆", nullptr}},
+    {"peng", {"碰", "朋", "膨", "棚", nullptr}},
+    {"pi", {"皮", "匹", "批", "披", "辟", "脾", nullptr}},
+    {"pian", {"片", "篇", "偏", "骗", nullptr}},
+    {"piao", {"票", "漂", "飘", nullptr}},
+    {"pie", {"撇", nullptr}},
+    {"pin", {"品", "拼", "频", "贫", nullptr}},
+    {"ping", {"平", "评", "凭", "屏", "瓶", nullptr}},
+    {"po", {"破", "迫", "坡", "婆", nullptr}},
+    {"pou", {"剖", nullptr}},
+    {"pu", {"普", "铺", "扑", "谱", nullptr}},
+    {"qi", {"起", "其", "七", "期", "奇", "气", "器", "妻", "齐", "骑", "棋", nullptr}},
+    {"qia", {"卡", "恰", nullptr}},
+    {"qian", {"前", "千", "钱", "浅", "签", "欠", nullptr}},
+    {"qiang", {"强", "枪", "墙", "抢", nullptr}},
+    {"qiao", {"桥", "巧", "敲", "乔", "瞧", nullptr}},
+    {"qie", {"切", "且", "窃", nullptr}},
+    {"qin", {"亲", "琴", "侵", "勤", nullptr}},
+    {"qing", {"清", "情", "请", "青", "轻", "倾", nullptr}},
+    {"qiong", {"穷", nullptr}},
+    {"qiu", {"求", "秋", "球", nullptr}},
+    {"qu", {"去", "取", "区", "曲", "趋", "驱", nullptr}},
+    {"quan", {"全", "权", "圈", "券", "劝", nullptr}},
+    {"que", {"确", "却", "缺", "雀", nullptr}},
+    {"qun", {"群", "裙", nullptr}},
+    {"ran", {"然", "燃", "染", nullptr}},
+    {"rang", {"让", "嚷", nullptr}},
+    {"rao", {"绕", "扰", nullptr}},
+    {"re", {"热", "惹", nullptr}},
+    {"ren", {"人", "任", "认", "忍", "刃", nullptr}},
+    {"reng", {"仍", "扔", nullptr}},
+    {"ri", {"日", nullptr}},
+    {"rong", {"容", "荣", "融", "绒", nullptr}},
+    {"rou", {"肉", "柔", nullptr}},
+    {"ru", {"如", "入", "乳", "儒", nullptr}},
+    {"ruan", {"软", nullptr}},
+    {"rui", {"瑞", "锐", nullptr}},
+    {"run", {"润", nullptr}},
+    {"ruo", {"若", "弱", nullptr}},
+    {"sa", {"撒", "萨", nullptr}},
+    {"sai", {"赛", "塞", nullptr}},
+    {"san", {"三", "散", "伞", nullptr}},
+    {"sang", {"桑", "丧", nullptr}},
+    {"sao", {"扫", "骚", nullptr}},
+    {"se", {"色", "瑟", nullptr}},
+    {"sen", {"森", nullptr}},
+    {"seng", {"僧", nullptr}},
+    {"sha", {"杀", "沙", "傻", "刹", nullptr}},
+    {"shai", {"晒", "筛", nullptr}},
+    {"shan", {"山", "闪", "善", "单", "扇", "删", nullptr}},
+    {"shang", {"上", "伤", "商", "尚", "赏", nullptr}},
+    {"shao", {"少", "烧", "稍", "绍", nullptr}},
+    {"she", {"设", "社", "射", "舍", "蛇", nullptr}},
+    {"shen", {"身", "深", "神", "甚", "申", "沈", nullptr}},
+    {"sheng", {"生", "胜", "声", "省", "升", "盛", "圣", nullptr}},
+    {"shi", {"是", "时", "十", "事", "市", "实", "使", "世", "式", "视", "试", "示", "识", "师", "失", "士", nullptr}},
+    {"shou", {"手", "首", "受", "收", "守", "售", "兽", nullptr}},
+    {"shu", {"书", "数", "术", "属", "树", "输", "熟", "束", nullptr}},
+    {"shua", {"刷", "耍", nullptr}},
+    {"shuai", {"帅", "衰", "摔", "甩", nullptr}},
+    {"shuan", {"栓", nullptr}},
+    {"shuang", {"双", "爽", "霜", nullptr}},
+    {"shui", {"水", "谁", "税", "睡", nullptr}},
+    {"shun", {"顺", "瞬", nullptr}},
+    {"shuo", {"说", "硕", nullptr}},
+    {"si", {"四", "死", "思", "司", "私", "丝", "寺", nullptr}},
+    {"song", {"送", "松", "宋", "诵", nullptr}},
+    {"sou", {"搜", "艘", nullptr}},
+    {"su", {"速", "素", "苏", "诉", "塑", nullptr}},
+    {"suan", {"算", "酸", nullptr}},
+    {"sui", {"随", "岁", "碎", "虽", nullptr}},
+    {"sun", {"损", "孙", nullptr}},
+    {"suo", {"所", "锁", "索", "缩", nullptr}},
+    {"ta", {"他", "她", "它", "踏", "塔", nullptr}},
+    {"tai", {"太", "台", "态", "泰", "抬", nullptr}},
+    {"tan", {"谈", "探", "弹", "坦", "叹", nullptr}},
+    {"tang", {"糖", "堂", "躺", "趟", "汤", nullptr}},
+    {"tao", {"逃", "套", "淘", "桃", "讨", nullptr}},
+    {"te", {"特", nullptr}},
+    {"teng", {"疼", "腾", nullptr}},
+    {"ti", {"体", "提", "题", "替", "踢", "梯", nullptr}},
+    {"tian", {"天", "田", "填", "甜", "添", nullptr}},
+    {"tiao", {"条", "跳", "调", "挑", nullptr}},
+    {"tie", {"铁", "贴", "帖", nullptr}},
+    {"ting", {"听", "停", "厅", "庭", "挺", nullptr}},
+    {"tong", {"同", "通", "统", "痛", "童", "铜", nullptr}},
+    {"tou", {"头", "投", "透", "偷", nullptr}},
+    {"tu", {"图", "土", "突", "途", "徒", "兔", nullptr}},
+    {"tuan", {"团", nullptr}},
+    {"tui", {"推", "退", "腿", nullptr}},
+    {"tun", {"吞", "屯", nullptr}},
+    {"tuo", {"托", "脱", "拖", "妥", nullptr}},
+    {"wa", {"挖", "娃", "瓦", "哇", nullptr}},
+    {"wai", {"外", "歪", nullptr}},
+    {"wan", {"玩", "完", "万", "晚", "碗", "弯", nullptr}},
+    {"wang", {"网", "王", "望", "往", "忘", nullptr}},
+    {"wei", {"为", "位", "微", "未", "唯", "危", "围", "卫", "尾", "味", nullptr}},
+    {"wen", {"问", "文", "温", "闻", "稳", nullptr}},
+    {"weng", {"翁", nullptr}},
+    {"wu", {"无", "五", "物", "武", "舞", "务", "屋", "误", "悟", nullptr}},
+    {"xi", {"西", "息", "系", "希", "吸", "喜", "细", "戏", "洗", "席", nullptr}},
+    {"xia", {"下", "夏", "吓", "峡", "瞎", nullptr}},
+    {"xian", {"现", "先", "线", "限", "显", "险", "献", "县", nullptr}},
+    {"xiang", {"想", "相", "向", "象", "项", "响", "详", "香", nullptr}},
+    {"xiao", {"小", "效", "笑", "消", "校", "肖", "销", "削", nullptr}},
+    {"xie", {"写", "些", "谢", "斜", "血", "鞋", "携", nullptr}},
+    {"xin", {"心", "新", "信", "辛", "欣", nullptr}},
+    {"xing", {"行", "性", "形", "星", "型", "幸", "兴", "姓", nullptr}},
+    {"xiong", {"胸", "雄", "兄", "熊", "凶", nullptr}},
+    {"xiu", {"修", "秀", "休", "袖", nullptr}},
+    {"xu", {"需", "许", "续", "须", "虚", "序", "叙", nullptr}},
+    {"xuan", {"选", "宣", "玄", "悬", "旋", nullptr}},
+    {"xue", {"学", "血", "雪", "削", nullptr}},
+    {"xun", {"寻", "迅", "训", "讯", "巡", nullptr}},
+    {"ya", {"呀", "压", "亚", "鸭", "牙", "押", nullptr}},
+    {"yan", {"眼", "言", "演", "严", "验", "延", "研", "烟", "盐", "岩", nullptr}},
+    {"yang", {"样", "阳", "养", "洋", "羊", "央", nullptr}},
+    {"yao", {"要", "药", "耀", "摇", "咬", "妖", "腰", nullptr}},
+    {"ye", {"也", "页", "夜", "业", "野", "叶", "爷", nullptr}},
+    {"yi", {"一", "以", "已", "意", "义", "移", "易", "医", "异", "亿", "依", "役", "艺", nullptr}},
+    {"yin", {"因", "引", "银", "音", "印", "阴", "隐", nullptr}},
+    {"ying", {"应", "英", "影", "营", "赢", "硬", "映", nullptr}},
+    {"yo", {"哟", nullptr}},
+    {"yong", {"用", "勇", "永", "拥", "涌", nullptr}},
+    {"you", {"有", "右", "又", "友", "游", "幼", "油", "由", "优", nullptr}},
+    {"yu", {"与", "于", "语", "育", "雨", "预", "遇", "域", "余", "鱼", "羽", "誉", "玉", nullptr}},
+    {"yuan", {"元", "原", "远", "员", "院", "愿", "源", "圆", "缘", nullptr}},
+    {"yue", {"月", "越", "约", "乐", "跃", "阅", nullptr}},
+    {"yun", {"运", "云", "允", "匀", "陨", nullptr}},
+    {"za", {"砸", "杂", nullptr}},
+    {"zai", {"在", "再", "载", "灾", nullptr}},
+    {"zan", {"赞", "暂", nullptr}},
+    {"zang", {"藏", "脏", nullptr}},
+    {"zao", {"造", "早", "噪", "遭", "藻", nullptr}},
+    {"ze", {"则", "责", "择", nullptr}},
+    {"zei", {"贼", nullptr}},
+    {"zen", {"怎", nullptr}},
+    {"zeng", {"增", "赠", nullptr}},
+    {"zha", {"炸", "扎", "查", "眨", nullptr}},
+    {"zhai", {"摘", "宅", "窄", nullptr}},
+    {"zhan", {"站", "占", "战", "展", "斩", "粘", nullptr}},
+    {"zhang", {"张", "章", "长", "掌", "障", "涨", nullptr}},
+    {"zhao", {"找", "照", "招", "召", "赵", "兆", nullptr}},
+    {"zhe", {"这", "着", "者", "折", "哲", "遮", nullptr}},
+    {"zhen", {"真", "阵", "震", "针", "镇", "侦", nullptr}},
+    {"zheng", {"正", "政", "证", "争", "整", "征", nullptr}},
+    {"zhi", {"直", "指", "知", "只", "之", "支", "制", "值", "质", "志", "置", "至", "止", nullptr}},
+    {"zhong", {"中", "重", "种", "众", "终", "忠", "钟", nullptr}},
+    {"zhou", {"周", "州", "舟", "洲", "宙", nullptr}},
+    {"zhu", {"主", "住", "注", "助", "猪", "朱", "著", "祝", "逐", nullptr}},
+    {"zhua", {"抓", nullptr}},
+    {"zhuan", {"转", "专", "传", "赚", "砖", nullptr}},
+    {"zhuang", {"装", "壮", "状", "撞", "庄", nullptr}},
+    {"zhui", {"追", "坠", "缀", nullptr}},
+    {"zhun", {"准", nullptr}},
+    {"zhuo", {"着", "桌", "捉", "拙", nullptr}},
+    {"zi", {"自", "字", "子", "资", "紫", "姿", nullptr}},
+    {"zong", {"总", "纵", "宗", "踪", nullptr}},
+    {"zou", {"走", "奏", "揍", nullptr}},
+    {"zu", {"组", "足", "族", "阻", "祖", nullptr}},
+    {"zuan", {"钻", nullptr}},
+    {"zui", {"最", "嘴", "醉", "罪", nullptr}},
+    {"zun", {"尊", "遵", nullptr}},
+    {"zuo", {"做", "作", "坐", "左", "座", nullptr}}
+};
+
+static std::vector<std::string> GetPinyinCandidates(const std::string& py) {
+    std::vector<std::string> res;
+    if (py.empty()) return res;
+
+    std::string py_lower = py;
+    std::transform(py_lower.begin(), py_lower.end(), py_lower.begin(), ::tolower);
+
+    // 1. 完全匹配
+    for (const auto& item : g_pinyin_table) {
+        if (py_lower == item.pinyin) {
+            for (int i = 0; item.candidates[i] != nullptr; i++) {
+                res.push_back(item.candidates[i]);
+            }
+            break;
+        }
+    }
+
+    // 2. 前缀匹配
+    if (res.empty()) {
+        for (const auto& item : g_pinyin_table) {
+            if (std::string(item.pinyin).find(py_lower) == 0) {
+                for (int i = 0; item.candidates[i] != nullptr && res.size() < 12; i++) {
+                    res.push_back(item.candidates[i]);
+                }
+            }
+        }
+    }
+
+    return res;
+}
+
 void DrawVirtualKeyboard() {
     if (!g_show_vkbd || !g_vkbd_target) return;
 
     ImGuiIO& io = ImGui::GetIO();
-    float scale = 1.0f;
     
-    // Height of keyboard is about 35% of screen height
-    float kbd_h = io.DisplaySize.y * 0.35f;
+    // Height of keyboard is about 40% of screen height
+    float kbd_h = io.DisplaySize.y * 0.40f;
     ImGui::SetNextWindowPos(ImVec2(0, io.DisplaySize.y), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
     ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, kbd_h));
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.35f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.4f, 0.45f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.16f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.22f, 0.28f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.35f, 0.45f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.5f, 0.65f, 1.0f));
     
     ImGui::Begin("VKBD", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
     ImGui::SetWindowFontScale(0.95f);
 
-    // Header / Target Display
+    // 顶部状态栏：显示当前输入内容 + 模式切换 + 粘贴 + 清空
     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"输入内容:");
     ImGui::SameLine();
-    ImGui::Text("%s_", g_vkbd_target);
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s_", g_vkbd_target);
+    
+    ImGui::SameLine(ImGui::GetWindowWidth() - 250.0f * g_autoScale);
+    // [中/英] 切换按钮
+    if (ImGui::Button(g_vkbd_chinese_mode ? (const char*)u8"[模式: 中文]" : (const char*)u8"[模式: 英文]", ImVec2(90.0f * g_autoScale, 0))) {
+        g_vkbd_chinese_mode = !g_vkbd_chinese_mode;
+        g_vkbd_pinyin_buf.clear();
+    }
+    ImGui::SameLine();
+    // [粘贴] 按钮 (支持直接从系统剪贴板粘贴中文)
+    if (ImGui::Button((const char*)u8"[粘贴]", ImVec2(55.0f * g_autoScale, 0))) {
+        const char* clip = ImGui::GetClipboardText();
+        if (clip && strlen(clip) > 0) {
+            size_t cur_len = strlen(g_vkbd_target);
+            strncat(g_vkbd_target, clip, g_vkbd_target_size - cur_len - 1);
+        }
+    }
+    ImGui::SameLine();
+    // [清空] 按钮
+    if (ImGui::Button((const char*)u8"[清空]", ImVec2(55.0f * g_autoScale, 0))) {
+        g_vkbd_target[0] = '\0';
+        g_vkbd_pinyin_buf.clear();
+    }
+
     ImGui::Separator();
+
+    // 候选字/词栏 (在中文模式下输入拼音时显示候选词，否则显示常用快捷短语)
+    std::vector<std::string> candidates = GetPinyinCandidates(g_vkbd_pinyin_buf);
+    
+    if (g_vkbd_chinese_mode && !g_vkbd_pinyin_buf.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "拼音: %s", g_vkbd_pinyin_buf.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "| 候选字:");
+        ImGui::SameLine();
+
+        if (candidates.empty()) {
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(无匹配)");
+        } else {
+            for (size_t c = 0; c < candidates.size() && c < 8; c++) {
+                char cand_btn[32]; snprintf(cand_btn, sizeof(cand_btn), "%zu.%s##cand_%zu", c + 1, candidates[c].c_str(), c);
+                if (ImGui::Button(cand_btn)) {
+                    size_t cur_len = strlen(g_vkbd_target);
+                    strncat(g_vkbd_target, candidates[c].c_str(), g_vkbd_target_size - cur_len - 1);
+                    g_vkbd_pinyin_buf.clear();
+                }
+                ImGui::SameLine();
+            }
+        }
+        ImGui::NewLine();
+    } else if (g_vkbd_chinese_mode && g_vkbd_pinyin_buf.empty()) {
+        // 常用中文快捷字词条
+        const char* quick_words[] = {(const char*)u8"我是", (const char*)u8"小明", (const char*)u8"金币", (const char*)u8"玩家", (const char*)u8"名称", (const char*)u8"段位", (const char*)u8"英雄", (const char*)u8"棋子", (const char*)u8"血量", (const char*)u8"等级"};
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"常用词:");
+        ImGui::SameLine();
+        for (int w = 0; w < 10; w++) {
+            if (ImGui::Button(quick_words[w])) {
+                size_t cur_len = strlen(g_vkbd_target);
+                strncat(g_vkbd_target, quick_words[w], g_vkbd_target_size - cur_len - 1);
+            }
+            ImGui::SameLine();
+        }
+        ImGui::NewLine();
+    }
 
     // Responsive Button sizes
     float avail_w = ImGui::GetContentRegionAvail().x;
     float spacing = ImGui::GetStyle().ItemSpacing.x;
     float base_btn_w = (avail_w - (spacing * 13.0f)) / 13.5f; // 13 keys wide approx
-    float btn_h = (ImGui::GetContentRegionAvail().y - (spacing * 4.0f)) / 4.0f; // 4 rows
+    float btn_h = (ImGui::GetContentRegionAvail().y - (spacing * 4.0f)) / 4.2f; // 4 rows
 
     static float g_bs_hold_time = 0.0f;
     static float g_bs_repeat_interval = 0.0f;
@@ -3400,21 +3911,31 @@ void DrawVirtualKeyboard() {
             bool is_clicked = ImGui::IsItemClicked();
             bool is_active = ImGui::IsItemActive();
 
+            auto DoDelete = [&]() {
+                if (g_vkbd_chinese_mode && !g_vkbd_pinyin_buf.empty()) {
+                    g_vkbd_pinyin_buf.pop_back();
+                } else {
+                    size_t len = strlen(g_vkbd_target);
+                    if (len > 0) {
+                        // UTF-8 multi-byte character deletion
+                        size_t i = len - 1;
+                        while (i > 0 && (g_vkbd_target[i] & 0xC0) == 0x80) { i--; }
+                        g_vkbd_target[i] = '\0';
+                    }
+                }
+            };
+
             if (is_clicked) {
-                size_t len = strlen(g_vkbd_target);
-                if (len > 0) g_vkbd_target[len - 1] = '\0';
+                DoDelete();
                 g_bs_hold_time = 0.0f;
                 g_bs_repeat_interval = 0.0f;
             } else if (is_active) {
                 g_bs_hold_time += io.DeltaTime;
-                // 按住超过 0.28 秒后，开启高频连续删除
                 if (g_bs_hold_time > 0.28f) {
                     g_bs_repeat_interval += io.DeltaTime;
-                    // 每 0.04 秒连续删除一个字符
                     if (g_bs_repeat_interval >= 0.04f) {
                         g_bs_repeat_interval = 0.0f;
-                        size_t len = strlen(g_vkbd_target);
-                        if (len > 0) g_vkbd_target[len - 1] = '\0';
+                        DoDelete();
                     }
                 }
             } else {
@@ -3425,19 +3946,41 @@ void DrawVirtualKeyboard() {
         }
 
         if (ImGui::Button(key, ImVec2(base_btn_w * width_mult, btn_h))) {
-            size_t len = strlen(g_vkbd_target);
-            if (strcmp(key, "CLR") == 0) {
-                g_vkbd_target[0] = '\0';
-            } else if (strcmp(key, "ENTER") == 0) {
-                g_show_vkbd = false;
+            if (strcmp(key, "ENTER") == 0) {
+                if (g_vkbd_chinese_mode && !g_vkbd_pinyin_buf.empty()) {
+                    // Enter commits current pinyin as raw English
+                    size_t cur_len = strlen(g_vkbd_target);
+                    strncat(g_vkbd_target, g_vkbd_pinyin_buf.c_str(), g_vkbd_target_size - cur_len - 1);
+                    g_vkbd_pinyin_buf.clear();
+                } else {
+                    g_show_vkbd = false;
+                }
             } else if (strcmp(key, "SPACE") == 0) {
-                if (len < g_vkbd_target_size - 1) { g_vkbd_target[len] = ' '; g_vkbd_target[len + 1] = '\0'; }
+                if (g_vkbd_chinese_mode && !g_vkbd_pinyin_buf.empty() && !candidates.empty()) {
+                    // Space selects 1st candidate character
+                    size_t cur_len = strlen(g_vkbd_target);
+                    strncat(g_vkbd_target, candidates[0].c_str(), g_vkbd_target_size - cur_len - 1);
+                    g_vkbd_pinyin_buf.clear();
+                } else {
+                    size_t cur_len = strlen(g_vkbd_target);
+                    if (cur_len < g_vkbd_target_size - 1) {
+                        g_vkbd_target[cur_len] = ' ';
+                        g_vkbd_target[cur_len + 1] = '\0';
+                    }
+                }
             } else if (strcmp(key, "CAPS") == 0) {
                 g_vkbd_caps = !g_vkbd_caps;
             } else {
-                if (len < g_vkbd_target_size - 1) {
-                    g_vkbd_target[len] = key[0];
-                    g_vkbd_target[len + 1] = '\0';
+                if (g_vkbd_chinese_mode && isalpha((unsigned char)key[0])) {
+                    // In Chinese mode, lowercase alpha adds to pinyin
+                    char c = tolower((unsigned char)key[0]);
+                    g_vkbd_pinyin_buf += c;
+                } else {
+                    size_t cur_len = strlen(g_vkbd_target);
+                    if (cur_len < g_vkbd_target_size - 1) {
+                        g_vkbd_target[cur_len] = key[0];
+                        g_vkbd_target[cur_len + 1] = '\0';
+                    }
                 }
             }
         }
@@ -3458,7 +4001,7 @@ void DrawVirtualKeyboard() {
 
     // Row 2
     for (int i = 0; i < 12; i++) { KeyBtn(g_vkbd_caps ? row2_up[i] : row2_low[i]); ImGui::SameLine(); }
-    KeyBtn("CLR", 1.5f);
+    KeyBtn("SPACE", 1.5f);
 
     // Row 3
     for (int i = 0; i < 12; i++) { KeyBtn(g_vkbd_caps ? row3_up[i] : row3_low[i]); ImGui::SameLine(); }
@@ -3467,7 +4010,7 @@ void DrawVirtualKeyboard() {
     // Row 4
     KeyBtn("CAPS", 1.5f); ImGui::SameLine();
     for (int i = 0; i < 12; i++) { KeyBtn(g_vkbd_caps ? row4_up[i] : row4_low[i]); ImGui::SameLine(); }
-    KeyBtn("SPACE", 1.5f);
+    KeyBtn(g_vkbd_chinese_mode ? (const char*)u8"中" : (const char*)u8"英", 1.5f);
 
     ImGui::End();
     ImGui::PopStyleColor(4);
