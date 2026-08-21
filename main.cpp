@@ -3621,7 +3621,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         // ==========================================
         // 5. 穿透所有未映射物理内存槽位 (+0x10 ~ +0x1E0) 全量深钻 (保证穿透 +0x10 addr2 等非反射主线指针)
         // ==========================================
-        for (size_t raw_off = 0x10; raw_off <= 0x1E0; raw_off += sizeof(uintptr_t)) {
+        for (size_t raw_off = 0x00; raw_off <= 0x2E0; raw_off += sizeof(uintptr_t)) {
             if (exploredOffsets.find(raw_off) != exploredOffsets.end()) continue;
 
             uintptr_t r_ptr = 0;
@@ -5225,16 +5225,19 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         std::unordered_set<size_t> existing_offsets;
         for (const auto& r : fieldRows) existing_offsets.insert(r.offset);
 
-        for (size_t slot_off = 0x10; slot_off <= 0x2A0; slot_off += sizeof(uintptr_t)) {
+        for (size_t slot_off = 0x00; slot_off <= 0x300; slot_off += sizeof(uintptr_t)) {
             if (existing_offsets.find(slot_off) != existing_offsets.end()) continue;
             uintptr_t slot_ptr = 0;
             SafeReadMemory(currentObj + slot_off, &slot_ptr, sizeof(uintptr_t));
             int32_t slot_int = 0;
             SafeReadMemory(currentObj + slot_off, &slot_int, sizeof(int32_t));
 
-            if (slot_ptr == 0 && slot_int == 0 && g_inspector_hide_null) continue;
+            if (slot_ptr == 0 && slot_int == 0 && g_inspector_hide_null && slot_off > 0x08) continue;
 
-            char slot_name[32]; snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
+            char slot_name[64];
+            if (slot_off == 0x00) snprintf(slot_name, sizeof(slot_name), (const char*)u8"[对象头] _klass");
+            else if (slot_off == 0x08) snprintf(slot_name, sizeof(slot_name), (const char*)u8"[同步锁] _monitor");
+            else snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
             std::string live_val = "";
             bool isObject = false;
             std::string slot_type = "Value";
@@ -5360,7 +5363,30 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // 5. 底部操作栏 (Dump Object 按钮)
+    // 5. 全量物理内存十六进制透视图 (Hex Memory Dump from 0x00)
+    static bool s_show_hex_view = false;
+    ImGui::Checkbox((const char*)u8"展开 0x00~0x200 全量物理内存十六进制字节透视表 (Hex Dump)##HexView", &s_show_hex_view);
+    if (s_show_hex_view) {
+        ImGui::BeginChild("HexDumpRegion", ImVec2(avail_x, 150.0f * g_autoScale), true, ImGuiWindowFlags_HorizontalScrollbar);
+        for (size_t h_off = 0; h_off <= 0x240; h_off += 16) {
+            uint8_t bytes[16] = {0};
+            SafeReadMemory(currentObj + h_off, bytes, 16);
+            char hex_line[128];
+            char ascii_line[32];
+            for (int b = 0; b < 16; b++) {
+                ascii_line[b] = (bytes[b] >= 32 && bytes[b] <= 126) ? (char)bytes[b] : '.';
+            }
+            ascii_line[16] = '\0';
+            snprintf(hex_line, sizeof(hex_line), "+0x%03lx:  %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x  | %s",
+                h_off, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15], ascii_line);
+            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.9f, 1.0f), "%s", hex_line);
+        }
+        ImGui::EndChild();
+        ImGui::Spacing();
+    }
+
+    // 6. 底部操作栏 (Dump Object 按钮)
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.15f, 0.45f, 0.95f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.25f, 0.55f, 1.0f));
     if (ImGui::Button((const char*)u8"Dump Object", ImVec2(avail_x, 38.0f * g_autoScale))) {
