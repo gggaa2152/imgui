@@ -1819,9 +1819,9 @@ void SetupImGuiStyle() { ApplyFrostedTheme(); }
 static bool FontHasChineseGlyphs(ImFont* font) {
     if (!font) return false;
     // Check basic Chinese test characters: "中"(0x4E2D), "文"(0x6587), "金"(0x91D1)
-    return (font->FindGlyphNoFallback((ImWchar)0x4E2D) != nullptr && 
-            font->FindGlyphNoFallback((ImWchar)0x6587) != nullptr &&
-            font->FindGlyphNoFallback((ImWchar)0x91D1) != nullptr);
+    return (font->IsGlyphInFont((ImWchar)0x4E2D) && 
+            font->IsGlyphInFont((ImWchar)0x6587) &&
+            font->IsGlyphInFont((ImWchar)0x91D1));
 }
 
 ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size) {
