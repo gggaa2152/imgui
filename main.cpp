@@ -4773,6 +4773,8 @@ static char g_manual_inspect_input[128] = "";
 
 void PushInspectObject(const std::string& name, const std::string& cls, uintptr_t addr) {
     if (!IsValidPtr(addr)) return;
+    void* test_klass = nullptr;
+    if (!SafeReadMemory(addr, &test_klass, sizeof(void*))) return;
     g_inspect_breadcrumbs.push_back({ name, cls, addr });
 }
 
@@ -4796,14 +4798,14 @@ struct InspectorFieldRow {
 
 void DrawObjectInspectorContent(float avail_x, float avail_y) {
     if (!g_il2cpp_api.init()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[错误] IL2CPP API 尚未初始化，请等待游戏加载完成。");
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[提示] IL2CPP API 尚未初始化完成，请等待游戏进入主界面...");
         return;
     }
 
     float btn_w = 60.0f * g_autoScale;
 
-    // 1. 起点快捷选择与手动输入
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"检查起点:");
+    // 1. 快捷对象快捷载入栏
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"单例快速载入:");
     ImGui::SameLine();
     if (ImGui::Button((const char*)u8"ChessModelManager")) {
         uintptr_t ptr = GetSingletonInstance("ChessModelManager");
@@ -4812,7 +4814,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
             g_inspect_breadcrumbs.clear();
             PushInspectObject("ChessModelManager", "ChessModelManager", ptr);
         } else {
-            AddActionLog((const char*)u8"-> [提示] 未找到 ChessModelManager 单例");
+            AddActionLog((const char*)u8"-> [提示] 未找到 ChessModelManager 实例");
         }
     }
     ImGui::SameLine();
@@ -4823,162 +4825,122 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
             g_inspect_breadcrumbs.clear();
             PushInspectObject("CSOGame", "CSOGame", ptr);
         } else {
-            AddActionLog((const char*)u8"-> [提示] 未找到 CSOGame 单例");
+            AddActionLog((const char*)u8"-> [提示] 未找到 CSOGame 实例");
         }
     }
     ImGui::SameLine();
     if (ImGui::Button((const char*)u8"我的玩家")) {
         uintptr_t my_ptr = 0;
-        for (const auto& pi : g_players) { if (pi.id == g_my_player_id && IsValidPtr(pi.val_ptr)) { my_ptr = pi.val_ptr; break; } }
-        if (my_ptr == 0 && !g_dbg_player_addrs.empty()) my_ptr = g_dbg_player_addrs[0];
+        for (const auto& pi : g_players) { if (pi.id == g_my_player_id && pi.addr != 0) { my_ptr = pi.addr; break; } }
         if (IsValidPtr(my_ptr)) {
             g_inspect_breadcrumbs.clear();
-            PushInspectObject("MyPlayer", "PlayerInfo", my_ptr);
+            PushInspectObject("MyPlayer", "TPlayerInfo", my_ptr);
         } else {
-            AddActionLog((const char*)u8"-> [提示] 尚未捕获玩家指针");
+            AddActionLog((const char*)u8"-> [提示] 尚未进入对局或未获取到我的玩家实例");
         }
     }
 
-    // 手动输入指针
     ImGui::SameLine();
     ImGui::SetNextItemWidth(140.0f * g_autoScale);
-    ImGui::InputText("##ManualInspectInput", g_manual_inspect_input, sizeof(g_manual_inspect_input));
+    ImGui::InputTextWithHint("##ManualInspectAddr", "0x... / 类名", g_manual_inspect_input, sizeof(g_manual_inspect_input));
     ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"查看指针")) {
+    if (ImGui::Button((const char*)u8"载入##btnManualInspect")) {
         if (strlen(g_manual_inspect_input) > 0) {
-            uintptr_t addr = strtoull(g_manual_inspect_input, nullptr, 16);
-            if (IsValidPtr(addr)) {
+            uintptr_t target_addr = 0;
+            if (strncmp(g_manual_inspect_input, "0x", 2) == 0 || strncmp(g_manual_inspect_input, "0X", 2) == 0) {
+                target_addr = (uintptr_t)strtoull(g_manual_inspect_input, nullptr, 16);
+            } else {
+                target_addr = GetSingletonInstance(g_manual_inspect_input);
+            }
+            if (IsValidPtr(target_addr)) {
                 g_inspect_breadcrumbs.clear();
-                PushInspectObject("ManualObject", "UnknownClass", addr);
-            }
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"[键盘]##ins_man")) {
-        g_vkbd_target = g_manual_inspect_input;
-        g_vkbd_target_size = sizeof(g_manual_inspect_input);
-        g_show_vkbd = true;
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // 默认如果未选择对象，自动尝试挂载可用的单例实例
-    if (g_inspect_breadcrumbs.empty()) {
-        uintptr_t ptr = GetSingletonInstance("ChessModelManager");
-        if (ptr == 0) ptr = g_dbg_addr1;
-        if (ptr == 0) ptr = GetSingletonInstance("CSOGame");
-        if (ptr == 0) ptr = g_dbg_segmentcsogame;
-        if (ptr == 0 && !g_players.empty()) ptr = g_players[0].val_ptr;
-        if (ptr == 0 && !g_dbg_player_addrs.empty()) ptr = g_dbg_player_addrs[0];
-
-        if (IsValidPtr(ptr)) {
-            PushInspectObject("ChessModelManager", "ChessModelManager", ptr);
-        }
-    }
-
-    // 单例自动重连 (当新对局重开导致老指针失效时，自动重新获取活指针)
-    if (!g_inspect_breadcrumbs.empty() && g_inspect_breadcrumbs.size() == 1) {
-        auto& rootBc = g_inspect_breadcrumbs[0];
-        if (!IsValidPtr(rootBc.objectAddress)) {
-            uintptr_t new_ptr = GetSingletonInstance(rootBc.className.c_str());
-            if (IsValidPtr(new_ptr)) {
-                rootBc.objectAddress = new_ptr;
+                PushInspectObject(g_manual_inspect_input, g_manual_inspect_input, target_addr);
+                AddActionLog((const char*)u8"-> [对象检查] 成功载入目标对象: 0x%lx", target_addr);
+            } else {
+                AddActionLog((const char*)u8"-> [对象检查] 目标地址无效或单例为空: %s", g_manual_inspect_input);
             }
         }
     }
 
+    ImGui::Spacing();
+
+    // 2. 面包屑导航栏 (Breadcrumb Path)
     if (g_inspect_breadcrumbs.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), (const char*)u8"当前尚未选择对象。请点击上方的【ChessModelManager】、【CSOGame】或输入内存指针。");
-        return;
-    }
-
-    // 2. 商业级粉色高亮面包屑导航栏 (Breadcrumbs Navigation Bar - 与 IL2CPP Tool 完全一致)
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.15f, 0.30f, 0.8f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.40f, 0.20f, 0.50f, 1.0f));
-
-    for (size_t i = 0; i < g_inspect_breadcrumbs.size(); i++) {
-        const auto& bc = g_inspect_breadcrumbs[i];
-        bool isCurrent = (i == g_inspect_breadcrumbs.size() - 1);
-
-        if (isCurrent) {
-            // 当前选中的对象：高亮粉红背景与专属样式 (与截图完全一致)
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.15f, 0.45f, 0.95f));
-            char cur_label[128]; snprintf(cur_label, sizeof(cur_label), "Inspecting %s 0x%lx", bc.className.c_str(), bc.objectAddress);
-            ImGui::Button(cur_label);
-            ImGui::PopStyleColor();
+        uintptr_t defaultRoot = g_dbg_addr1;
+        if (!IsValidPtr(defaultRoot)) defaultRoot = GetSingletonInstance("ChessModelManager");
+        if (!IsValidPtr(defaultRoot)) defaultRoot = g_dbg_segmentcsogame;
+        if (IsValidPtr(defaultRoot)) {
+            PushInspectObject("ChessModelManager", "ChessModelManager", defaultRoot);
         } else {
-            char bc_btn[64]; snprintf(bc_btn, sizeof(bc_btn), "%s >##bc_%zu", bc.displayName.c_str(), i);
-            if (ImGui::Button(bc_btn)) {
-                g_inspect_breadcrumbs.erase(g_inspect_breadcrumbs.begin() + i + 1, g_inspect_breadcrumbs.end());
-                break;
-            }
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"[提示] 请先在上方载入对象或在第4页【符号反查】中点击「全量浏览此单例」！");
+            return;
+        }
+    }
+
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"路径:");
+    ImGui::SameLine();
+    for (size_t b = 0; b < g_inspect_breadcrumbs.size(); b++) {
+        if (b > 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.6f, 1.0f), " > ");
             ImGui::SameLine();
         }
+        char b_label[128];
+        snprintf(b_label, sizeof(b_label), "%s##crumb_%zu", g_inspect_breadcrumbs[b].name.c_str(), b);
+        if (b == g_inspect_breadcrumbs.size() - 1) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.6f, 1.0f), "%s (0x%lx)", g_inspect_breadcrumbs[b].name.c_str(), g_inspect_breadcrumbs[b].objectAddress);
+        } else {
+            if (ImGui::SmallButton(b_label)) {
+                g_inspect_breadcrumbs.erase(g_inspect_breadcrumbs.begin() + b + 1, g_inspect_breadcrumbs.end());
+                break;
+            }
+        }
     }
-    ImGui::PopStyleColor(2);
 
     ImGui::Spacing();
 
-    // 3. 当前完整路径链路指示器 (与商业截图一致: _battleModel . battleTableInfo . <stTableInfo>k__BackingField . vecPlayerList)
-    if (g_inspect_breadcrumbs.size() > 1) {
-        std::string fullPathStr = "";
-        for (size_t i = 0; i < g_inspect_breadcrumbs.size(); i++) {
-            if (i > 0) fullPathStr += " . ";
-            fullPathStr += g_inspect_breadcrumbs[i].displayName;
-        }
-        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.95f, 1.0f), "%s", fullPathStr.c_str());
-        ImGui::Spacing();
-    }
-
-    // 4. 过滤工具栏 (Filter & Checkboxes & 动态持续读取状态指示)
+    // 3. 控制与过滤选项
+    ImGui::Checkbox((const char*)u8"包含父类字段##Base", &g_inspector_include_base);
+    ImGui::SameLine();
+    ImGui::Checkbox((const char*)u8"计算属性(Getters)##Props", &g_inspector_include_props);
+    ImGui::SameLine();
+    ImGui::Checkbox((const char*)u8"隐藏Null空值##HideNull", &g_inspector_hide_null);
+    ImGui::SameLine();
+    ImGui::Text((const char*)u8"  过滤:");
+    ImGui::SameLine();
     ImGui::SetNextItemWidth(160.0f * g_autoScale);
     ImGui::InputText("##InspectorFilter", g_inspector_filter, sizeof(g_inspector_filter));
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Filter");
-    ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"[键盘]##ins_flt")) {
-        g_vkbd_target = g_inspector_filter;
-        g_vkbd_target_size = sizeof(g_inspector_filter);
-        g_show_vkbd = true;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"清空##flt")) {
-        g_inspector_filter[0] = '\0';
-    }
+    if (ImGui::Button((const char*)u8"清空##ClrFilter")) { g_inspector_filter[0] = '\0'; }
 
-    ImGui::SameLine(avail_x - 300.0f * g_autoScale);
-    ImGui::Checkbox((const char*)u8"包含属性", &g_inspector_include_props);
-    ImGui::SameLine();
-    ImGui::Checkbox((const char*)u8"父类字段", &g_inspector_include_base);
-    ImGui::SameLine();
-    ImGui::Checkbox((const char*)u8"隐藏Null", &g_inspector_hide_null);
-
-    ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    // 5. 动态持续读取当前对象 (Dynamic Live 60 FPS Real-time Memory Read)
+    // 4. 动态持续读取当前对象 (Dynamic Live 60 FPS Real-time Memory Read)
     uintptr_t currentObj = g_inspect_breadcrumbs.back().objectAddress;
     if (!IsValidPtr(currentObj)) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[状态] 当前对象尚未在内存中分配 (0x0 / Null) - 游戏进行到相应流程后将自动实时呈现！", currentObj);
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[状态] 当前对象内存指针已失效 (0x0 / Null) - 请点击面包屑返回上一层！");
         return;
     }
 
     void* klass_ptr = nullptr;
-    SafeReadMemory(currentObj, &klass_ptr, sizeof(void*));
+    if (!SafeReadMemory(currentObj, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), (const char*)u8"[状态] 目标内存地址 (0x%lx) 暂无 IL2CPP 类型头信息，已自动为您开启原始内存槽位探测！", currentObj);
+    }
 
     std::string fullClassName = g_inspect_breadcrumbs.back().className;
     if (klass_ptr && IsValidIl2CppClass(klass_ptr)) {
-        const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
-        const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
-        fullClassName = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : (c_name ? std::string(c_name) : fullClassName);
-        g_inspect_breadcrumbs.back().className = fullClassName;
+        const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : nullptr;
+        const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : nullptr;
+        std::string s_name = SafeReadCString(c_name);
+        std::string s_ns = SafeReadCString(c_ns);
+        if (!s_name.empty()) {
+            fullClassName = (!s_ns.empty()) ? (s_ns + "." + s_name) : s_name;
+            g_inspect_breadcrumbs.back().className = fullClassName;
+        }
     }
 
-    std::string filter_lower = g_inspector_filter;
-    std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
+    std::string filter_lower = SafeToLower(g_inspector_filter);
 
     std::vector<InspectorFieldRow> fieldRows;
 
@@ -5011,22 +4973,34 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 std::string child_cls = "";
 
                 if (IsValidPtr(elem_ptr)) {
-                    void* c_klass = nullptr;
-                    SafeReadMemory(elem_ptr, &c_klass, sizeof(void*));
-                    if (c_klass && IsValidIl2CppClass(c_klass)) {
-                        const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
-                        const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(c_klass) : "";
-                        elem_type = (cns && cns[0]) ? (std::string(cns) + "." + cn) : (cn ? cn : "Object");
-                        child_cls = elem_type;
+                    std::string str_val = ReadIl2CppString(elem_ptr);
+                    if (!str_val.empty()) {
+                        elem_type = "String";
+                        live_val = "\"" + str_val + "\"";
+                        isObject = false;
+                    } else {
+                        void* c_klass = nullptr;
+                        SafeReadMemory(elem_ptr, &c_klass, sizeof(void*));
+                        if (c_klass && IsValidIl2CppClass(c_klass)) {
+                            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : nullptr;
+                            const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(c_klass) : nullptr;
+                            std::string scn = SafeReadCString(cn);
+                            std::string scns = SafeReadCString(cns);
+                            elem_type = (!scns.empty()) ? (scns + "." + scn) : (scn.empty() ? "Object" : scn);
+                            child_cls = elem_type;
+                        }
+                        char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", elem_ptr, elem_type.c_str());
+                        live_val = buf;
+                        isObject = true;
                     }
-                    char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", elem_ptr, elem_type.c_str());
-                    live_val = buf;
-                    isObject = true;
                 } else {
                     char buf[32]; snprintf(buf, sizeof(buf), "%d", elem_val32);
                     live_val = buf;
                     elem_type = "Int32";
                 }
+
+                if (g_inspector_hide_null && elem_ptr == 0 && elem_val32 == 0) continue;
+                if (!filter_lower.empty() && !SmartStringMatch(idx_name, filter_lower) && !SmartStringMatch(elem_type, filter_lower) && !SmartStringMatch(live_val, filter_lower)) continue;
 
                 fieldRows.push_back({ elem_off, idx_name, elem_type, elem_type, "", false, false, elem_ptr, elem_val32, (int64_t)elem_val32, live_val, !isObject, isObject, (elem_ptr == 0 && elem_val32 == 0), child_cls });
             }
@@ -5034,32 +5008,36 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     }
 
     // ==========================================
-    // B. 原生 IL2CPP 字段反射 (实时每帧从物理内存读取最新动态值)
+    // B. 原生 IL2CPP 字段反射 (实时每帧从物理内存读取最新动态值，受深度保护)
     // ==========================================
     if (klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
-        for (void* cur_klass = klass_ptr; cur_klass != nullptr; cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
-            const char* cur_cls_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(cur_klass) : "";
+        int p_depth = 0;
+        for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && p_depth < 10; p_depth++, cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
+            const char* cur_cls_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(cur_klass) : nullptr;
+            std::string base_cls_str = SafeReadCString(cur_cls_name);
 
             bool isBaseClass = (cur_klass != klass_ptr);
 
             void* iter = nullptr;
-            while (void* field = g_il2cpp_api.class_get_fields(cur_klass, &iter)) {
+            int f_count = 0;
+            while (f_count < 150 && (f_count++, true)) {
+                void* field = g_il2cpp_api.class_get_fields(cur_klass, &iter);
+                if (!field) break;
+
                 uint32_t flags = g_il2cpp_api.field_get_flags ? g_il2cpp_api.field_get_flags(field) : 0;
                 if ((flags & 0x0010) != 0) continue; // 跳过静态字段
 
-                const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
+                const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : nullptr;
                 size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
                 void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
-                const char* t_name = f_type && g_il2cpp_api.type_get_name ? g_il2cpp_api.type_get_name(f_type) : "";
+                const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : nullptr;
 
-                std::string field_str = f_name ? f_name : "";
-                std::string type_str = t_name ? t_name : "";
+                std::string field_str = SafeReadCString(f_name);
+                std::string type_str = SafeReadCString(t_name);
                 std::string clean_type = CleanIl2CppTypeName(type_str);
 
-                bool isPropBacking = (field_str.find("<") != std::string::npos && field_str.find(">k__BackingField") != std::string::npos);
-                if (!g_inspector_include_props && isPropBacking) continue;
+                if (field_str.empty()) continue;
 
-                // 实时动态读取每一帧的物理内存最新值 (Live 60 FPS Read)
                 uintptr_t rawVal = 0;
                 SafeReadMemory(currentObj + f_offset, &rawVal, sizeof(uintptr_t));
                 int32_t val32 = 0;
@@ -5067,103 +5045,107 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 int64_t val64 = 0;
                 SafeReadMemory(currentObj + f_offset, &val64, sizeof(int64_t));
 
-                std::string live_val = "";
+                std::string liveVal = "";
                 bool isInt = false;
-                bool isObjectPtr = false;
+                bool isObjPtr = false;
                 bool isNull = false;
-                std::string childClassName = "";
+                std::string childCls = "";
 
-                if (clean_type == "String" || type_str.find("String") != std::string::npos) {
-                    if (IsValidPtr(rawVal)) {
-                        std::string s_str = ReadIl2CppString(rawVal);
-                        live_val = s_str.empty() ? (const char*)u8"空字段" : ("\"" + s_str + "\"");
-                        if (s_str.empty()) isNull = true;
-                    } else {
-                        live_val = (const char*)u8"空字段";
-                        isNull = true;
-                    }
-                } else if (clean_type == "Boolean") {
-                    live_val = (rawVal & 0xFF) ? "true" : "false";
+                std::string str_content = "";
+                if (IsValidPtr(rawVal)) {
+                    str_content = ReadIl2CppString(rawVal);
+                }
+
+                if (!str_content.empty()) {
+                    liveVal = "\"" + str_content + "\"";
+                } else if (clean_type == "String" || type_str.find("String") != std::string::npos) {
+                    liveVal = IsValidPtr(rawVal) ? "\"\"" : "Null";
+                    isNull = (rawVal == 0);
                 } else if (clean_type == "Int32" || clean_type == "UInt32") {
-                    isInt = true;
                     char buf[32]; snprintf(buf, sizeof(buf), "%d", val32);
-                    live_val = buf;
-                    if (val32 == 0) isNull = true;
-                } else if (clean_type == "Int64" || clean_type == "UInt64") {
+                    liveVal = buf;
                     isInt = true;
+                } else if (clean_type == "Int64" || clean_type == "UInt64") {
                     char buf[32]; snprintf(buf, sizeof(buf), "%ld", (int64_t)rawVal);
-                    live_val = buf;
-                    if (rawVal == 0) isNull = true;
+                    liveVal = buf;
+                    isInt = true;
+                } else if (clean_type == "Boolean") {
+                    liveVal = (rawVal & 0xFF) ? "true" : "false";
                 } else if (clean_type == "Single") {
                     float fval = 0; memcpy(&fval, &rawVal, sizeof(float));
-                    char buf[32]; snprintf(buf, sizeof(buf), "%.3f", fval);
-                    live_val = buf;
+                    char buf[32]; snprintf(buf, sizeof(buf), "%.2f", fval);
+                    liveVal = buf;
                 } else {
                     if (rawVal == 0) {
-                        live_val = "Null";
+                        liveVal = "Null";
                         isNull = true;
+                    } else if (IsValidPtr(rawVal)) {
+                        void* c_klass = nullptr;
+                        SafeReadMemory(rawVal, &c_klass, sizeof(void*));
+                        if (c_klass && IsValidIl2CppClass(c_klass)) {
+                            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : nullptr;
+                            const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(c_klass) : nullptr;
+                            std::string scn = SafeReadCString(cn);
+                            std::string scns = SafeReadCString(cns);
+                            childCls = (!scns.empty()) ? (scns + "." + scn) : scn;
+                        }
+                        char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", rawVal, childCls.empty() ? clean_type.c_str() : childCls.c_str());
+                        liveVal = buf;
+                        isObjPtr = true;
                     } else {
-                        isObjectPtr = IsValidPtr(rawVal);
-                        if (isObjectPtr) {
-                            void* c_klass = nullptr;
-                            SafeReadMemory(rawVal, &c_klass, sizeof(void*));
-                            if (c_klass && IsValidIl2CppClass(c_klass)) {
-                                const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
-                                const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(c_klass) : "";
-                                childClassName = (cns && cns[0]) ? (std::string(cns) + "." + cn) : (cn ? cn : clean_type);
-                            }
-                        }
-                        if (childClassName.empty()) childClassName = clean_type;
-
-                        // 格式化输出 (与 IL2CPP Tool 商业截图严格一致)
-                        if (clean_type.find("[]") != std::string::npos || type_str.find("[]") != std::string::npos) {
-                            live_val = type_str.empty() ? clean_type : type_str;
-                        } else {
-                            char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", rawVal, childClassName.c_str());
-                            live_val = buf;
-                        }
+                        char buf[32]; snprintf(buf, sizeof(buf), "0x%lx", rawVal);
+                        liveVal = buf;
                     }
                 }
 
                 if (g_inspector_hide_null && isNull) continue;
+                if (!filter_lower.empty() && !SmartStringMatch(field_str, filter_lower) && !SmartStringMatch(clean_type, filter_lower) && !SmartStringMatch(liveVal, filter_lower)) continue;
 
-                // 过滤匹配
-                if (!filter_lower.empty()) {
-                    std::string f_low = field_str; std::transform(f_low.begin(), f_low.end(), f_low.begin(), ::tolower);
-                    std::string t_low = clean_type; std::transform(t_low.begin(), t_low.end(), t_low.begin(), ::tolower);
-                    std::string v_low = live_val; std::transform(v_low.begin(), v_low.end(), v_low.begin(), ::tolower);
-                    if (f_low.find(filter_lower) == std::string::npos && t_low.find(filter_lower) == std::string::npos && v_low.find(filter_lower) == std::string::npos) {
-                        continue;
+                bool isBacking = (field_str.find("k__BackingField") != std::string::npos);
+                std::string display_name = field_str;
+                if (isBacking) {
+                    size_t p1 = field_str.find('<');
+                    size_t p2 = field_str.find('>');
+                    if (p1 != std::string::npos && p2 != std::string::npos && p2 > p1) {
+                        display_name = "[属性] " + field_str.substr(p1 + 1, p2 - p1 - 1);
                     }
                 }
 
-                fieldRows.push_back({ f_offset, field_str, type_str, clean_type, cur_cls_name ? cur_cls_name : "", isBaseClass, isPropBacking, rawVal, val32, val64, live_val, isInt, isObjectPtr, isNull, childClassName });
+                fieldRows.push_back({ f_offset, display_name, type_str, clean_type, isBaseClass ? base_cls_str : "", isBaseClass, isBacking, rawVal, val32, val64, liveVal, isInt, isObjPtr, isNull, childCls });
             }
         }
     }
 
     // ==========================================
-    // C. 动态计算属性 Getter 反射 (当勾选包含属性时，调用 0 参数 get_xxx() 属性方法)
+    // C. 动态属性 Getters 实时安全反射
     // ==========================================
     if (g_inspector_include_props && klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_methods && g_il2cpp_api.runtime_invoke) {
-        for (void* cur_klass = klass_ptr; cur_klass != nullptr; cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
-            void* m_iter = nullptr;
-            while (void* method = g_il2cpp_api.class_get_methods(cur_klass, &m_iter)) {
-                const char* m_name = g_il2cpp_api.method_get_name ? g_il2cpp_api.method_get_name(method) : "";
-                if (!m_name || strncmp(m_name, "get_", 4) != 0) continue;
-                if (g_il2cpp_api.method_get_param_count && g_il2cpp_api.method_get_param_count(method) != 0) continue;
+        int m_p_depth = 0;
+        for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && m_p_depth < 8; m_p_depth++, cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
+            void* iter = nullptr;
+            int m_count = 0;
+            while (m_count < 100 && (m_count++, true)) {
+                void* method = g_il2cpp_api.class_get_methods(cur_klass, &iter);
+                if (!method) break;
 
-                std::string prop_name = m_name + 4; // 截取属性名 (如 get_Money -> Money)
-                std::string prop_display = "[Prop] " + prop_name + "()";
+                const char* m_name = g_il2cpp_api.method_get_name ? g_il2cpp_api.method_get_name(method) : nullptr;
+                std::string m_str = SafeReadCString(m_name);
+                if (m_str.empty()) continue;
 
-                // 避免与已反射的 backing 字段重复
-                bool alreadyHas = false;
-                for (const auto& fr : fieldRows) {
-                    if (fr.fieldName.find(prop_name) != std::string::npos) { alreadyHas = true; break; }
-                }
-                if (alreadyHas) continue;
+                if (m_str.find("get_") != 0) continue;
+                uint32_t param_count = g_il2cpp_api.method_get_param_count ? g_il2cpp_api.method_get_param_count(method) : 1;
+                if (param_count != 0) continue; // 仅调用无参 Getter
 
-                // 安全调用 Getter 计算属性
+                // 过滤容易触发引擎底层原生崩溃的危险 Unity Internal 属性
+                if (m_str == "get_gameObject" || m_str == "get_transform" || m_str == "get_rigidbody" || 
+                    m_str == "get_renderer" || m_str == "get_material" || m_str == "get_mesh" || 
+                    m_str == "get_canvas" || m_str == "get_hideFlags") continue;
+
+                std::string prop_name = m_str.substr(4);
+                std::string prop_display = "[Getter] " + prop_name;
+
+                if (!filter_lower.empty() && !SmartStringMatch(prop_name, filter_lower)) continue;
+
                 void* exc = nullptr;
                 void* ret = g_il2cpp_api.runtime_invoke(method, (void*)currentObj, nullptr, &exc);
                 if (exc == nullptr && ret != nullptr) {
@@ -5180,11 +5162,12 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                         void* c_k = nullptr;
                         SafeReadMemory(ret_ptr, &c_k, sizeof(void*));
                         if (c_k && IsValidIl2CppClass(c_k)) {
-                            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_k) : "";
-                            p_type = cn ? CleanIl2CppTypeName(cn) : "Object";
+                            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_k) : nullptr;
+                            std::string scn = SafeReadCString(cn);
+                            p_type = scn.empty() ? "Object" : CleanIl2CppTypeName(scn);
                             ch_cls = p_type;
                         }
-                        char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", ret_ptr, p_type.c_str());
+                        char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", ret_ptr, p_type.c_str());
                         live_val = buf;
                     } else {
                         char buf[32]; snprintf(buf, sizeof(buf), "%d", ret_val32);
@@ -5217,16 +5200,24 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
             std::string child_cls = "";
 
             if (IsValidPtr(slot_ptr)) {
-                void* c_klass = nullptr;
-                SafeReadMemory(slot_ptr, &c_klass, sizeof(void*));
-                if (c_klass && IsValidIl2CppClass(c_klass)) {
-                    const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
-                    slot_type = cn ? CleanIl2CppTypeName(cn) : "Object";
-                    child_cls = slot_type;
+                std::string s_val = ReadIl2CppString(slot_ptr);
+                if (!s_val.empty()) {
+                    slot_type = "String";
+                    live_val = "\"" + s_val + "\"";
+                    isObject = false;
+                } else {
+                    void* c_klass = nullptr;
+                    SafeReadMemory(slot_ptr, &c_klass, sizeof(void*));
+                    if (c_klass && IsValidIl2CppClass(c_klass)) {
+                        const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : nullptr;
+                        std::string scn = SafeReadCString(cn);
+                        slot_type = scn.empty() ? "Object" : CleanIl2CppTypeName(scn);
+                        child_cls = slot_type;
+                    }
+                    char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", slot_ptr, slot_type.c_str());
+                    live_val = buf;
+                    isObject = true;
                 }
-                char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", slot_ptr, slot_type.c_str());
-                live_val = buf;
-                isObject = true;
             } else {
                 char buf[32]; snprintf(buf, sizeof(buf), "%d (0x%x)", slot_int, slot_int);
                 live_val = buf;
@@ -5242,8 +5233,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         return a.offset < b.offset;
     });
 
-    // 状态统计栏 (显示 60 FPS 实时动态读取指示)
-    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"● [实时动态读取中 (60 FPS)]");
+    // 状态统计栏
+    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"● [实时动态读取中]");
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"| 当前对象: 0x%lx | 实时字段数: %zu", currentObj, fieldRows.size());
     ImGui::Spacing();
@@ -5258,7 +5249,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::SetColumnWidth(1, col1_w);
     ImGui::SetColumnWidth(2, col2_w);
 
-    // 表头 (与截图严格对齐: 字段/属性 | 值 | 类型)
+    // 表头
     ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"字段/属性");
     ImGui::NextColumn();
     ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"值");
