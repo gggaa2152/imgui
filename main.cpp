@@ -3015,7 +3015,9 @@ struct ObjectPathFindingResult {
 
 static ObjectPathFindingResult g_lastPathResult;
 
-ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targetName, int maxDepth = 8) {
+static int g_search_max_depth = 12;
+
+ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targetName, int maxDepth = 12) {
     ObjectPathFindingResult result;
     result.found = false;
     result.targetKeyword = targetName;
@@ -3030,7 +3032,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     std::string target_lower = target_raw;
     std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
 
-    // 数字与数值解析 (支持 10进制如 "50"、16进制如 "0x5c"、浮点如 "1.5")
+    // 数值解析 (支持 10进制、16进制、浮点)
     bool hasTargetInt = false;
     int64_t targetIntVal = 0;
     try {
@@ -3092,9 +3094,9 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     visited.insert(rootObj);
 
     int nodesProcessed = 0;
-    const int maxNodes = 4000;
+    const int maxNodes = 16000;
 
-    while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 40) {
+    while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 60) {
         QueueItem item = queue.front();
         queue.pop_front();
         nodesProcessed++;
@@ -3104,6 +3106,83 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         void* klass_ptr = nullptr;
         if (!SafeReadMemory(item.obj, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) continue;
 
+        // 1. 数组类型解包 (Array / T[])
+        bool isArray = (item.className.find("[]") != std::string::npos || item.className.find("Array") != std::string::npos);
+        if (isArray) {
+            int arr_len = SAFE_READ_INT(item.obj, 0x18);
+            if (arr_len > 0 && arr_len <= 300) {
+                for (int i = 0; i < arr_len && i < 64; i++) {
+                    size_t elem_off = 0x20 + i * sizeof(uintptr_t);
+                    uintptr_t elem_ptr = 0;
+                    SafeReadMemory(item.obj + elem_off, &elem_ptr, sizeof(uintptr_t));
+                    int32_t elem_val32 = 0;
+                    SafeReadMemory(item.obj + elem_off, &elem_val32, sizeof(int32_t));
+
+                    std::string idx_name = "[" + std::to_string(i) + "]";
+                    bool intMatch = hasTargetInt && (elem_val32 == targetIntVal || (int64_t)elem_ptr == targetIntVal);
+
+                    if (IsValidPtr(elem_ptr)) {
+                        std::string elemClass = GetObjClassName(elem_ptr);
+                        std::string elem_clean = CleanIl2CppTypeName(elemClass);
+                        std::string elem_lower = elemClass;
+                        std::transform(elem_lower.begin(), elem_lower.end(), elem_lower.begin(), ::tolower);
+
+                        bool classMatch = (!elem_lower.empty() && elem_lower.find(target_lower) != std::string::npos);
+
+                        char fbuf[64]; snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", elem_ptr, elem_clean.c_str());
+                        std::vector<ObjectPathStep> nextPath = item.path;
+                        nextPath.push_back({ item.obj, item.className, idx_name, elemClass, elem_clean, elem_off, elem_ptr, elemClass.empty() ? elem_clean : elemClass, false, elem_ptr, fbuf });
+
+                        if (classMatch || intMatch) {
+                            std::string sig = "";
+                            for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
+                            if (recordedPaths.find(sig) == recordedPaths.end()) {
+                                recordedPaths.insert(sig);
+                                FoundPath fp;
+                                if (intMatch) fp.matchDesc = (const char*)u8"[数组数值命中: " + target_raw + "] " + idx_name;
+                                else fp.matchDesc = (const char*)u8"[数组元素匹配] " + idx_name + " (" + elem_clean + ")";
+                                fp.targetInstance = elem_ptr;
+                                fp.steps = nextPath;
+                                fp.fieldName = idx_name;
+                                fp.cleanType = elem_clean;
+                                fp.offset = elem_off;
+                                fp.fieldAddress = item.obj + elem_off;
+                                fp.formattedVal = fbuf;
+                                fp.intVal = elem_val32;
+                                fp.isIntField = false;
+                                result.paths.push_back(fp);
+                                result.found = true;
+                            }
+                        }
+
+                        if (!elemClass.empty() && visited.find(elem_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
+                            visited.insert(elem_ptr);
+                            queue.push_back({ elem_ptr, elemClass, nextPath, item.depth + 1 });
+                        }
+                    } else if (intMatch) {
+                        char fbuf[32]; snprintf(fbuf, sizeof(fbuf), "%d", elem_val32);
+                        std::vector<ObjectPathStep> nextPath = item.path;
+                        nextPath.push_back({ item.obj, item.className, idx_name, "Int32", "Int32", elem_off, item.obj + elem_off, "Int32", true, (uintptr_t)elem_val32, fbuf });
+
+                        FoundPath fp;
+                        fp.matchDesc = (const char*)u8"[数组数值命中: " + target_raw + "] " + idx_name;
+                        fp.targetInstance = item.obj + elem_off;
+                        fp.steps = nextPath;
+                        fp.fieldName = idx_name;
+                        fp.cleanType = "Int32";
+                        fp.offset = elem_off;
+                        fp.fieldAddress = item.obj + elem_off;
+                        fp.formattedVal = fbuf;
+                        fp.intVal = elem_val32;
+                        fp.isIntField = true;
+                        result.paths.push_back(fp);
+                        result.found = true;
+                    }
+                }
+            }
+        }
+
+        // 2. 标准类字段遍历与反射 (Reflection Fields)
         if (g_il2cpp_api.class_get_fields) {
             void* iter = nullptr;
             while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
@@ -3170,7 +3249,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     }
                 }
 
-                // 全面模糊匹配判断 (符合输入的任何内容均可命中)
+                // 全面模糊匹配判断
                 bool fieldMatch = (!field_lower.empty() && field_lower.find(target_lower) != std::string::npos);
                 bool typeMatch = (!type_lower.empty() && type_lower.find(target_lower) != std::string::npos) ||
                                  (!clean_type_lower.empty() && clean_type_lower.find(target_lower) != std::string::npos);
@@ -4882,21 +4961,30 @@ void DrawSymbolResolverUI() {
     float avail_x = ImGui::GetContentRegionAvail().x;
     float btn_w = 60.0f * g_autoScale;
 
-    // 字体大小调节 [ - ]  0.80x  [ + ]  [重置 0.8x]
+    // 字体大小调节 & 深度控制
     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"字体大小:");
     ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"  -  ", ImVec2(40.0f * g_autoScale, 0))) {
+    if (ImGui::Button((const char*)u8" - ##font", ImVec2(35.0f * g_autoScale, 0))) {
         g_custom_font_scale = std::max(0.40f, g_custom_font_scale - 0.05f);
     }
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), " %.2fx ", g_custom_font_scale);
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%.2fx", g_custom_font_scale);
     ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"  +  ", ImVec2(40.0f * g_autoScale, 0))) {
+    if (ImGui::Button((const char*)u8" + ##font", ImVec2(35.0f * g_autoScale, 0))) {
         g_custom_font_scale = std::min(2.00f, g_custom_font_scale + 0.05f);
     }
+
+    ImGui::SameLine(avail_x - 180.0f * g_autoScale);
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"深度:");
     ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"[重置 0.8x]", ImVec2(80.0f * g_autoScale, 0))) {
-        g_custom_font_scale = 0.80f;
+    if (ImGui::Button((const char*)u8" - ##depth", ImVec2(30.0f * g_autoScale, 0))) {
+        g_search_max_depth = std::max(4, g_search_max_depth - 1);
+    }
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "%d层", g_search_max_depth);
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8" + ##depth", ImVec2(30.0f * g_autoScale, 0))) {
+        g_search_max_depth = std::min(20, g_search_max_depth + 1);
     }
 
     ImGui::Spacing();
@@ -4916,8 +5004,8 @@ void DrawSymbolResolverUI() {
 
     ImGui::Spacing();
 
-    // 2. 寻址终点 (类名/字段名/数值/金币/字符串等一切内容)
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名或字段名):");
+    // 2. 寻址终点 (类名/字段名/数值/金币/字典/列表/字符串等一切内容)
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名/字段名/金币数值/列表字典):");
     ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
     ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
     ImGui::SameLine(); 
@@ -4930,7 +5018,7 @@ void DrawSymbolResolverUI() {
     ImGui::Spacing();
     
     // 3. 开始全量自动寻址按钮
-    if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配与字段)", ImVec2(avail_x, 38 * g_autoScale))) {
+    if (ImGui::Button((const char*)u8"> 开始全量深度寻址！(穿透列表/字典/数组输出全字段)", ImVec2(avail_x, 38 * g_autoScale))) {
         uintptr_t rootObj = g_dbg_addr1;
         if (strlen(g_root_class_input) > 0) {
             if (strncmp(g_root_class_input, "0x", 2) == 0 || strncmp(g_root_class_input, "0X", 2) == 0) {
@@ -4952,7 +5040,7 @@ void DrawSymbolResolverUI() {
             }
         }
         if (rootObj != 0) {
-            g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8);
+            g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, g_search_max_depth);
         } else {
             g_lastPathResult.found = false;
             g_lastPathResult.paths.clear();
@@ -4982,8 +5070,8 @@ void DrawSymbolResolverUI() {
     }
 
     if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"未在当前内存搜索深度(8)内找到目标: %s", g_class_search_input);
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"未在当前内存搜索深度(%d)内找到目标: %s", g_search_max_depth, g_class_search_input);
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"建议适当调大顶部【深度】或确认对象已在游戏中实例化生成。");
     }
 
     // 4. 路径输出：每一条路径下面都完整输出包含所有层级读到的三列表格 (字段/属性 | 值 | 类型)
