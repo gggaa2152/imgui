@@ -3022,22 +3022,31 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
 
     if (!IsValidPtr(rootObj) || targetName.empty() || !g_il2cpp_api.init()) return result;
 
-    std::string target_lower = targetName;
+    std::string target_raw = targetName;
+    while (!target_raw.empty() && isspace((unsigned char)target_raw.front())) target_raw.erase(target_raw.begin());
+    while (!target_raw.empty() && isspace((unsigned char)target_raw.back())) target_raw.pop_back();
+    if (target_raw.empty()) return result;
+
+    std::string target_lower = target_raw;
     std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
 
-    // 自动检测是否为金币数值/数字查询 (如 "50")
-    bool isTargetNumber = false;
-    int targetNum = 0;
+    // 数字与数值解析 (支持 10进制如 "50"、16进制如 "0x5c"、浮点如 "1.5")
+    bool hasTargetInt = false;
+    int64_t targetIntVal = 0;
     try {
-        if (!targetName.empty()) {
-            size_t idx = 0;
-            long val = std::stol(targetName, &idx, 0);
-            if (idx == targetName.length()) {
-                isTargetNumber = true;
-                targetNum = (int)val;
-            }
-        }
+        size_t idx = 0;
+        targetIntVal = (int64_t)std::stoll(target_raw, &idx, 0);
+        if (idx == target_raw.length()) hasTargetInt = true;
     } catch (...) {}
+
+    bool hasTargetHexPtr = false;
+    uintptr_t targetHexPtr = 0;
+    if (target_lower.find("0x") == 0) {
+        try {
+            targetHexPtr = (uintptr_t)std::stoull(target_raw, nullptr, 16);
+            hasTargetHexPtr = true;
+        } catch (...) {}
+    }
 
     struct QueueItem {
         uintptr_t obj;
@@ -3064,7 +3073,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
 
     std::string root_lower = rootClass;
     std::transform(root_lower.begin(), root_lower.end(), root_lower.begin(), ::tolower);
-    if (!isTargetNumber && root_lower.find(target_lower) != std::string::npos) {
+    if (root_lower.find(target_lower) != std::string::npos) {
         FoundPath fp;
         fp.matchDesc = (const char*)u8"[起点类名匹配] " + rootClass;
         fp.targetInstance = rootObj;
@@ -3083,9 +3092,9 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     visited.insert(rootObj);
 
     int nodesProcessed = 0;
-    const int maxNodes = 3500;
+    const int maxNodes = 4000;
 
-    while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 30) {
+    while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 40) {
         QueueItem item = queue.front();
         queue.pop_front();
         nodesProcessed++;
@@ -3113,28 +3122,34 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                 std::string field_lower = field_str;
                 std::transform(field_lower.begin(), field_lower.end(), field_lower.begin(), ::tolower);
 
-                std::string type_lower = clean_type;
+                std::string type_lower = type_str;
                 std::transform(type_lower.begin(), type_lower.end(), type_lower.begin(), ::tolower);
+
+                std::string clean_type_lower = clean_type;
+                std::transform(clean_type_lower.begin(), clean_type_lower.end(), clean_type_lower.begin(), ::tolower);
 
                 // 安全读取内存与格式化字段值
                 uintptr_t rawVal = 0;
                 SafeReadMemory(item.obj + f_offset, &rawVal, sizeof(uintptr_t));
                 int32_t val32 = 0;
                 SafeReadMemory(item.obj + f_offset, &val32, sizeof(int32_t));
+                int64_t val64 = 0;
+                SafeReadMemory(item.obj + f_offset, &val64, sizeof(int64_t));
 
                 std::string formattedVal = "";
+                std::string str_content = "";
                 bool isIntField = false;
 
                 if (clean_type == "String" || type_str.find("String") != std::string::npos) {
                     if (IsValidPtr(rawVal)) {
-                        std::string s = ReadIl2CppString(rawVal);
-                        formattedVal = s.empty() ? (const char*)u8"空字段" : ("\"" + s + "\"");
+                        str_content = ReadIl2CppString(rawVal);
+                        formattedVal = str_content.empty() ? (const char*)u8"空字段" : ("\"" + str_content + "\"");
                     } else {
                         formattedVal = (const char*)u8"空字段";
                     }
                 } else if (clean_type == "Boolean") {
                     formattedVal = (rawVal & 0xFF) ? "true" : "false";
-                } else if (clean_type == "Int32") {
+                } else if (clean_type == "Int32" || clean_type == "UInt32") {
                     isIntField = true;
                     char buf[32]; snprintf(buf, sizeof(buf), "%d", val32);
                     formattedVal = buf;
@@ -3155,10 +3170,17 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     }
                 }
 
-                // 匹配判断 (支持类名匹配、字段名匹配、类型匹配、数值/金币匹配)
-                bool fieldMatch = (!isTargetNumber && !field_lower.empty() && field_lower.find(target_lower) != std::string::npos);
-                bool typeMatch = (!isTargetNumber && !type_lower.empty() && type_lower.find(target_lower) != std::string::npos);
-                bool valueMatch = (isTargetNumber && (val32 == targetNum || (int64_t)rawVal == targetNum));
+                // 全面模糊匹配判断 (符合输入的任何内容均可命中)
+                bool fieldMatch = (!field_lower.empty() && field_lower.find(target_lower) != std::string::npos);
+                bool typeMatch = (!type_lower.empty() && type_lower.find(target_lower) != std::string::npos) ||
+                                 (!clean_type_lower.empty() && clean_type_lower.find(target_lower) != std::string::npos);
+                bool stringValMatch = (!str_content.empty() && str_content.find(target_raw) != std::string::npos);
+                bool intValMatch = hasTargetInt && (val32 == targetIntVal || val64 == targetIntVal || (int64_t)rawVal == targetIntVal);
+                bool offsetMatch = hasTargetInt && (f_offset == (size_t)targetIntVal);
+                bool ptrMatch = hasTargetHexPtr && (rawVal == targetHexPtr || (item.obj + f_offset) == targetHexPtr);
+                bool boolMatch = (target_lower == "true" && (rawVal & 0xFF) != 0) || (target_lower == "false" && (rawVal & 0xFF) == 0 && clean_type == "Boolean");
+                
+                bool isAnyMatch = fieldMatch || typeMatch || stringValMatch || intValMatch || offsetMatch || ptrMatch || boolMatch;
 
                 uintptr_t child_ptr = 0;
                 bool isObjectRef = (IsValidPtr(item.obj + f_offset) && SafeReadMemory(item.obj + f_offset, &child_ptr, sizeof(uintptr_t)) && IsValidPtr(child_ptr));
@@ -3168,21 +3190,24 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     std::string child_lower = childClass;
                     std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
 
-                    bool classMatch = (!isTargetNumber && !child_lower.empty() && child_lower.find(target_lower) != std::string::npos);
+                    bool classMatch = (!child_lower.empty() && child_lower.find(target_lower) != std::string::npos);
+                    if (classMatch) isAnyMatch = true;
 
                     std::vector<ObjectPathStep> nextPath = item.path;
                     nextPath.push_back({ item.obj, item.className, field_str, type_str, clean_type, f_offset, child_ptr, childClass.empty() ? clean_type : childClass, false, rawVal, formattedVal });
 
-                    if (classMatch || fieldMatch || typeMatch || valueMatch) {
+                    if (isAnyMatch) {
                         std::string sig = "";
                         for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
                         if (recordedPaths.find(sig) == recordedPaths.end()) {
                             recordedPaths.insert(sig);
                             FoundPath fp;
-                            if (valueMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + targetName + "] " + field_str;
+                            if (intValMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + target_raw + "] " + field_str;
                             else if (classMatch) fp.matchDesc = (const char*)u8"[类名匹配] " + (childClass.empty() ? clean_type : childClass);
                             else if (fieldMatch) fp.matchDesc = (const char*)u8"[字段匹配] " + field_str + " (" + clean_type + ")";
-                            else fp.matchDesc = (const char*)u8"[类型匹配] " + clean_type;
+                            else if (typeMatch) fp.matchDesc = (const char*)u8"[类型匹配] " + clean_type;
+                            else if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值匹配: \"" + str_content + "\"]";
+                            else fp.matchDesc = (const char*)u8"[匹配成功] " + field_str;
 
                             fp.targetInstance = child_ptr;
                             fp.steps = nextPath;
@@ -3204,7 +3229,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                         queue.push_back({ child_ptr, childClass, nextPath, item.depth + 1 });
                     }
                 } else {
-                    if (fieldMatch || typeMatch || valueMatch) {
+                    if (isAnyMatch) {
                         std::vector<ObjectPathStep> nextPath = item.path;
                         nextPath.push_back({ item.obj, item.className, field_str, type_str, clean_type, f_offset, item.obj + f_offset, clean_type.empty() ? "(值字段)" : clean_type, true, rawVal, formattedVal });
 
@@ -3213,9 +3238,11 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                         if (recordedPaths.find(sig) == recordedPaths.end()) {
                             recordedPaths.insert(sig);
                             FoundPath fp;
-                            if (valueMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + targetName + "] " + field_str;
+                            if (intValMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + target_raw + "] " + field_str;
                             else if (fieldMatch) fp.matchDesc = (const char*)u8"[字段属性] " + field_str + " (" + (clean_type.empty() ? "value" : clean_type) + ")";
-                            else fp.matchDesc = (const char*)u8"[类型匹配] " + clean_type;
+                            else if (typeMatch) fp.matchDesc = (const char*)u8"[类型匹配] " + clean_type;
+                            else if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值匹配: \"" + str_content + "\"]";
+                            else fp.matchDesc = (const char*)u8"[匹配成功] " + field_str;
 
                             fp.targetInstance = item.obj + f_offset;
                             fp.steps = nextPath;
@@ -4320,7 +4347,7 @@ void DrawSymbolResolverUI() {
     ImGui::Spacing();
 
     // 1. 寻址起点
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点 (单例类名或内存地址):");
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
     ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
     ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); 
     ImGui::SameLine(); 
@@ -4330,26 +4357,10 @@ void DrawSymbolResolverUI() {
         g_show_vkbd = true; 
     }
 
-    // 起点快捷选择
-    if (ImGui::Button((const char*)u8"ChessModelManager")) {
-        snprintf(g_root_class_input, sizeof(g_root_class_input), "ChessModelManager");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"CSOGame")) {
-        snprintf(g_root_class_input, sizeof(g_root_class_input), "CSOGame");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"我的玩家实例")) {
-        uintptr_t my_ptr = 0;
-        for (const auto& pi : g_players) { if (pi.id == g_my_player_id && IsValidPtr(pi.val_ptr)) { my_ptr = pi.val_ptr; break; } }
-        if (my_ptr == 0 && !g_dbg_player_addrs.empty()) my_ptr = g_dbg_player_addrs[0];
-        if (IsValidPtr(my_ptr)) snprintf(g_root_class_input, sizeof(g_root_class_input), "0x%lx", my_ptr);
-    }
-
     ImGui::Spacing();
 
-    // 2. 寻址终点 (类名/字段名/金币数值)
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点 (输入字段名、类名或当前金币数值):");
+    // 2. 寻址终点 (类名/字段名/数值/金币/字符串等一切内容)
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名或字段名):");
     ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
     ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
     ImGui::SameLine(); 
@@ -4359,27 +4370,10 @@ void DrawSymbolResolverUI() {
         g_show_vkbd = true; 
     }
 
-    // 终点常用快捷选择 (包含金币数值 50、money、_chessElementModel 等)
-    if (ImGui::Button((const char*)u8"金币数值: 50")) {
-        snprintf(g_class_search_input, sizeof(g_class_search_input), "50");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"money")) {
-        snprintf(g_class_search_input, sizeof(g_class_search_input), "money");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"_chessElementModel")) {
-        snprintf(g_class_search_input, sizeof(g_class_search_input), "_chessElementModel");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"PlayerInfo")) {
-        snprintf(g_class_search_input, sizeof(g_class_search_input), "PlayerInfo");
-    }
-
     ImGui::Spacing();
     
     // 3. 开始全量自动寻址按钮
-    if (ImGui::Button((const char*)u8"> 开始单例全量链路寻址！(自动输出匹配字段行与类型)", ImVec2(avail_x, 38 * g_autoScale))) {
+    if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配与字段)", ImVec2(avail_x, 38 * g_autoScale))) {
         uintptr_t rootObj = g_dbg_addr1;
         if (strlen(g_root_class_input) > 0) {
             if (strncmp(g_root_class_input, "0x", 2) == 0 || strncmp(g_root_class_input, "0X", 2) == 0) {
@@ -4390,6 +4384,10 @@ void DrawSymbolResolverUI() {
                     rootObj = singletonObj;
                     g_dbg_addr1 = singletonObj;
                     AddActionLog((const char*)u8"-> [单例解析] 成功获取 %s 单例实例: 0x%lx", g_root_class_input, singletonObj);
+                } else if (strcmp(g_root_class_input, "CSOGame") == 0 && IsValidPtr(g_dbg_segmentcsogame)) {
+                    rootObj = g_dbg_segmentcsogame;
+                } else if (strcmp(g_root_class_input, "ChessModelManager") == 0 && IsValidPtr(g_dbg_addr1)) {
+                    rootObj = g_dbg_addr1;
                 } else {
                     rootObj = 0;
                     AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例", g_root_class_input);
@@ -4411,13 +4409,15 @@ void DrawSymbolResolverUI() {
         if (strncmp(g_root_class_input, "0x", 2) == 0 || strncmp(g_root_class_input, "0X", 2) == 0) {
             uintptr_t cptr = strtoull(g_root_class_input, nullptr, 16);
             if (IsValidPtr(cptr)) {
-                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪 - 内存地址] 0x%lx", cptr);
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪 - 内存指针] 0x%lx", cptr);
             } else {
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[起点异常] 内存地址 0x%lx 不可读", cptr);
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[起点异常] 内存指针 0x%lx 不可读", cptr);
             }
         } else {
             if (g_dbg_addr1 != 0 && GetSingletonInstance(g_root_class_input) != 0) {
-                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪 - 单例] %s = 0x%lx", g_root_class_input, GetSingletonInstance(g_root_class_input));
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪] %s = 0x%lx", g_root_class_input, GetSingletonInstance(g_root_class_input));
+            } else if (strcmp(g_root_class_input, "CSOGame") == 0 && IsValidPtr(g_dbg_segmentcsogame)) {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪 - CSOGame] = 0x%lx", g_dbg_segmentcsogame);
             } else {
                 ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[起点异常] 无法获取 %s 单例，请检查拼写或等待游戏加载完成。", g_root_class_input);
             }
@@ -4429,10 +4429,10 @@ void DrawSymbolResolverUI() {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
     }
 
-    // 4. 仅输出命中的那个字段行 (3 列布局：字段/属性 | 值 | 类型)
+    // 4. 路径输出：每一条路径下面都带有一个对应的三列表格 (字段/属性 | 值 | 类型)
     if (g_lastPathResult.found) {
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 共定位出 %zu 条匹配路径与目标字段：", g_lastPathResult.paths.size());
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 共扫描出 %zu 条关联路径与字段：", g_lastPathResult.paths.size());
         
         for (size_t p = 0; p < g_lastPathResult.paths.size(); p++) {
             const auto& fp = g_lastPathResult.paths[p];
@@ -4454,7 +4454,7 @@ void DrawSymbolResolverUI() {
                     ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
                 }
 
-                std::string off_summary = (const char*)u8"[提取] 偏移链: 起点";
+                std::string off_summary = (const char*)u8"[提取] 偏移链: 起点单例";
                 for (const auto& st : fp.steps) {
                     char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
                     off_summary += obuf;
@@ -4465,12 +4465,12 @@ void DrawSymbolResolverUI() {
             
             ImGui::Spacing();
 
-            // ★ 核心展示：类似图片样式，只输出命中的那一行字段 (3 列：字段/属性 | 值 | 类型)
-            float col0_w = (avail_x - 16.0f * g_autoScale) * 0.40f;
-            float col1_w = (avail_x - 16.0f * g_autoScale) * 0.38f;
-            float col2_w = (avail_x - 16.0f * g_autoScale) * 0.22f;
+            // ★ 路径输出的每一条下面都带有一个对应的三列表格 (字段/属性 | 值 | 类型)
+            float col0_w = (avail_x - 20.0f * g_autoScale) * 0.40f;
+            float col1_w = (avail_x - 20.0f * g_autoScale) * 0.38f;
+            float col2_w = (avail_x - 20.0f * g_autoScale) * 0.22f;
 
-            char table_id[32]; snprintf(table_id, sizeof(table_id), "FieldRowCols_%zu", p);
+            char table_id[32]; snprintf(table_id, sizeof(table_id), "PathFieldCols_%zu", p);
             ImGui::Columns(3, table_id, true);
             ImGui::SetColumnWidth(0, col0_w);
             ImGui::SetColumnWidth(1, col1_w);
@@ -4491,11 +4491,11 @@ void DrawSymbolResolverUI() {
             ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "[+0x%lx]", fp.offset);
             ImGui::NextColumn();
 
-            // 列 2: 值与快捷设置按钮
+            // 列 2: 值
             ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", fp.formattedVal.c_str());
             if (fp.isIntField) {
                 ImGui::SameLine();
-                char btn_apply_id[64]; snprintf(btn_apply_id, sizeof(btn_apply_id), (const char*)u8"★ 设为 pi_money##%zu", p);
+                char btn_apply_id[64]; snprintf(btn_apply_id, sizeof(btn_apply_id), (const char*)u8"★ 设为 pi_money##p%zu", p);
                 if (ImGui::Button(btn_apply_id)) {
                     g_off.pi_money = fp.offset;
                     SaveConfig();
