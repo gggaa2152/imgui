@@ -1876,9 +1876,11 @@ ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size
 
 void UpdateFontHD(bool force = false) {
     ImGuiIO& io = ImGui::GetIO();
-    float screenH = (io.DisplaySize.y > 100.0f) ? io.DisplaySize.y : 2400.0f;
-    g_autoScale = screenH / 1080.0f;
-    float targetSize = std::clamp(22.0f * g_autoScale, 18.0f, 48.0f);
+    // 采用屏幕短边 (std::min(w, h)) 计算基准缩放，彻底消除横竖屏切换与启动阶段闪屏导致的超大菜单 Bug！
+    float short_edge = (g_gl_width > 0 && g_gl_height > 0) ? std::min((float)g_gl_width, (float)g_gl_height) : ((io.DisplaySize.x > 0 && io.DisplaySize.y > 0) ? std::min(io.DisplaySize.x, io.DisplaySize.y) : 1080.0f);
+    if (short_edge < 300.0f) short_edge = 1080.0f;
+    g_autoScale = short_edge / 1080.0f;
+    float targetSize = std::clamp(22.0f * g_autoScale, 18.0f, 32.0f);
     if (!force && std::abs(targetSize - g_current_rendered_size) < 2.0f && g_mainFont != nullptr) return;
 
     ImGui_ImplOpenGL3_DestroyDeviceObjects();
@@ -6292,7 +6294,17 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
     eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
-    if (g_gl_width <= 0 || g_gl_height <= 0) { g_gl_width = 1080; g_gl_height = 2400; }
+    if (g_gl_width <= 0 || g_gl_height <= 0) { g_gl_width = 2400; g_gl_height = 1080; }
+
+    static int s_last_screen_w = 0, s_last_screen_h = 0;
+    if (s_last_screen_w != g_gl_width || s_last_screen_h != g_gl_height) {
+        s_last_screen_w = g_gl_width;
+        s_last_screen_h = g_gl_height;
+        float short_edge = std::min((float)g_gl_width, (float)g_gl_height);
+        if (short_edge < 300.0f) short_edge = 1080.0f;
+        g_autoScale = short_edge / 1080.0f;
+        g_needUpdateFontSafe = true;
+    }
 
     if (g_current_frame % 120 == 0) {
         LOGI("[*] GLES Render Heartbeat | Frame: %d | Resolution: %dx%d", g_current_frame, g_gl_width, g_gl_height);
