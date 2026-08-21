@@ -2939,6 +2939,20 @@ static std::string SafeReadCString(const char* ptr, size_t maxLen = 128) {
     return std::string(buf);
 }
 
+// 去掉字符串前导的非标识符垃圾(元数据字符串堆奇数偏移残留的 '?' 等),
+// 提取从第一个字母/下划线开始的干净标识符段, 让读取到的类名/字段名干净显示.
+// 例如 "?BattleModel" -> "BattleModel", "?_t" -> "_t". 整串无标识符字符时返回空串.
+static std::string StripLeadingGarbage(const std::string& s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        bool ok = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_');
+        if (ok) break;
+        i++;
+    }
+    return (i < s.size()) ? s.substr(i) : "";
+}
+
 static bool IsValidIl2CppClass(void* klass) {
     if (!klass || !IsValidPtr((uintptr_t)klass)) return false;
     if (((uintptr_t)klass & 0x7) != 0) return false;
@@ -2956,23 +2970,21 @@ static bool IsValidIl2CppClass(void* klass) {
         uintptr_t probe = 0;
         if (!SafeReadMemory((uintptr_t)klass, &probe, sizeof(probe))) return false;
         const char* c_name = g_il2cpp_api.class_get_name(klass);
-        std::string nm = SafeReadCString(c_name, 128);
-        // 类名识别启发式: 允许最多 2 个前导非可打印字节(因元数据字符串堆的奇数偏移导致),
-        // 但可打印 ASCII 核心必须 ≥ 4 且全程可打印. 这样 ?BattleModel(1 前导+10 核心)放行,
-        // ?_t(核心 2 字符)仍被拒, 兼顾字段名识别与防真垃圾缓存.
+        std::string nm = SafeReadCString(c_name, 256);
+        // 类名识别启发式(放宽版): 只要串中存在 >= 4 个连续可打印 ASCII 字符的核心段即视为有效类名.
+        // 这能覆盖元数据字符串堆奇数偏移导致的前导垃圾(?, ???, ??? 等)以及更长的泛型/数组类名
+        // (如 List`1<HeroModel>, HeroModel[]), 同时仍能拒绝全程不可打印的纯垃圾(0x00/0xAB/0xCD 之类)
+        // 与过短的 ?_t(无 >= 4 连续可打印核心)等疑似野指针残留, 避免它们被当类缓存后下钻闪退.
         bool printable = false;
-        if (!nm.empty() && nm.size() <= 128) {
-            size_t lead = 0;
-            while (lead < nm.size()) {
-                unsigned char uc = (unsigned char)nm[lead];
-                if (uc >= 0x20 && uc < 0x7F) break;
-                lead++;
-            }
-            if (lead <= 2 && (nm.size() - lead) >= 4) {
-                printable = true;
-                for (size_t i = lead; i < nm.size(); i++) {
-                    unsigned char uc = (unsigned char)nm[i];
-                    if (uc < 0x20 || uc >= 0x7F) { printable = false; break; }
+        if (!nm.empty()) {
+            size_t run = 0;
+            for (size_t i = 0; i < nm.size(); i++) {
+                unsigned char uc = (unsigned char)nm[i];
+                if (uc >= 0x20 && uc < 0x7F) {
+                    run++;
+                    if (run >= 4) { printable = true; break; }
+                } else {
+                    run = 0;
                 }
             }
         }
@@ -5006,7 +5018,10 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         std::string s_name = SafeReadCString(c_name);
         std::string s_ns = SafeReadCString(c_ns);
         if (!s_name.empty()) {
-            fullClassName = (!s_ns.empty()) ? (s_ns + "." + s_name) : s_name;
+            std::string clean_name = StripLeadingGarbage(s_name);
+            std::string clean_ns = StripLeadingGarbage(s_ns);
+            if (clean_name.empty()) clean_name = s_name;
+            fullClassName = (!clean_ns.empty()) ? (clean_ns + "." + clean_name) : clean_name;
             g_inspect_breadcrumbs.back().className = fullClassName;
         }
     }
@@ -5081,6 +5096,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     // ==========================================
     // B. 原生 IL2CPP 字段反射 (实时每帧从物理内存读取最新动态值，受深度保护)
     // ==========================================
+    int bRealFieldCount = 0;
     if (klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
         int p_depth = 0;
         for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && p_depth < 20; p_depth++, cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
@@ -5105,6 +5121,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
 
                 std::string field_str = SafeReadCString(f_name);
                 std::string type_str = SafeReadCString(t_name);
+                // 去掉元数据奇数偏移导致的前导垃圾(?, ??? 等), 让字段名干净显示(如 ?_t -> _t).
+                field_str = StripLeadingGarbage(field_str);
                 std::string clean_type = CleanIl2CppTypeName(type_str);
 
                 // 名字兜底: 即便字段名因元数据布局等原因读不出, 也用偏移占位, 保证该字段仍被显示.
@@ -5223,6 +5241,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                     }
                 }
 
+                bRealFieldCount++;
                 fieldRows.push_back({ f_offset, display_name, type_str, clean_type, isBaseClass ? base_cls_str : "", isBaseClass, isBacking, rawVal, val32, val64, liveVal, isInt, isObjPtr, isNull, childCls });
             }
         }
@@ -5300,7 +5319,14 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         std::unordered_set<size_t> existing_offsets;
         for (const auto& r : fieldRows) existing_offsets.insert(r.offset);
 
+        // 当 B 段已成功枚举出真实字段, 或当前对象为数组(元素已由 A 段呈现)时,
+        // 抑制 D 段对中间槽位的全量扫描, 只保留对象头(+0x00)与同步锁(+0x08)两个固定结构,
+        // 避免第二层下钻对象被一堆 "Slot_+0xNN" 淹没. 仅在 B 段完全没产出且非数组时,
+        // 才保留原始内存槽位探测作为兜底.
+        bool suppressMidSlots = (bRealFieldCount > 0 || isArray);
+
         for (size_t slot_off = 0x00; slot_off <= 0x300; slot_off += sizeof(uintptr_t)) {
+            if (suppressMidSlots && slot_off != 0x00 && slot_off != 0x08) continue;
             if (existing_offsets.find(slot_off) != existing_offsets.end()) continue;
             uintptr_t slot_ptr = 0;
             SafeReadMemory(currentObj + slot_off, &slot_ptr, sizeof(uintptr_t));
