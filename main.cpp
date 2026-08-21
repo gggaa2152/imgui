@@ -1831,7 +1831,7 @@ ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size
     cfg.OversampleV = 1;
     cfg.PixelSnapH = true;
     cfg.FontNo = fontNo;
-    ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+    ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseFull());
     if (f) {
         if (io.Fonts->Build() && FontHasChineseGlyphs(f)) {
             LOGI("[+] True Chinese Font Validated OK: %s (FontNo: %d)", path, fontNo);
@@ -1862,7 +1862,7 @@ void LoadEmbeddedChineseFont(ImGuiIO& io, float targetSize) {
     cfg.OversampleV = 1;
     cfg.PixelSnapH = true;
     cfg.FontDataOwnedByAtlas = false;
-    g_mainFont = io.Fonts->AddFontFromMemoryTTF(g_embedded_font_buffer.data(), g_embedded_font_buffer.size(), targetSize, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+    g_mainFont = io.Fonts->AddFontFromMemoryTTF(g_embedded_font_buffer.data(), g_embedded_font_buffer.size(), targetSize, &cfg, io.Fonts->GetGlyphRangesChineseFull());
 }
 
 void UpdateFontHD(bool force = false) {
