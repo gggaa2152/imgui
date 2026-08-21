@@ -1022,7 +1022,20 @@ bool InjectLibrary(pid_t pid, const char *library_path) {
     return ok;
 }
 
+static void AutoSetPermissiveSELinux() {
+    int fd = open("/sys/fs/selinux/enforce", O_WRONLY);
+    if (fd >= 0) {
+        write(fd, "0", 1);
+        close(fd);
+    }
+    system("setenforce 0 2>/dev/null");
+    system("su -c setenforce 0 2>/dev/null");
+    system("su 0 setenforce 0 2>/dev/null");
+    printf("[+] [SELinux] Auto setenforce 0 (Permissive mode) applied!\n");
+}
+
 int main(int argc, char *argv[]) {
+    AutoSetPermissiveSELinux();
     (void)argc;
     (void)argv;
     printf("======================================\n");

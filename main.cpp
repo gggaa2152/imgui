@@ -2946,15 +2946,15 @@ struct ObjectPathFindingResult {
 
 static ObjectPathFindingResult g_lastPathResult;
 
-ObjectPathFindingResult AutoFindPathToClass(uintptr_t rootObj, const std::string& targetClassName, int maxDepth = 6) {
+ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targetName, int maxDepth = 6) {
     ObjectPathFindingResult result;
     result.found = false;
-    result.targetClassName = targetClassName;
+    result.targetClassName = targetName;
     result.targetInstance = 0;
 
-    if (!IsValidPtr(rootObj) || targetClassName.empty() || !g_il2cpp_api.init()) return result;
+    if (!IsValidPtr(rootObj) || targetName.empty() || !g_il2cpp_api.init()) return result;
 
-    std::string target_lower = targetClassName;
+    std::string target_lower = targetName;
     std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
 
     struct QueueItem {
@@ -2981,7 +2981,7 @@ ObjectPathFindingResult AutoFindPathToClass(uintptr_t rootObj, const std::string
 
     std::string root_lower = rootClass;
     std::transform(root_lower.begin(), root_lower.end(), root_lower.begin(), ::tolower);
-    if (root_lower.find(target_lower) != std::string::npos || target_lower.find(root_lower) != std::string::npos) {
+    if (root_lower.find(target_lower) != std::string::npos) {
         result.found = true;
         result.targetInstance = rootObj;
         return result;
@@ -3012,12 +3012,15 @@ ObjectPathFindingResult AutoFindPathToClass(uintptr_t rootObj, const std::string
                         if (!childClass.empty()) {
                             std::string child_lower = childClass;
                             std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
+                            
+                            std::string field_lower = f_name ? f_name : "";
+                            std::transform(field_lower.begin(), field_lower.end(), field_lower.begin(), ::tolower);
 
                             std::vector<ObjectPathStep> nextPath = item.path;
                             nextPath.push_back({ item.obj, item.className, f_name ? f_name : "", f_offset, child_ptr, childClass });
 
-                            // 匹配目标类名
-                            if (child_lower.find(target_lower) != std::string::npos || target_lower.find(child_lower) != std::string::npos) {
+                            // 匹配目标类名或字段名
+                            if (child_lower.find(target_lower) != std::string::npos || (!field_lower.empty() && field_lower.find(target_lower) != std::string::npos)) {
                                 result.found = true;
                                 result.targetInstance = child_ptr;
                                 result.steps = nextPath;
