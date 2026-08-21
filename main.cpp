@@ -1477,16 +1477,43 @@ void DrawStatusHeader() {
     dl->AddCircleFilled(ImVec2(mn.x + 22.0f * sc, mn.y + h * 0.5f), 9.0f * sc, ImGui::GetColorU32(ImVec4(th.primary.x, th.primary.y, th.primary.z, 0.35f)));
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 1.05f, ImVec2(mn.x + 36.0f * sc, mn.y + (h - ImGui::GetFontSize() * 1.05f) * 0.5f),
         IM_COL32(255, 255, 255, 255), (const char*)u8"金铲铲助手 Frosted Studio");
+
+    // 1. 右侧状态徽章 (对局中 / 等待连接)
     bool online = g_is_in_match.load(std::memory_order_relaxed);
-    const char* stTxt = online ? (const char*)u8"对局中" : (const char*)u8"等待连接";
+    const char* stTxt = online ? (const char*)u8"● 对局中" : (const char*)u8"● 等待连接";
     ImVec2 stSz = ImGui::CalcTextSize(stTxt);
-    float badgeW = stSz.x + 28.0f * sc;
+    float badgeW = stSz.x + 20.0f * sc;
     ImVec2 bMin(mx.x - badgeW - 14.0f * sc, mn.y + (h - 26.0f * sc) * 0.5f);
     ImVec2 bMax(bMin.x + badgeW, bMin.y + 26.0f * sc);
-    dl->AddRectFilled(bMin, bMax, online ? IM_COL32(52, 211, 153, 30) : IM_COL32(248, 113, 113, 30), 13.0f * sc);
-    dl->AddRect(bMin, bMax, online ? IM_COL32(52, 211, 153, 90) : IM_COL32(248, 113, 113, 90), 13.0f * sc);
-    dl->AddCircleFilled(ImVec2(bMin.x + 12.0f * sc, (bMin.y + bMax.y) * 0.5f), 3.5f * sc, online ? IM_COL32(52, 211, 153, 255) : IM_COL32(248, 113, 113, 255));
-    dl->AddText(ImVec2(bMin.x + 20.0f * sc, bMin.y + (bMax.y - bMin.y - stSz.y) * 0.5f), online ? IM_COL32(110, 231, 183, 255) : IM_COL32(252, 165, 165, 255), stTxt);
+    ImU32 badgeBg = online ? IM_COL32(52, 211, 153, 30) : IM_COL32(248, 113, 113, 30);
+    ImU32 badgeBorder = online ? IM_COL32(52, 211, 153, 120) : IM_COL32(248, 113, 113, 120);
+    ImU32 badgeText = online ? IM_COL32(110, 231, 183, 255) : IM_COL32(252, 165, 165, 255);
+    dl->AddRectFilled(bMin, bMax, badgeBg, 13.0f * sc);
+    dl->AddRect(bMin, bMax, badgeBorder, 13.0f * sc, 0, 1.2f * sc);
+    dl->AddText(ImVec2(bMin.x + 10.0f * sc, bMin.y + (26.0f * sc - stSz.y) * 0.5f), badgeText, stTxt);
+
+    // 2. ★ 实时全量真实帧率徽章 (如 144.0 FPS / 120.0 FPS / 90.0 FPS 自适应高刷高亮)
+    char fpsBuf[48];
+    snprintf(fpsBuf, sizeof(fpsBuf), "%.1f FPS", g_realtime_fps);
+    ImVec2 fpsSz = ImGui::CalcTextSize(fpsBuf);
+    float fpsBadgeW = fpsSz.x + 20.0f * sc;
+    ImVec2 fpsMin(bMin.x - fpsBadgeW - 8.0f * sc, bMin.y);
+    ImVec2 fpsMax(fpsMin.x + fpsBadgeW, bMax.y);
+    
+    // 满血高刷 120Hz/144Hz 呈现高光霓虹青，60Hz 呈现翠绿，<50Hz 呈现暖黄
+    ImU32 fpsBg = (g_realtime_fps >= 115.0f) ? IM_COL32(6, 182, 212, 35) :
+                  (g_realtime_fps >= 55.0f)  ? IM_COL32(52, 211, 153, 30) :
+                                              IM_COL32(245, 158, 11, 30);
+    ImU32 fpsBorder = (g_realtime_fps >= 115.0f) ? IM_COL32(6, 182, 212, 140) :
+                      (g_realtime_fps >= 55.0f)  ? IM_COL32(52, 211, 153, 120) :
+                                                  IM_COL32(245, 158, 11, 120);
+    ImU32 fpsText = (g_realtime_fps >= 115.0f) ? IM_COL32(103, 232, 249, 255) :
+                    (g_realtime_fps >= 55.0f)  ? IM_COL32(110, 231, 183, 255) :
+                                                IM_COL32(253, 230, 138, 255);
+    dl->AddRectFilled(fpsMin, fpsMax, fpsBg, 13.0f * sc);
+    dl->AddRect(fpsMin, fpsMax, fpsBorder, 13.0f * sc, 0, 1.2f * sc);
+    dl->AddText(ImVec2(fpsMin.x + 10.0f * sc, fpsMin.y + (26.0f * sc - fpsSz.y) * 0.5f), fpsText, fpsBuf);
+
     ImGui::Dummy(ImVec2(w, h + 10.0f * g_autoScale));
 }
 
@@ -6268,7 +6295,21 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
-    io.DeltaTime = 1.0f / 60.0f;
+    static auto s_last_frame_time = std::chrono::high_resolution_clock::now();
+    auto now_time = std::chrono::high_resolution_clock::now();
+    float dt = std::chrono::duration<float>(now_time - s_last_frame_time).count();
+    s_last_frame_time = now_time;
+
+    if (dt > 0.0001f && dt < 0.5f) {
+        io.DeltaTime = dt;
+        float instant_fps = 1.0f / dt;
+        static float s_smooth_fps = 60.0f;
+        s_smooth_fps = s_smooth_fps * 0.90f + instant_fps * 0.10f;
+        g_realtime_fps = s_smooth_fps;
+        g_fps_frametime_ms = dt * 1000.0f;
+    } else {
+        io.DeltaTime = 1.0f / 60.0f;
+    }
 
     // 预留前 60 帧缓冲，等待游戏引擎完全加载 il2cpp 单例后再开始读取游戏数据，防止启动加载期空指针闪退
     if (g_current_frame > 60 && g_il2cppTrueBase != 0) {
@@ -6497,4 +6538,7 @@ __attribute__((constructor)) void Init() {
     pthread_t t; 
     pthread_create(&t, 0, SetupThread, 0); 
     pthread_detach(t); 
-}
+}static float g_realtime_fps = 60.0f;
+static float g_fps_frametime_ms = 16.6f;
+
+
