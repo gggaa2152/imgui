@@ -4656,6 +4656,11 @@ struct InspectorFieldRow {
 };
 
 void DrawObjectInspectorContent(float avail_x, float avail_y) {
+    if (!g_il2cpp_api.init()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[错误] IL2CPP API 尚未初始化，请等待游戏加载完成。");
+        return;
+    }
+
     float btn_w = 60.0f * g_autoScale;
 
     // 1. 起点快捷选择与手动输入
@@ -4667,6 +4672,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         if (IsValidPtr(ptr)) {
             g_inspect_breadcrumbs.clear();
             PushInspectObject("ChessModelManager", "ChessModelManager", ptr);
+        } else {
+            AddActionLog((const char*)u8"-> [提示] 未找到 ChessModelManager 单例");
         }
     }
     ImGui::SameLine();
@@ -4676,6 +4683,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         if (IsValidPtr(ptr)) {
             g_inspect_breadcrumbs.clear();
             PushInspectObject("CSOGame", "CSOGame", ptr);
+        } else {
+            AddActionLog((const char*)u8"-> [提示] 未找到 CSOGame 单例");
         }
     }
     ImGui::SameLine();
@@ -4686,6 +4695,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         if (IsValidPtr(my_ptr)) {
             g_inspect_breadcrumbs.clear();
             PushInspectObject("MyPlayer", "PlayerInfo", my_ptr);
+        } else {
+            AddActionLog((const char*)u8"-> [提示] 尚未捕获玩家指针");
         }
     }
 
@@ -4714,17 +4725,22 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // 默认如果未选择对象，自动初始化为 ChessModelManager
+    // 默认如果未选择对象，自动尝试挂载可用的单例实例
     if (g_inspect_breadcrumbs.empty()) {
         uintptr_t ptr = GetSingletonInstance("ChessModelManager");
         if (ptr == 0) ptr = g_dbg_addr1;
+        if (ptr == 0) ptr = GetSingletonInstance("CSOGame");
+        if (ptr == 0) ptr = g_dbg_segmentcsogame;
+        if (ptr == 0 && !g_players.empty()) ptr = g_players[0].val_ptr;
+        if (ptr == 0 && !g_dbg_player_addrs.empty()) ptr = g_dbg_player_addrs[0];
+
         if (IsValidPtr(ptr)) {
-            PushInspectObject("ChessModelManager", "ChessModelManager", ptr);
+            PushInspectObject("RootSingleton", "Singleton", ptr);
         }
     }
 
     if (g_inspect_breadcrumbs.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"请先在上方选择或输入一个有效的内存实例对象指针开始检查。");
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), (const char*)u8"当前尚未选择对象。请点击上方的【ChessModelManager】、【CSOGame】或输入内存指针。");
         return;
     }
 
@@ -4786,23 +4802,20 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     // 4. 当前对象全量字段表格解析 (Full Fields Dump & Live Value Inspector)
     uintptr_t currentObj = g_inspect_breadcrumbs.back().objectAddress;
     if (!IsValidPtr(currentObj)) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[错误] 当前对象内存指针已失效: 0x%lx", currentObj);
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[错误] 当前对象内存指针无效: 0x%lx", currentObj);
         return;
     }
 
     void* klass_ptr = nullptr;
-    if (!SafeReadMemory(currentObj, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[错误] 无法获取 0x%lx 的 Il2CppClass 类型信息", currentObj);
-        return;
+    SafeReadMemory(currentObj, &klass_ptr, sizeof(void*));
+
+    std::string fullClassName = g_inspect_breadcrumbs.back().className;
+    if (IsValidIl2CppClass(klass_ptr)) {
+        const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
+        const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
+        fullClassName = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : (c_name ? std::string(c_name) : fullClassName);
+        g_inspect_breadcrumbs.back().className = fullClassName;
     }
-
-    const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
-    const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
-    std::string fullClassName = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
-    g_inspect_breadcrumbs.back().className = fullClassName;
-
-    // 显示当前对象字段名或类名标题
-    ImGui::TextColored(ImVec4(0.9f, 0.95f, 1.0f, 1.0f), "%s (0x%lx)", g_inspect_breadcrumbs.back().displayName.c_str(), currentObj);
 
     std::string filter_lower = g_inspector_filter;
     std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
@@ -4840,7 +4853,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
 
                 if (IsValidPtr(elem_ptr)) {
                     void* c_klass = nullptr;
-                    if (SafeReadMemory(elem_ptr, &c_klass, sizeof(void*)) && IsValidIl2CppClass(c_klass)) {
+                    SafeReadMemory(elem_ptr, &c_klass, sizeof(void*));
+                    if (IsValidIl2CppClass(c_klass)) {
                         const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
                         elem_type = cn ? CleanIl2CppTypeName(cn) : "Object";
                         child_cls = elem_type;
@@ -4862,7 +4876,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     // ==========================================
     // B. 列表 List<T> 直解
     // ==========================================
-    if (fullClassName.find("List") != std::string::npos) {
+    bool isList = (fullClassName.find("System.Collections.Generic.List") != std::string::npos || fullClassName.find("List`1") != std::string::npos || fullClassName == "List");
+    if (isList) {
         uintptr_t items_arr = 0;
         int32_t list_size = 0;
         SafeReadMemory(currentObj + 0x10, &items_arr, sizeof(uintptr_t));
@@ -4888,7 +4903,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
 
                 if (IsValidPtr(elem_ptr)) {
                     void* c_klass = nullptr;
-                    if (SafeReadMemory(elem_ptr, &c_klass, sizeof(void*)) && IsValidIl2CppClass(c_klass)) {
+                    SafeReadMemory(elem_ptr, &c_klass, sizeof(void*));
+                    if (IsValidIl2CppClass(c_klass)) {
                         const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
                         elem_type = cn ? CleanIl2CppTypeName(cn) : "Object";
                         child_cls = elem_type;
@@ -4910,7 +4926,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     // ==========================================
     // C. 字典 Dictionary<TKey, TValue> 直解
     // ==========================================
-    if (fullClassName.find("Dictionary") != std::string::npos) {
+    bool isDict = (fullClassName.find("System.Collections.Generic.Dictionary") != std::string::npos || fullClassName.find("Dictionary`2") != std::string::npos || fullClassName == "Dictionary");
+    if (isDict) {
         uintptr_t entries_arr = 0;
         int32_t dict_count = 0;
         SafeReadMemory(currentObj + 0x18, &entries_arr, sizeof(uintptr_t));
@@ -4944,7 +4961,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
 
                 if (IsValidPtr(val_ptr)) {
                     void* c_klass = nullptr;
-                    if (SafeReadMemory(val_ptr, &c_klass, sizeof(void*)) && IsValidIl2CppClass(c_klass)) {
+                    SafeReadMemory(val_ptr, &c_klass, sizeof(void*));
+                    if (IsValidIl2CppClass(c_klass)) {
                         const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
                         elem_type = cn ? CleanIl2CppTypeName(cn) : "Object";
                         child_cls = elem_type;
@@ -4966,7 +4984,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     // ==========================================
     // D. 全继承链字段反射 (包含当前类与所有父类)
     // ==========================================
-    if (g_il2cpp_api.class_get_fields) {
+    if (IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
         for (void* cur_klass = klass_ptr; cur_klass != nullptr; cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
             const char* cur_cls_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(cur_klass) : "";
 
@@ -5036,7 +5054,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                         isObjectPtr = IsValidPtr(rawVal);
                         if (isObjectPtr) {
                             void* c_klass = nullptr;
-                            if (SafeReadMemory(rawVal, &c_klass, sizeof(void*)) && IsValidIl2CppClass(c_klass)) {
+                            SafeReadMemory(rawVal, &c_klass, sizeof(void*));
+                            if (IsValidIl2CppClass(c_klass)) {
                                 const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
                                 childClassName = cn ? CleanIl2CppTypeName(cn) : clean_type;
                             }
@@ -5073,10 +5092,53 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         }
     }
 
+    // ==========================================
+    // E. 实例物理内存槽位兜底 (如果反射无字段，则自动扫描物理内存槽位，确保绝不为空！)
+    // ==========================================
+    if (fieldRows.empty()) {
+        for (size_t slot_off = 0x10; slot_off <= 0x180; slot_off += 8) {
+            uintptr_t slot_ptr = 0;
+            SafeReadMemory(currentObj + slot_off, &slot_ptr, sizeof(uintptr_t));
+            int32_t slot_int = 0;
+            SafeReadMemory(currentObj + slot_off, &slot_int, sizeof(int32_t));
+
+            if (slot_ptr == 0 && slot_int == 0 && g_inspector_hide_null) continue;
+
+            char slot_name[32]; snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
+            std::string live_val = "";
+            bool isObject = false;
+            std::string slot_type = "Value";
+            std::string child_cls = "";
+
+            if (IsValidPtr(slot_ptr)) {
+                void* c_klass = nullptr;
+                SafeReadMemory(slot_ptr, &c_klass, sizeof(void*));
+                if (IsValidIl2CppClass(c_klass)) {
+                    const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
+                    slot_type = cn ? CleanIl2CppTypeName(cn) : "Object";
+                    child_cls = slot_type;
+                }
+                char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", slot_ptr, slot_type.c_str());
+                live_val = buf;
+                isObject = true;
+            } else {
+                char buf[32]; snprintf(buf, sizeof(buf), "%d (0x%x)", slot_int, slot_int);
+                live_val = buf;
+                slot_type = "Int32";
+            }
+
+            fieldRows.push_back({ slot_off, slot_name, slot_type, slot_type, "", false, false, slot_ptr, slot_int, (int64_t)slot_int, live_val, !isObject, isObject, (slot_ptr == 0), child_cls });
+        }
+    }
+
     // ★ 核心排序：按字段内存物理偏移从上到下严格升序排列 (+0x00, +0x08, +0x10, +0x18, +0x20...)
     std::sort(fieldRows.begin(), fieldRows.end(), [](const InspectorFieldRow& a, const InspectorFieldRow& b) {
         return a.offset < b.offset;
     });
+
+    // 状态统计栏
+    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), (const char*)u8"[对象信息] 类型: %s | 物理地址: 0x%lx | 展开字段数: %zu", fullClassName.c_str(), currentObj, fieldRows.size());
+    ImGui::Spacing();
 
     // 3 列表格 (字段/属性 | 值 | 类型)
     float col0_w = avail_x * 0.40f;
