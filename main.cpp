@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
+#include <set>
 #include <map>
 #include <fstream>
 #include <sstream>
@@ -1654,8 +1656,6 @@ void DrawCardPoolCapsule() {
     ImGui::PopStyleVar();
 }
 
-static std::unordered_set<std::string> s_pos_initialized;
-
 static bool BeginContentFloatWindow(const char* id, bool* open, float* pos_x = nullptr, float* pos_y = nullptr, float alpha = 1.0f) {
     if (open && !*open) return false;
     if (pos_x && pos_y && *pos_x >= 0.0f && *pos_y >= 0.0f) {
@@ -2971,7 +2971,7 @@ LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
     if (!IsValidPtr(ptr) || !g_il2cpp_api.init()) return dump;
 
     void* klass_ptr = nullptr;
-    if (!SafeRead((void*)ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) {
+    if (!SafeReadMemory((uintptr_t)ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) {
         return dump;
     }
 
@@ -2998,10 +2998,10 @@ LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
             fInfo.matchesKnown = false;
 
             if (IsValidPtr(ptr + f_offset)) {
-                SafeRead((void*)(ptr + f_offset), &fInfo.rawValue, sizeof(uintptr_t));
+                SafeReadMemory((uintptr_t)(ptr + f_offset), &fInfo.rawValue, sizeof(uintptr_t));
                 if (IsValidPtr(fInfo.rawValue)) {
                     void* sub_klass = nullptr;
-                    if (SafeRead((void*)fInfo.rawValue, &sub_klass, sizeof(void*)) && IsValidPtr((uintptr_t)sub_klass)) {
+                    if (SafeReadMemory((uintptr_t)fInfo.rawValue, &sub_klass, sizeof(void*)) && IsValidPtr((uintptr_t)sub_klass)) {
                         const char* sub_cname = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(sub_klass) : nullptr;
                         if (sub_cname && sub_cname[0]) {
                             fInfo.childClassName = sub_cname;
