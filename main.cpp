@@ -3122,6 +3122,82 @@ ClassInspectInfo InspectClassByFullName(const std::string& targetName) {
 
 static char g_root_class_input[128] = "ChessModelManager";
 
+// ==================== ImGui Virtual Keyboard ====================
+static char* g_vkbd_target = nullptr;
+static size_t g_vkbd_target_size = 0;
+static bool g_show_vkbd = false;
+static bool g_vkbd_caps = false;
+
+void DrawVirtualKeyboard() {
+    if (!g_show_vkbd || !g_vkbd_target) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    float scale = g_autoScale * g_scale;
+    ImGui::SetNextWindowPos(ImVec2(0, io.DisplaySize.y), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, io.DisplaySize.y * 0.45f));
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.12f, 0.95f));
+    ImGui::Begin("VKBD", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(scale * 1.5f);
+
+    // Header / Target Display
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "输入内容:");
+    ImGui::SameLine();
+    ImGui::Text("%s_", g_vkbd_target);
+    ImGui::Separator();
+
+    auto KeyBtn = [&](const char* key, float width_mult = 1.0f) {
+        if (ImGui::Button(key, ImVec2(55.0f * scale * width_mult, 60.0f * scale))) {
+            size_t len = strlen(g_vkbd_target);
+            if (strcmp(key, "BS") == 0) {
+                if (len > 0) g_vkbd_target[len - 1] = '\0';
+            } else if (strcmp(key, "CLR") == 0) {
+                g_vkbd_target[0] = '\0';
+            } else if (strcmp(key, "ENTER") == 0) {
+                g_show_vkbd = false;
+            } else if (strcmp(key, "SPACE") == 0) {
+                if (len < g_vkbd_target_size - 1) { g_vkbd_target[len] = ' '; g_vkbd_target[len + 1] = '\0'; }
+            } else if (strcmp(key, "CAPS") == 0) {
+                g_vkbd_caps = !g_vkbd_caps;
+            } else {
+                if (len < g_vkbd_target_size - 1) {
+                    g_vkbd_target[len] = key[0];
+                    g_vkbd_target[len + 1] = '\0';
+                }
+            }
+        }
+    };
+
+    const char* row1_low[] = {"1","2","3","4","5","6","7","8","9","0","-","="};
+    const char* row2_low[] = {"q","w","e","r","t","y","u","i","o","p","[","]"};
+    const char* row3_low[] = {"a","s","d","f","g","h","j","k","l",";","'","\\"};
+    const char* row4_low[] = {"z","x","c","v","b","n","m",",",".","/","_","@"};
+
+    const char* row2_up[] = {"Q","W","E","R","T","Y","U","I","O","P","{","}"};
+    const char* row3_up[] = {"A","S","D","F","G","H","J","K","L",":","\"","|"};
+    const char* row4_up[] = {"Z","X","C","V","B","N","M","<",">","?","_","@"};
+
+    // Row 1
+    for (int i = 0; i < 12; i++) { KeyBtn(row1_low[i]); ImGui::SameLine(); }
+    KeyBtn("BS", 1.5f);
+
+    // Row 2
+    for (int i = 0; i < 12; i++) { KeyBtn(g_vkbd_caps ? row2_up[i] : row2_low[i]); ImGui::SameLine(); }
+    KeyBtn("CLR", 1.5f);
+
+    // Row 3
+    for (int i = 0; i < 12; i++) { KeyBtn(g_vkbd_caps ? row3_up[i] : row3_low[i]); ImGui::SameLine(); }
+    KeyBtn("ENTER", 1.5f);
+
+    // Row 4
+    KeyBtn("CAPS", 1.5f); ImGui::SameLine();
+    for (int i = 0; i < 12; i++) { KeyBtn(g_vkbd_caps ? row4_up[i] : row4_low[i]); ImGui::SameLine(); }
+    KeyBtn("SPACE", 1.5f);
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
+
 void DrawPathTraceFloatWindow() {
     if (!g_win_path_trace) return;
     if (!g_is_in_match.load(std::memory_order_relaxed)) return;
@@ -3140,11 +3216,11 @@ void DrawPathTraceFloatWindow() {
 
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🔍 寻址起点(单例类):");
     ImGui::SetNextItemWidth(250.0f * sc);
-    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input));
+    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"⌨️ 键盘##1")) { g_vkbd_target = g_root_class_input; g_vkbd_target_size = sizeof(g_root_class_input); g_show_vkbd = true; }
 
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🎯 寻址终点(目标类):");
     ImGui::SetNextItemWidth(250.0f * sc);
-    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input));
+    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"⌨️ 键盘##2")) { g_vkbd_target = g_class_search_input; g_vkbd_target_size = sizeof(g_class_search_input); g_show_vkbd = true; }
 
     ImGui::Spacing();
     
@@ -4585,7 +4661,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     DrawOpponentBoardWindow();
     DrawMyHeroWarningWindow();
     DrawHextechCapsule();
-    DrawPathTraceFloatWindow();
+    DrawPathTraceFloatWindow(); DrawVirtualKeyboard();
     // 胶囊最后绘制并置顶，避免被牌库等浮窗挡住无法解锁
     DrawQuitCapsule();
     DrawLockCapsule();
