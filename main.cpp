@@ -3631,7 +3631,8 @@ void DrawMainMenu() {
                 }
                 break;
             case 3:
-                DrawSectionTitle((const char*)u8"偏移调试与实时诊断");
+                {
+                    DrawSectionTitle((const char*)u8"偏移调试与实时诊断");
                 if (ImGui::Button((const char*)u8"保存全部配置", ImVec2(-1, 34 * g_autoScale * g_scale))) { SaveConfig(); AddActionLog((const char*)u8"-> [配置] 已成功保存所有当前改动过的偏移与设置到本地!"); }
                 DrawGlassSeparator();
                 ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址链路】（改一个对应地址立刻显示）");
