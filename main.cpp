@@ -2795,6 +2795,8 @@ struct Il2CppApis {
     typedef void (*field_static_get_value_t)(void* field, void* value);
     typedef uint32_t (*field_get_flags_t)(void* field);
     typedef void* (*class_get_parent_t)(void* klass);
+    typedef void* (*runtime_invoke_t)(void* method, void* obj, void** params, void** exc);
+    typedef void* (*object_unbox_t)(void* obj);
 
     domain_get_t domain_get = nullptr;
     domain_get_assemblies_t domain_get_assemblies = nullptr;
@@ -2815,6 +2817,8 @@ struct Il2CppApis {
     field_static_get_value_t field_static_get_value = nullptr;
     field_get_flags_t field_get_flags = nullptr;
     class_get_parent_t class_get_parent = nullptr;
+    runtime_invoke_t runtime_invoke = nullptr;
+    object_unbox_t object_unbox = nullptr;
     bool inited = false;
 
     bool init() {
@@ -4761,6 +4765,17 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         }
     }
 
+    // 单例自动重连 (当新对局重开导致老指针失效时，自动重新获取活指针)
+    if (!g_inspect_breadcrumbs.empty() && g_inspect_breadcrumbs.size() == 1) {
+        auto& rootBc = g_inspect_breadcrumbs[0];
+        if (!IsValidPtr(rootBc.objectAddress)) {
+            uintptr_t new_ptr = GetSingletonInstance(rootBc.className.c_str());
+            if (IsValidPtr(new_ptr)) {
+                rootBc.objectAddress = new_ptr;
+            }
+        }
+    }
+
     if (g_inspect_breadcrumbs.empty()) {
         ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), (const char*)u8"当前尚未选择对象。请点击上方的【ChessModelManager】、【CSOGame】或输入内存指针。");
         return;
@@ -4804,8 +4819,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         ImGui::Spacing();
     }
 
-    // 4. 过滤工具栏 (Filter & Checkboxes)
-    ImGui::SetNextItemWidth(180.0f * g_autoScale);
+    // 4. 过滤工具栏 (Filter & Checkboxes & 动态持续读取状态指示)
+    ImGui::SetNextItemWidth(160.0f * g_autoScale);
     ImGui::InputText("##InspectorFilter", g_inspector_filter, sizeof(g_inspector_filter));
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Filter");
@@ -4831,10 +4846,10 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // 5. 当前对象全量字段表格解析 (Full Real Fields Reflection & Array Expansion)
+    // 5. 动态持续读取当前对象 (Dynamic Live 60 FPS Real-time Memory Read)
     uintptr_t currentObj = g_inspect_breadcrumbs.back().objectAddress;
     if (!IsValidPtr(currentObj)) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[错误] 当前对象内存指针无效: 0x%lx", currentObj);
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[状态] 当前对象尚未在内存中分配 (0x0 / Null) - 游戏进行到相应流程后将自动实时呈现！", currentObj);
         return;
     }
 
@@ -4906,7 +4921,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     }
 
     // ==========================================
-    // B. 原生 IL2CPP 反射 (针对所有普通类与泛型类 List<T>, CSOGame, ChessModelManager)
+    // B. 原生 IL2CPP 字段反射 (实时每帧从物理内存读取最新动态值)
     // ==========================================
     if (klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
         for (void* cur_klass = klass_ptr; cur_klass != nullptr; cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
@@ -4931,7 +4946,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 bool isPropBacking = (field_str.find("<") != std::string::npos && field_str.find(">k__BackingField") != std::string::npos);
                 if (!g_inspector_include_props && isPropBacking) continue;
 
-                // 安全读取实时动态内存值
+                // 实时动态读取每一帧的物理内存最新值 (Live 60 FPS Read)
                 uintptr_t rawVal = 0;
                 SafeReadMemory(currentObj + f_offset, &rawVal, sizeof(uintptr_t));
                 int32_t val32 = 0;
@@ -5015,7 +5030,63 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     }
 
     // ==========================================
-    // C. 实例物理内存槽位兜底 (仅当完全无法通过反射获取字段时)
+    // C. 动态计算属性 Getter 反射 (当勾选包含属性时，调用 0 参数 get_xxx() 属性方法)
+    // ==========================================
+    if (g_inspector_include_props && klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_methods && g_il2cpp_api.runtime_invoke) {
+        for (void* cur_klass = klass_ptr; cur_klass != nullptr; cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
+            void* m_iter = nullptr;
+            while (void* method = g_il2cpp_api.class_get_methods(cur_klass, &m_iter)) {
+                const char* m_name = g_il2cpp_api.method_get_name ? g_il2cpp_api.method_get_name(method) : "";
+                if (!m_name || strncmp(m_name, "get_", 4) != 0) continue;
+                if (g_il2cpp_api.method_get_param_count && g_il2cpp_api.method_get_param_count(method) != 0) continue;
+
+                std::string prop_name = m_name + 4; // 截取属性名 (如 get_Money -> Money)
+                std::string prop_display = "[Prop] " + prop_name + "()";
+
+                // 避免与已反射的 backing 字段重复
+                bool alreadyHas = false;
+                for (const auto& fr : fieldRows) {
+                    if (fr.fieldName.find(prop_name) != std::string::npos) { alreadyHas = true; break; }
+                }
+                if (alreadyHas) continue;
+
+                // 安全调用 Getter 计算属性
+                void* exc = nullptr;
+                void* ret = g_il2cpp_api.runtime_invoke(method, (void*)currentObj, nullptr, &exc);
+                if (exc == nullptr && ret != nullptr) {
+                    uintptr_t ret_ptr = (uintptr_t)ret;
+                    int32_t ret_val32 = 0;
+                    SafeReadMemory(ret_ptr, &ret_val32, sizeof(int32_t));
+
+                    std::string live_val = "";
+                    bool isObj = IsValidPtr(ret_ptr);
+                    std::string p_type = "Property";
+                    std::string ch_cls = "";
+
+                    if (isObj) {
+                        void* c_k = nullptr;
+                        SafeReadMemory(ret_ptr, &c_k, sizeof(void*));
+                        if (c_k && IsValidIl2CppClass(c_k)) {
+                            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_k) : "";
+                            p_type = cn ? CleanIl2CppTypeName(cn) : "Object";
+                            ch_cls = p_type;
+                        }
+                        char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", ret_ptr, p_type.c_str());
+                        live_val = buf;
+                    } else {
+                        char buf[32]; snprintf(buf, sizeof(buf), "%d", ret_val32);
+                        live_val = buf;
+                        p_type = "Int32";
+                    }
+
+                    fieldRows.push_back({ 0x999, prop_display, p_type, p_type, "", (cur_klass != klass_ptr), true, ret_ptr, ret_val32, (int64_t)ret_val32, live_val, !isObj, isObj, false, ch_cls });
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // D. 实例物理内存槽位兜底 (仅当完全无法通过反射获取字段时)
     // ==========================================
     if (fieldRows.empty()) {
         for (size_t slot_off = 0x10; slot_off <= 0x180; slot_off += 8) {
@@ -5058,6 +5129,12 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         return a.offset < b.offset;
     });
 
+    // 状态统计栏 (显示 60 FPS 实时动态读取指示)
+    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"● [实时动态读取中 (60 FPS)]");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"| 当前对象: 0x%lx | 实时字段数: %zu", currentObj, fieldRows.size());
+    ImGui::Spacing();
+
     // 3 列表格 (字段/属性 | 值 | 类型)
     float col0_w = avail_x * 0.40f;
     float col1_w = avail_x * 0.38f;
@@ -5095,7 +5172,11 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
             ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.95f, 1.0f), "%s", row.fieldName.c_str());
         }
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 0.8f), "[+0x%lx]", row.offset);
+        if (row.offset != 0x999) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 0.8f), "[+0x%lx]", row.offset);
+        } else {
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 0.8f), "[动态计算]");
+        }
         ImGui::NextColumn();
 
         // 列 2: 值 (支持一键下钻深入 + 设为 pi_money)
