@@ -2921,7 +2921,12 @@ static void CacheValidClasses() {
 }
 
 static std::string SafeReadCString(const char* ptr, size_t maxLen = 128) {
-    if (!ptr || !IsValidPtr((uintptr_t)ptr)) return "";
+    // 注意: 字符串指针来自 IL2CPP 元数据字符串堆, 其中各字符串紧挨零终止存放,
+    // 当上一条字符串长度为奇数时, 下一条字符串的指针地址低 2 位并非 0, 即不满足
+    // 4 字节对齐. 因此这里不能用 IsValidPtr(要求 (ptr&0x3)==0) 来过滤, 否则会导致
+    // 部分字段名/类型名被误判为无效指针而返回空串, 进而整条字段被丢弃(不显示).
+    // 改为只校验空指针与合理地址范围, 真正的字节读取交给 SafeReadMemory 容错.
+    if (!ptr || ((uintptr_t)ptr) < 0x1000 || ((uintptr_t)ptr) > 0x00007FFFFFFFFFFF) return "";
     char buf[128] = {0};
     for (size_t i = 0; i < maxLen - 1; i++) {
         char c = 0;
@@ -5073,7 +5078,19 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 std::string type_str = SafeReadCString(t_name);
                 std::string clean_type = CleanIl2CppTypeName(type_str);
 
-                if (field_str.empty()) continue;
+                // 即便字段名因元数据布局等原因读不出, 也用偏移兜底占位, 保证该字段仍被显示,
+                // 不再因 field_str.empty() 而整条丢弃(这正是此前"不显示所有字段名"的根因).
+                if (field_str.empty()) {
+                    char fb[32];
+                    snprintf(fb, sizeof(fb), "<field@+0x%zx>", f_offset);
+                    field_str = fb;
+                }
+                if (type_str.empty()) {
+                    char tb[24];
+                    snprintf(tb, sizeof(tb), "*@+0x%zx", f_offset);
+                    type_str = tb;
+                    clean_type = "";
+                }
 
                 uintptr_t rawVal = 0;
                 SafeReadMemory(currentObj + f_offset, &rawVal, sizeof(uintptr_t));
