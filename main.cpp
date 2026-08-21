@@ -204,6 +204,7 @@ static bool g_need_segment_gap_before_enter = false;
 
 // UI State & Styles
 bool g_isImGuiInit = false;
+ImGuiContext* g_ourImGuiContext = nullptr;
 ImFont* g_mainFont = nullptr;
 float g_autoScale = 1.0f;
 float g_current_rendered_size = 0.0f;
