@@ -4272,6 +4272,119 @@ static std::vector<std::string> GetPinyinCandidates(const std::string& py) {
     return res;
 }
 
+// ============================================================
+// 系统输入法（IME）桥接：让 Android 设备输入法（百度/搜狗/手写/语音）在本 overlay 中可用
+// 原理：创建一个隐形 EditText 挂到 Activity，showSoftInput 弹出系统键盘，
+//       每帧轮询 EditText 文本增量，回传给 ImGui 当前激活的输入框（io.AddInputCharactersUTF8）。
+// 注意：系统软键盘是独立系统窗口，其触摸由系统直接处理，不经过 hook_nativeInjectEvent，无需改触摸透传。
+// ============================================================
+static jobject     g_ime_edittext = nullptr;
+static bool        g_ime_open = false;
+static bool        g_ime_pending_show = false;
+static bool        g_ime_pending_hide = false;
+static std::string g_last_ime_text;
+static char*       g_ime_focus_target = nullptr; // 点[输入法]后需重新聚焦的输入框
+
+// 必须在 UI 线程执行（addContentView / showSoftInput 强制主线程），由 hook_nativeInjectEvent 消费 pending 标志
+static void DoShowIME() {
+    if (g_ime_open || !g_context || !g_jvm) return;
+    JNIEnv* e = nullptr;
+    if (g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6) != JNI_OK || !e) return;
+
+    jclass ctxCls = e->FindClass("android/content/Context");
+    jmethodID getSys = e->GetMethodID(ctxCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    jstring immName = e->NewStringUTF("input_method");
+    jobject imm = e->CallObjectMethod(g_context, getSys, immName);
+    e->DeleteLocalRef(immName);
+    if (!imm) return;
+
+    jclass etCls = e->FindClass("android/widget/EditText");
+    jmethodID etCtor = e->GetMethodID(etCls, "<init>", "(Landroid/content/Context;)V");
+    jobject et = e->NewObject(etCls, etCtor, g_context);
+    jmethodID setText = e->GetMethodID(etCls, "setText", "(Ljava/lang/CharSequence;)V");
+    e->CallVoidMethod(et, setText, e->NewStringUTF("")); // 清空上次残留
+
+    // attach：优先 Activity.addContentView，否则 WindowManager 悬浮窗（TYPE_APPLICATION_OVERLAY）
+    jclass actCls = e->FindClass("android/app/Activity");
+    if (e->IsInstanceOf(g_context, actCls)) {
+        jmethodID addCV = e->GetMethodID(actCls, "addContentView", "(Landroid/view/View;Landroid/view/ViewGroup$LayoutParams;)V");
+        jclass lpCls = e->FindClass("android/view/ViewGroup$LayoutParams");
+        jmethodID lpCtor = e->GetMethodID(lpCls, "<init>", "(II)V");
+        jobject lp = e->NewObject(lpCls, lpCtor, 1, 1);
+        e->CallVoidMethod(g_context, addCV, et, lp);
+        e->DeleteLocalRef(lp);
+    } else {
+        jobject wm = e->CallObjectMethod(g_context, getSys, e->NewStringUTF("window"));
+        jclass wmCls = e->FindClass("android/view/WindowManager");
+        jmethodID addW = e->GetMethodID(wmCls, "addView", "(Landroid/view/View;Landroid/view/ViewGroup$LayoutParams;)V");
+        jclass wlpCls = e->FindClass("android/view/WindowManager$LayoutParams");
+        jmethodID wlpCtor = e->GetMethodID(wlpCls, "<init>", "(IIIIII)V");
+        // (w,h, TYPE_APPLICATION_OVERLAY=2038, FLAG_NOT_FOCUSABLE|FLAG_NOT_TOUCHABLE=8|16, FORMAT=-3)
+        jobject wlp = e->NewObject(wlpCls, wlpCtor, 1, 1, 2038, 8 | 16, -3);
+        e->CallVoidMethod(wm, addW, et, wlp);
+        e->DeleteLocalRef(wlp);
+    }
+
+    e->CallVoidMethod(et, e->GetMethodID(etCls, "setVisibility", "(I)V"), 4);   // INVISIBLE
+    e->CallVoidMethod(et, e->GetMethodID(etCls, "requestFocus", "()Z"));
+
+    jclass immCls = e->FindClass("android/view/inputmethod/InputMethodManager");
+    jmethodID show = e->GetMethodID(immCls, "showSoftInput", "(Landroid/view/View;I)Z");
+    e->CallBooleanMethod(imm, show, et, 1); // SHOW_IMPLICIT
+
+    g_ime_edittext = e->NewGlobalRef(et);
+    g_ime_open = true;
+    g_last_ime_text.clear();
+}
+
+static void DoHideIME() {
+    if (!g_ime_open || !g_ime_edittext) return;
+    JNIEnv* e = nullptr;
+    if (!g_jvm || g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6) != JNI_OK || !e) return;
+    jclass ctxCls = e->FindClass("android/content/Context");
+    jobject imm = e->CallObjectMethod(g_context, e->GetMethodID(ctxCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;"), e->NewStringUTF("input_method"));
+    jclass immCls = e->FindClass("android/view/inputmethod/InputMethodManager");
+    jmethodID hide = e->GetMethodID(immCls, "hideSoftInputFromWindow", "(Landroid/os/IBinder;I)Z");
+    jobject wt = e->CallObjectMethod(g_ime_edittext, e->GetMethodID(e->GetObjectClass(g_ime_edittext), "getWindowToken", "()Landroid/os/IBinder;"));
+    e->CallBooleanMethod(imm, hide, wt, 0);
+    g_ime_open = false;
+    if (g_ime_edittext) { e->DeleteGlobalRef(g_ime_edittext); g_ime_edittext = nullptr; }
+    g_last_ime_text.clear();
+}
+
+static void RequestShowIME() { g_ime_pending_show = true; }
+static void RequestHideIME() { g_ime_pending_hide = true; }
+
+// 每帧调用：把 EditText 文本增量回传给 ImGui 当前输入框（仅读取，跨线程安全）
+static void PollIMEToImGui() {
+    if (!g_ime_open || !g_ime_edittext) return;
+    JNIEnv* e = nullptr;
+    if (!g_jvm || g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6) != JNI_OK || !e) return;
+    jclass etCls = e->FindClass("android/widget/EditText");
+    jmethodID getText = e->GetMethodID(etCls, "getText", "()Landroid/text/Editable;");
+    jobject ed = e->CallObjectMethod(g_ime_edittext, getText);
+    if (!ed) return;
+    jclass csCls = e->FindClass("java/lang/CharSequence");
+    jmethodID toString = e->GetMethodID(csCls, "toString", "()Ljava/lang/String;");
+    jstring js = (jstring)e->CallObjectMethod(ed, toString);
+    const char* p = js ? e->GetStringUTFChars(js, nullptr) : nullptr;
+    std::string cur(p ? p : "");
+    if (p) e->ReleaseStringUTFChars(js, p);
+    if (js) e->DeleteLocalRef(js);
+
+    ImGuiIO& io = ImGui::GetIO();
+    if (cur.size() > g_last_ime_text.size()) {
+        io.AddInputCharactersUTF8(cur.substr(g_last_ime_text.size()).c_str());
+    } else if (cur.size() < g_last_ime_text.size()) {
+        int del = (int)(g_last_ime_text.size() - cur.size());
+        for (int i = 0; i < del; i++) {
+            io.AddKeyEvent(ImGuiKey_Backspace, true);
+            io.AddKeyEvent(ImGuiKey_Backspace, false);
+        }
+    }
+    g_last_ime_text = cur;
+}
+
 void DrawVirtualKeyboard() {
     if (!g_show_vkbd || !g_vkbd_target) return;
 
@@ -5136,15 +5249,22 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 std::string childCls = "";
 
                 std::string str_content = "";
-                if (IsValidPtr(rawVal)) {
+                // 字符串识别必须严格: 仅当字段类型精确为 String 时才尝试 ReadIl2CppString.
+                // 之前用 type_str.find("String") != std::string::npos 宽匹配,导致任何类型字符串含
+                // "String"子串的字段(包括 backing field 元数据类型登记异常的非 String 字段,
+                // 比如 stTableInfo 等复杂对象字段)都被强按字符串显示为空/怪字符.
+                bool isStringType = (clean_type == "String");
+                if (isStringType && IsValidPtr(rawVal)) {
                     str_content = ReadIl2CppString(rawVal);
                 }
 
-                if (!str_content.empty()) {
-                    liveVal = "\"" + str_content + "\"";
-                } else if (clean_type == "String" || type_str.find("String") != std::string::npos) {
-                    liveVal = IsValidPtr(rawVal) ? "\"\"" : "Null";
-                    isNull = (rawVal == 0);
+                if (isStringType) {
+                    if (rawVal == 0) {
+                        liveVal = "Null";
+                        isNull = true;
+                    } else {
+                        liveVal = "\"" + str_content + "\"";
+                    }
                 } else if (clean_type == "Int32" || clean_type == "UInt32") {
                     char buf[32]; snprintf(buf, sizeof(buf), "%d", val32);
                     liveVal = buf;
@@ -5507,26 +5627,46 @@ void DrawSymbolResolverUI() {
 
     // 1. 寻址起点
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
-    ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
+    ImGui::SetNextItemWidth(avail_x - 2*btn_w - 16.0f);
     ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); 
+    if (g_ime_focus_target == g_root_class_input) { ImGui::SetKeyboardFocusHere(-1); g_ime_focus_target = nullptr; }
     ImGui::SameLine(); 
     if (ImGui::Button((const char*)u8"[键盘]##1", ImVec2(btn_w, 0))) { 
         g_vkbd_target = g_root_class_input; 
         g_vkbd_target_size = sizeof(g_root_class_input); 
         g_show_vkbd = true; 
     }
+    ImGui::SameLine();
+    if (g_ime_open) {
+        if (ImGui::Button((const char*)u8"[关闭输入法]##1", ImVec2(btn_w, 0))) { RequestHideIME(); }
+    } else {
+        if (ImGui::Button((const char*)u8"[输入法]##1", ImVec2(btn_w, 0))) { 
+            g_ime_focus_target = g_root_class_input;
+            RequestShowIME();
+        }
+    }
 
     ImGui::Spacing();
 
     // 2. 寻址终点 (类名/字段名/数值/金币/字典/列表/字符串等一切内容)
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名/字段名/金币数值/列表字典，留空则全量探测链条):");
-    ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
+    ImGui::SetNextItemWidth(avail_x - 2*btn_w - 16.0f);
     ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
+    if (g_ime_focus_target == g_class_search_input) { ImGui::SetKeyboardFocusHere(-1); g_ime_focus_target = nullptr; }
     ImGui::SameLine(); 
     if (ImGui::Button((const char*)u8"[键盘]##2", ImVec2(btn_w, 0))) { 
         g_vkbd_target = g_class_search_input; 
         g_vkbd_target_size = sizeof(g_class_search_input); 
         g_show_vkbd = true; 
+    }
+    ImGui::SameLine();
+    if (g_ime_open) {
+        if (ImGui::Button((const char*)u8"[关闭输入法]##2", ImVec2(btn_w, 0))) { RequestHideIME(); }
+    } else {
+        if (ImGui::Button((const char*)u8"[输入法]##2", ImVec2(btn_w, 0))) { 
+            g_ime_focus_target = g_class_search_input;
+            RequestShowIME();
+        }
     }
 
     ImGui::Spacing();
@@ -5764,8 +5904,19 @@ void DrawSymbolResolverUI() {
     if (g_lastPathResult.found) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 共扫描出 %zu 条关联路径与字段：", g_lastPathResult.paths.size());
-        
-        for (size_t p = 0; p < g_lastPathResult.paths.size(); p++) {
+        ImGui::SameLine();
+        if (ImGui::Button((const char*)u8"清空结果##clear_search")) {
+            g_lastPathResult.found = false;
+            g_lastPathResult.paths.clear();
+            g_lastPathResult.exploredChains.clear();
+        }
+        // ★ 性能保护：每帧只渲染前 kMaxRender 条, 避免 1500 条路径全量重绘把帧率拖到 10 几且不恢复.
+        const size_t kMaxRender = 100;
+        size_t renderCount = (g_lastPathResult.paths.size() > kMaxRender) ? kMaxRender : g_lastPathResult.paths.size();
+        if (g_lastPathResult.paths.size() > kMaxRender) {
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), (const char*)u8"[性能保护] 仅渲染前 %zu 条 (共 %zu 条). 点上方\"清空结果\"可立即恢复流畅; 完整结果已记录于 g_lastPathResult.", kMaxRender, g_lastPathResult.paths.size());
+        }
+        for (size_t p = 0; p < renderCount; p++) {
             RenderPathItem(p, g_lastPathResult.paths[p], false);
         }
     } else {
@@ -5779,7 +5930,18 @@ void DrawSymbolResolverUI() {
                 ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[就绪] 当前单例全量探测到 %zu 条核心分支链条：", g_lastPathResult.exploredChains.size());
             }
 
-            for (size_t p = 0; p < g_lastPathResult.exploredChains.size(); p++) {
+            ImGui::SameLine();
+            if (ImGui::Button((const char*)u8"清空结果##clear_explore")) {
+                g_lastPathResult.found = false;
+                g_lastPathResult.paths.clear();
+                g_lastPathResult.exploredChains.clear();
+            }
+            const size_t kMaxExplore = 30;
+            size_t exploreCount = (g_lastPathResult.exploredChains.size() > kMaxExplore) ? kMaxExplore : g_lastPathResult.exploredChains.size();
+            if (g_lastPathResult.exploredChains.size() > kMaxExplore) {
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), (const char*)u8"[性能保护] 仅渲染前 %zu 条链路 (共 %zu 条).", kMaxExplore, g_lastPathResult.exploredChains.size());
+            }
+            for (size_t p = 0; p < exploreCount; p++) {
                 RenderPathItem(p, g_lastPathResult.exploredChains[p], true);
             }
         }
@@ -6217,6 +6379,9 @@ void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
 
 extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) {
     if (!g_jvm) env->GetJavaVM(&g_jvm);
+    // 在 UI 线程消费系统输入法请求的 pending 标志
+    if (g_ime_pending_show) { DoShowIME(); g_ime_pending_show = false; }
+    if (g_ime_pending_hide) { DoHideIME(); g_ime_pending_hide = false; }
     if (obj) {
         if (!g_view_obj || !env->IsSameObject(g_view_obj, obj)) {
             if (g_view_obj) env->DeleteGlobalRef(g_view_obj);
@@ -6580,6 +6745,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
+    PollIMEToImGui();
 
     DrawMainMenu();
     DrawHexKeypadModal();
