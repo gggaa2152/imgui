@@ -2883,24 +2883,16 @@ static bool StringEqualsIgnoreCase(const std::string& a, const std::string& b) {
     return true;
 }
 
-static bool StringEqualsIgnoreCase(const std::string& a, const std::string& b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (::tolower(a[i]) != ::tolower(b[i])) return false;
-    }
-    return true;
-}
-
 static uintptr_t GetSingletonInstance(const char* className) {
     if (!g_il2cpp_api.init() || !g_il2cpp_api.field_static_get_value || !g_il2cpp_api.field_get_flags) return 0;
-    
+
     void* domain = g_il2cpp_api.domain_get();
     if (!domain) return 0;
-    
+
     size_t asm_count = 0;
     void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
     if (!assemblies) return 0;
-    
+
     std::string searchName = className;
     void* target_klass = nullptr;
     for (size_t a = 0; a < asm_count; a++) {
@@ -2913,7 +2905,7 @@ static uintptr_t GetSingletonInstance(const char* className) {
             const char* c_name = g_il2cpp_api.class_get_name(klass);
             const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : "";
             std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : (c_name ? std::string(c_name) : "");
-            
+
             if ((c_name && StringEqualsIgnoreCase(c_name, searchName)) || StringEqualsIgnoreCase(full_class, searchName)) {
                 target_klass = klass;
                 break;
@@ -2921,9 +2913,9 @@ static uintptr_t GetSingletonInstance(const char* className) {
         }
         if (target_klass) break;
     }
-    
+
     if (!target_klass) return 0;
-    
+
     void* iter = nullptr;
     while (void* field = g_il2cpp_api.class_get_fields(target_klass, &iter)) {
         uint32_t flags = g_il2cpp_api.field_get_flags(field);
@@ -2931,31 +2923,16 @@ static uintptr_t GetSingletonInstance(const char* className) {
             const char* f_name = g_il2cpp_api.field_get_name(field);
             void* f_type = g_il2cpp_api.field_get_type(field);
             const char* t_name = g_il2cpp_api.type_get_name(f_type);
-            
-            
-        }
-    }
-    return 0;
-}
-        }
-    }
-    return 0;
-}
-    
-    void* iter = nullptr;
-    while (void* field = g_il2cpp_api.class_get_fields(target_klass, &iter)) {
-        uint32_t flags = g_il2cpp_api.field_get_flags(field);
-        if ((flags & 0x0010) != 0) { // FIELD_ATTRIBUTE_STATIC
-            const char* f_name = g_il2cpp_api.field_get_name(field);
-            void* f_type = g_il2cpp_api.field_get_type(field);
-            const char* t_name = g_il2cpp_api.type_get_name(f_type);
-            
-            // If it's a static field of its own type (or a related manager), it's likely the singleton instance!
-            if (t_name && strstr(t_name, className) != nullptr) {
-                uintptr_t instance = 0;
-                g_il2cpp_api.field_static_get_value(field, &instance);
-                if (IsValidPtr(instance)) {
-                    return instance;
+
+            if (f_name && (StringEqualsIgnoreCase(f_name, "instance") || StringEqualsIgnoreCase(f_name, "instance_") || 
+                           StringEqualsIgnoreCase(f_name, "_instance") || StringEqualsIgnoreCase(f_name, "m_instance") || 
+                           StringEqualsIgnoreCase(f_name, "s_instance") ||
+                           (t_name && StringEqualsIgnoreCase(t_name, className)))) {
+                
+                uintptr_t inst_ptr = 0;
+                g_il2cpp_api.field_static_get_value(field, &inst_ptr);
+                if (inst_ptr != 0) {
+                    return inst_ptr;
                 }
             }
         }
