@@ -3425,12 +3425,6 @@ static int g_resolver_subtab = 0;
 static char g_custom_inspect_addr[32] = "0x0";
 static LiveInstanceDump g_custom_dump;
 
-
-        }
-    }
-    return info;
-}
-
 void DrawInteractiveObjectNode(uintptr_t obj_ptr, const char* fieldName, size_t offset, float scale, int depth, std::unordered_set<uintptr_t>& visited) {
     if (!IsValidPtr(obj_ptr)) {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "  +0x%-4lx %s: null / 0x0", offset, fieldName);
