@@ -1389,6 +1389,11 @@ static void DrawSidebarIcon(ImDrawList* dl, ImVec2 c, float s, int id, ImU32 col
         dl->AddCircle(ImVec2(c.x - s * 0.2f, c.y - s * 0.2f), s * 0.5f, col, 16, 1.5f);
         dl->AddLine(ImVec2(c.x + s * 0.18f, c.y + s * 0.18f), ImVec2(c.x + s * 0.75f, c.y + s * 0.75f), col, 2.2f);
         break;
+    case 5: // 对象检查 (多维网格层级图标)
+        dl->AddRect(ImVec2(c.x - s * 0.7f, c.y - s * 0.7f), ImVec2(c.x + s * 0.7f, c.y + s * 0.7f), col, 2.0f, 0, 1.5f);
+        dl->AddLine(ImVec2(c.x - s * 0.7f, c.y), ImVec2(c.x + s * 0.7f, c.y), col, 1.2f);
+        dl->AddLine(ImVec2(c.x, c.y - s * 0.7f), ImVec2(c.x, c.y + s * 0.7f), col, 1.2f);
+        break;
     default:
         break;
     }
@@ -5584,7 +5589,7 @@ void DrawMainMenu() {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
             ImGui::BeginChild("FrostSidebar", ImVec2(sidebarW, 0), true, ImGuiWindowFlags_NoScrollbar);
                         const char* tabLabels[] = { (const char*)u8"视觉透视", (const char*)u8"自动购买", (const char*)u8"链路诊断", (const char*)u8"偏移调试", (const char*)u8"符号反查", (const char*)u8"对象检查" };
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < 6; i++) {
                 if (FrostSidebarBtn(tabLabels[i], current_tab == i, i)) current_tab = i;
                 ImGui::Dummy(ImVec2(0, 4.0f * g_autoScale));
             }
@@ -5921,10 +5926,21 @@ void DrawMainMenu() {
             }
             case 4:
                 {
-                    DrawSectionTitle((const char*)u8"符号反查与动态反射");
+                    DrawSectionTitle((const char*)u8"符号反查与全量寻址");
                     DrawSymbolResolverUI();
                     break;
                 }
+            case 5:
+                {
+                    DrawSectionTitle((const char*)u8"运行时对象检查器 (Object Inspector)");
+                    float avail_w = ImGui::GetContentRegionAvail().x;
+                    float avail_h = ImGui::GetContentRegionAvail().y;
+                    DrawObjectInspectorContent(avail_w, avail_h);
+                    break;
+                }
+            default:
+                current_tab = 0;
+                break;
             }
 
             ImGui::EndChild();
