@@ -2766,6 +2766,7 @@ void DrawHextechCapsule() {
     }
     ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", txt.c_str());
     EndContentFloatWindow("hex_grip", &g_hextech_scale);
+}
 
 void DrawPathTraceFloatWindow() {
     if (!g_win_path_trace) return;
@@ -2843,7 +2844,6 @@ void DrawPathTraceFloatWindow() {
     }
 
     EndContentFloatWindow("pt_grip", &g_path_trace_scale);
-}
 }
 
 float g_anim[30] = {0.0f};
@@ -3800,7 +3800,7 @@ void DrawSymbolResolverUI() {
         ImGui::BeginChild("CustomInspectView", ImVec2(0, 0), true);
         {
             if (g_custom_dump.address != 0) {
-                DrawLiveInstanceTree("自定义指针", addr, scale);
+                DrawLiveInstanceTree("自定义指针", g_custom_dump.address, scale);
             } else {
                 ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"在上方输入框输入一个地址（如 0x28a00000），点击探查即可实时解析。");
             }
