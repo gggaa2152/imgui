@@ -3107,8 +3107,9 @@ void DrawPathTraceFloatWindow() {
         g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "CTAC_HeroPool", 6);
     }
 
-    if (!g_lastPathResult.found && IsValidPtr(g_dbg_addr1)) {
-        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, g_class_search_input, 6);
+        if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
+        ImGui::TextColored(UITheme().warning, (const char*)u8"未在当前内存搜索深度(6)内找到类: %s", g_class_search_input);
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
     }
 
     if (g_lastPathResult.found) {
@@ -3132,9 +3133,7 @@ void DrawPathTraceFloatWindow() {
             ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
             ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"🎯 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
         }
-    } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), (const char*)u8"正在堆内存中追踪目标类: %s ...", g_class_search_input);
-    }
+    
 
     EndContentFloatWindow("pt_grip", &g_path_trace_scale);
 }
