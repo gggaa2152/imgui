@@ -4331,6 +4331,11 @@ extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) 
                 if (g_cached_view_width > 0 && g_gl_width > 0) scale_x = (float)g_gl_width / g_cached_view_width;
                 if (g_cached_view_height > 0 && g_gl_height > 0) scale_y = (float)g_gl_height / g_cached_view_height;
 
+                // 关键修复: 必须切换到我们自己的 ImGui 上下文!
+                // 不设置的话, 当 libTool.so 也使用 ImGui 时, GetIO() 可能返回对方的上下文
+                // 导致触摸输入写入错误位置, 菜单收不到点击, 字体纹理被污染
+                if (!g_ourImGuiContext) { if (old_nativeInjectEvent) old_nativeInjectEvent(env, obj, event); return; }
+                ImGui::SetCurrentContext(g_ourImGuiContext);
                 ImGuiIO& io = ImGui::GetIO();
                 io.AddMousePosEvent(raw_x * scale_x, raw_y * scale_y);
 
