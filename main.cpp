@@ -3203,6 +3203,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     std::string rootClass = GetObjClassName(rootObj);
     if (rootClass.empty()) rootClass = "RootObject";
 
+    // 检查根对象自身是否直接匹配
     if (!target_raw.empty() && SmartStringMatch(rootClass, target_raw)) {
         FoundPath fp;
         fp.matchDesc = (const char*)u8"[起点类名匹配] " + rootClass;
@@ -3222,7 +3223,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     visited.insert(rootObj);
 
     int nodesProcessed = 0;
-    const int maxNodes = 25000;
+    const int maxNodes = 30000;
 
     while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 150) {
         QueueItem item = queue.front();
@@ -3287,27 +3288,34 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     bool intMatch = hasTargetInt && (elem_val32 == targetIntVal || (int64_t)elem_ptr == targetIntVal || elem_val32_stride4 == targetIntVal);
 
                     if (IsValidPtr(elem_ptr)) {
+                        // ★ 全量探测数组元素是否为文本字符串 (如玩家名称字符串数组)
+                        std::string elem_str = ReadIl2CppString(elem_ptr);
+                        bool strMatch = (!elem_str.empty() && !target_raw.empty() && SmartStringMatch(elem_str, target_raw));
+
                         std::string elemClass = GetObjClassName(elem_ptr);
                         std::string elem_clean = CleanIl2CppTypeName(elemClass);
-
                         bool classMatch = (!target_raw.empty() && SmartStringMatch(elemClass, target_raw));
 
-                        char fbuf[64]; snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", elem_ptr, elem_clean.c_str());
-                        std::vector<ObjectPathStep> nextPath = item.path;
-                        nextPath.push_back({ item.obj, item.className, idx_name, elemClass, elem_clean, elem_off, elem_ptr, elemClass.empty() ? elem_clean : elemClass, false, elem_ptr, fbuf });
+                        char fbuf[96];
+                        if (!elem_str.empty()) snprintf(fbuf, sizeof(fbuf), "\"%s\"", elem_str.c_str());
+                        else snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", elem_ptr, elem_clean.c_str());
 
-                        if (classMatch || intMatch) {
+                        std::vector<ObjectPathStep> nextPath = item.path;
+                        nextPath.push_back({ item.obj, item.className, idx_name, elem_str.empty() ? elemClass : "String", elem_str.empty() ? elem_clean : "String", elem_off, elem_ptr, elem_str.empty() ? (elemClass.empty() ? elem_clean : elemClass) : ("\"" + elem_str + "\""), false, elem_ptr, fbuf });
+
+                        if (classMatch || intMatch || strMatch) {
                             std::string sig = "";
                             for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
                             if (recordedPaths.find(sig) == recordedPaths.end()) {
                                 recordedPaths.insert(sig);
                                 FoundPath fp;
-                                if (intMatch) fp.matchDesc = (const char*)u8"[数组数值命中: " + target_raw + "] " + idx_name;
+                                if (strMatch) fp.matchDesc = (const char*)u8"[文本值命中: \"" + elem_str + "\"] " + idx_name;
+                                else if (intMatch) fp.matchDesc = (const char*)u8"[数组数值命中: " + target_raw + "] " + idx_name;
                                 else fp.matchDesc = (const char*)u8"[数组元素匹配] " + idx_name + " (" + elem_clean + ")";
                                 fp.targetInstance = elem_ptr;
                                 fp.steps = nextPath;
                                 fp.fieldName = idx_name;
-                                fp.cleanType = elem_clean;
+                                fp.cleanType = elem_str.empty() ? elem_clean : "String";
                                 fp.offset = elem_off;
                                 fp.fieldAddress = item.obj + elem_off;
                                 fp.formattedVal = fbuf;
@@ -3319,7 +3327,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                             }
                         }
 
-                        if (!elemClass.empty() && visited.find(elem_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
+                        if (!elemClass.empty() && elem_str.empty() && visited.find(elem_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
                             visited.insert(elem_ptr);
                             queue.push_back({ elem_ptr, elemClass, nextPath, item.depth + 1 });
                         }
@@ -3371,37 +3379,45 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     SafeReadMemory(entry_addr + 0x10, &val_int, sizeof(int32_t));
 
                     std::string key_label = "Dict[" + std::to_string(i) + "]";
+                    std::string k_str = "";
                     if (IsValidPtr(key_ptr)) {
-                        std::string k_str = ReadIl2CppString(key_ptr);
+                        k_str = ReadIl2CppString(key_ptr);
                         if (!k_str.empty()) key_label = "[\"" + k_str + "\"]";
                     }
 
-                    bool keyMatch = (!target_raw.empty() && SmartStringMatch(key_label, target_raw));
+                    bool keyMatch = (!target_raw.empty() && (SmartStringMatch(key_label, target_raw) || (!k_str.empty() && SmartStringMatch(k_str, target_raw))));
                     bool valIntMatch = hasTargetInt && (val_int == targetIntVal || (int64_t)val_ptr == targetIntVal);
 
                     if (IsValidPtr(val_ptr)) {
+                        std::string val_str = ReadIl2CppString(val_ptr);
+                        bool valStrMatch = (!val_str.empty() && !target_raw.empty() && SmartStringMatch(val_str, target_raw));
+
                         std::string valClass = GetObjClassName(val_ptr);
                         std::string val_clean = CleanIl2CppTypeName(valClass);
                         bool classMatch = (!target_raw.empty() && SmartStringMatch(valClass, target_raw));
 
-                        char fbuf[64]; snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", val_ptr, val_clean.c_str());
-                        std::vector<ObjectPathStep> nextPath = item.path;
-                        nextPath.push_back({ item.obj, item.className, key_label, valClass, val_clean, 0x18, val_ptr, valClass.empty() ? val_clean : valClass, false, val_ptr, fbuf });
+                        char fbuf[96];
+                        if (!val_str.empty()) snprintf(fbuf, sizeof(fbuf), "\"%s\"", val_str.c_str());
+                        else snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", val_ptr, val_clean.c_str());
 
-                        if (keyMatch || classMatch || valIntMatch) {
+                        std::vector<ObjectPathStep> nextPath = item.path;
+                        nextPath.push_back({ item.obj, item.className, key_label, val_str.empty() ? valClass : "String", val_str.empty() ? val_clean : "String", 0x18, val_ptr, val_str.empty() ? (valClass.empty() ? val_clean : valClass) : ("\"" + val_str + "\""), false, val_ptr, fbuf });
+
+                        if (keyMatch || classMatch || valIntMatch || valStrMatch) {
                             std::string sig = "";
                             for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
                             if (recordedPaths.find(sig) == recordedPaths.end()) {
                                 recordedPaths.insert(sig);
                                 FoundPath fp;
-                                if (valIntMatch) fp.matchDesc = (const char*)u8"[字典数值命中: " + target_raw + "] " + key_label;
+                                if (valStrMatch) fp.matchDesc = (const char*)u8"[字典值文本命中: \"" + val_str + "\"] " + key_label;
+                                else if (valIntMatch) fp.matchDesc = (const char*)u8"[字典数值命中: " + target_raw + "] " + key_label;
                                 else if (classMatch) fp.matchDesc = (const char*)u8"[字典值类名匹配] " + key_label + " -> " + val_clean;
                                 else fp.matchDesc = (const char*)u8"[字典键匹配] " + key_label;
 
                                 fp.targetInstance = val_ptr;
                                 fp.steps = nextPath;
                                 fp.fieldName = key_label;
-                                fp.cleanType = val_clean;
+                                fp.cleanType = val_str.empty() ? val_clean : "String";
                                 fp.offset = 0x18;
                                 fp.fieldAddress = val_ptr;
                                 fp.formattedVal = fbuf;
@@ -3413,7 +3429,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                             }
                         }
 
-                        if (!valClass.empty() && visited.find(val_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
+                        if (!valClass.empty() && val_str.empty() && visited.find(val_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
                             visited.insert(val_ptr);
                             queue.push_back({ val_ptr, valClass, nextPath, item.depth + 1 });
                         }
@@ -3423,7 +3439,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         }
 
         // ==========================================
-        // 4. 原生反射遍历类与全部父类字段 (智能全量模糊字/词匹配)
+        // 4. 原生反射遍历类与全部父类字段 (智能全量模糊字/词/字符串探测)
         // ==========================================
         if (g_il2cpp_api.class_get_fields) {
             int p_depth = 0;
@@ -3459,32 +3475,37 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     std::string str_content = "";
                     bool isIntField = false;
 
-                    if (clean_type == "String" || type_str.find("String") != std::string::npos) {
-                        if (IsValidPtr(rawVal)) {
-                            str_content = ReadIl2CppString(rawVal);
-                            formattedVal = str_content.empty() ? "\"\"" : ("\"" + str_content + "\"");
-                        } else {
-                            formattedVal = "Null";
+                    // ★ 核心增强：只要是有效指针，主动尝试探测是否为合法 IL2CPP 文本字符串（覆盖所有玩家名、标题、文本字段！）
+                    if (IsValidPtr(rawVal)) {
+                        str_content = ReadIl2CppString(rawVal);
+                        if (!str_content.empty()) {
+                            formattedVal = "\"" + str_content + "\"";
                         }
-                    } else if (clean_type == "Int32" || clean_type == "UInt32") {
-                        isIntField = true;
-                        char buf[32]; snprintf(buf, sizeof(buf), "%d", val32);
-                        formattedVal = buf;
-                    } else if (clean_type == "Int64" || clean_type == "UInt64") {
-                        isIntField = true;
-                        char buf[32]; snprintf(buf, sizeof(buf), "%ld", (int64_t)rawVal);
-                        formattedVal = buf;
-                    } else if (clean_type == "Boolean") {
-                        formattedVal = (rawVal & 0xFF) ? "true" : "false";
-                    } else if (clean_type == "Single") {
-                        float fval = 0; memcpy(&fval, &rawVal, sizeof(float));
-                        char buf[32]; snprintf(buf, sizeof(buf), "%.2f", fval);
-                        formattedVal = buf;
-                    } else {
-                        if (rawVal == 0) formattedVal = "Null";
-                        else {
-                            char buf[64]; snprintf(buf, sizeof(buf), "0x%lx", rawVal);
+                    }
+
+                    if (str_content.empty()) {
+                        if (clean_type == "String" || type_str.find("String") != std::string::npos) {
+                            formattedVal = IsValidPtr(rawVal) ? "\"\"" : "Null";
+                        } else if (clean_type == "Int32" || clean_type == "UInt32") {
+                            isIntField = true;
+                            char buf[32]; snprintf(buf, sizeof(buf), "%d", val32);
                             formattedVal = buf;
+                        } else if (clean_type == "Int64" || clean_type == "UInt64") {
+                            isIntField = true;
+                            char buf[32]; snprintf(buf, sizeof(buf), "%ld", (int64_t)rawVal);
+                            formattedVal = buf;
+                        } else if (clean_type == "Boolean") {
+                            formattedVal = (rawVal & 0xFF) ? "true" : "false";
+                        } else if (clean_type == "Single") {
+                            float fval = 0; memcpy(&fval, &rawVal, sizeof(float));
+                            char buf[32]; snprintf(buf, sizeof(buf), "%.2f", fval);
+                            formattedVal = buf;
+                        } else {
+                            if (rawVal == 0) formattedVal = "Null";
+                            else {
+                                char buf[64]; snprintf(buf, sizeof(buf), "0x%lx", rawVal);
+                                formattedVal = buf;
+                            }
                         }
                     }
 
@@ -3534,7 +3555,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                             if (recordedPaths.find(sig) == recordedPaths.end()) {
                                 recordedPaths.insert(sig);
                                 FoundPath fp;
-                                if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值命中: \"" + str_content + "\"]";
+                                if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值命中: \"" + str_content + "\"] " + field_str;
                                 else if (intValMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + target_raw + "] " + field_str;
                                 else if (classMatch) fp.matchDesc = (const char*)u8"[类名匹配] " + (childClass.empty() ? clean_type : childClass);
                                 else if (fieldMatch) fp.matchDesc = (const char*)u8"[字段匹配] " + field_str + " (" + clean_type + ")";
@@ -3556,7 +3577,8 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                             }
                         }
 
-                        if (!childClass.empty() && visited.find(child_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
+                        // 如果不是纯字符串且未访问过，入队继续深钻
+                        if (!childClass.empty() && str_content.empty() && visited.find(child_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
                             visited.insert(child_ptr);
                             queue.push_back({ child_ptr, childClass, nextPath, item.depth + 1 });
                         }
@@ -3570,7 +3592,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                             if (recordedPaths.find(sig) == recordedPaths.end()) {
                                 recordedPaths.insert(sig);
                                 FoundPath fp;
-                                if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值命中: \"" + str_content + "\"]";
+                                if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值命中: \"" + str_content + "\"] " + field_str;
                                 else if (intValMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + target_raw + "] " + field_str;
                                 else if (fieldMatch) fp.matchDesc = (const char*)u8"[字段属性] " + field_str + " (" + (clean_type.empty() ? "value" : clean_type) + ")";
                                 else if (typeMatch) fp.matchDesc = (const char*)u8"[类型匹配] " + clean_type;
@@ -3596,33 +3618,55 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         }
 
         // ==========================================
-        // 5. 实例内存深度兜底扫描 (Raw Instance Memory Scan for Unmapped Fields)
+        // 5. 实例内存深度兜底扫描 (Raw Instance Memory Scan for Unmapped Strings and Ints)
         // ==========================================
-        if (hasTargetInt && result.paths.size() < 20) {
-            for (size_t raw_off = 0x10; raw_off <= 0x180; raw_off += 4) {
+        if (result.paths.size() < 10) {
+            for (size_t raw_off = 0x10; raw_off <= 0x1A0; raw_off += sizeof(uintptr_t)) {
+                uintptr_t r_ptr = 0;
+                SafeReadMemory(item.obj + raw_off, &r_ptr, sizeof(uintptr_t));
                 int32_t r_val32 = 0;
                 SafeReadMemory(item.obj + raw_off, &r_val32, sizeof(int32_t));
-                if (r_val32 == targetIntVal) {
+
+                bool rawHit = false;
+                std::string hitDesc = "";
+                std::string hitVal = "";
+
+                if (IsValidPtr(r_ptr)) {
+                    std::string raw_str = ReadIl2CppString(r_ptr);
+                    if (!raw_str.empty() && !target_raw.empty() && SmartStringMatch(raw_str, target_raw)) {
+                        rawHit = true;
+                        hitDesc = (const char*)u8"[内存物理字符串命中: \"" + raw_str + "\"]";
+                        hitVal = "\"" + raw_str + "\"";
+                    }
+                }
+
+                if (!rawHit && hasTargetInt && r_val32 == targetIntVal) {
+                    rawHit = true;
+                    hitDesc = (const char*)u8"[内存物理数值命中: " + target_raw + "]";
+                    char buf[32]; snprintf(buf, sizeof(buf), "%d", r_val32);
+                    hitVal = buf;
+                }
+
+                if (rawHit) {
                     std::string raw_field = "MemorySlot[+0x" + std::to_string(raw_off) + "]";
                     std::vector<ObjectPathStep> nextPath = item.path;
-                    char fbuf[32]; snprintf(fbuf, sizeof(fbuf), "%d", r_val32);
-                    nextPath.push_back({ item.obj, item.className, raw_field, "Int32", "Int32", raw_off, item.obj + raw_off, "Int32", true, (uintptr_t)r_val32, fbuf });
+                    nextPath.push_back({ item.obj, item.className, raw_field, "RawSlot", "RawSlot", raw_off, item.obj + raw_off, "RawSlot", true, (uintptr_t)r_ptr, hitVal });
 
                     std::string sig = "";
                     for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
                     if (recordedPaths.find(sig) == recordedPaths.end()) {
                         recordedPaths.insert(sig);
                         FoundPath fp;
-                        fp.matchDesc = (const char*)u8"[内存物理数值命中: " + target_raw + "] " + raw_field;
+                        fp.matchDesc = hitDesc + " " + raw_field;
                         fp.targetInstance = item.obj + raw_off;
                         fp.steps = nextPath;
                         fp.fieldName = raw_field;
-                        fp.cleanType = "Int32";
+                        fp.cleanType = "RawSlot";
                         fp.offset = raw_off;
                         fp.fieldAddress = item.obj + raw_off;
-                        fp.formattedVal = fbuf;
+                        fp.formattedVal = hitVal;
                         fp.intVal = r_val32;
-                        fp.isIntField = true;
+                        fp.isIntField = hasTargetInt;
                         result.paths.push_back(fp);
                         result.found = true;
                     }
