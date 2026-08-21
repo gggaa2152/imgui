@@ -5264,11 +5264,10 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 live_val = buf;
                 isObject = IsValidPtr(slot_ptr);
             } else {
-                snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
-
                 if (IsValidPtr(slot_ptr)) {
                     std::string s_val = ReadIl2CppString(slot_ptr);
                     if (!s_val.empty()) {
+                        snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
                         slot_type = "String";
                         live_val = "\"" + s_val + "\"";
                         isObject = false;
@@ -5283,7 +5282,18 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                             std::string full_cname = (!scns.empty()) ? (scns + "." + scn) : scn;
                             slot_type = full_cname.empty() ? "Object" : full_cname;
                             child_cls = slot_type;
+
+                            // ★ 智能推导字段名：若识别出具体类名（如 SpriteHelperModel），自动生成友好字段标识！
+                            std::string clean_cls = CleanIl2CppTypeName(scn.empty() ? full_cname : scn);
+                            if (!clean_cls.empty() && clean_cls != "Object" && clean_cls != "ValueType") {
+                                std::string inferred_name = clean_cls;
+                                if (!inferred_name.empty()) inferred_name[0] = (char)::tolower(inferred_name[0]);
+                                snprintf(slot_name, sizeof(slot_name), "[推导] _%s", inferred_name.c_str());
+                            } else {
+                                snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
+                            }
                         } else {
+                            snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
                             slot_type = "NativePtr";
                             child_cls = "NativePtr";
                         }
@@ -5292,6 +5302,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                         isObject = true;
                     }
                 } else {
+                    snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
                     char buf[32]; snprintf(buf, sizeof(buf), "%d (0x%x)", slot_int, slot_int);
                     live_val = buf;
                     slot_type = "Int32";
