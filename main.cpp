@@ -2768,6 +2768,198 @@ void DrawHextechCapsule() {
     EndContentFloatWindow("hex_grip", &g_hextech_scale);
 }
 
+struct ObjectPathStep {
+    uintptr_t fromObj;
+    std::string fromClass;
+    std::string fieldName;
+    size_t offset;
+    uintptr_t toObj;
+    std::string toClass;
+};
+
+struct ObjectPathFindingResult {
+    bool found;
+    std::string targetClassName;
+    uintptr_t targetInstance;
+    std::vector<ObjectPathStep> steps;
+};
+
+static ObjectPathFindingResult g_lastPathResult;
+
+ObjectPathFindingResult AutoFindPathToClass(uintptr_t rootObj, const std::string& targetClassName, int maxDepth = 6) {
+    ObjectPathFindingResult result;
+    result.found = false;
+    result.targetClassName = targetClassName;
+    result.targetInstance = 0;
+
+    if (!IsValidPtr(rootObj) || targetClassName.empty() || !g_il2cpp_api.init()) return result;
+
+    std::string target_lower = targetClassName;
+    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
+
+    struct QueueItem {
+        uintptr_t obj;
+        std::string className;
+        std::vector<ObjectPathStep> path;
+        int depth;
+    };
+
+    std::deque<QueueItem> queue;
+    std::unordered_set<uintptr_t> visited;
+
+    auto GetObjClassName = [](uintptr_t ptr) -> std::string {
+        if (!IsValidPtr(ptr)) return "";
+        void* klass_ptr = nullptr;
+        if (!SafeReadMemory(ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) return "";
+        const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
+        const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
+        return (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
+    };
+
+    std::string rootClass = GetObjClassName(rootObj);
+    if (rootClass.empty()) return result;
+
+    std::string root_lower = rootClass;
+    std::transform(root_lower.begin(), root_lower.end(), root_lower.begin(), ::tolower);
+    if (root_lower.find(target_lower) != std::string::npos || target_lower.find(root_lower) != std::string::npos) {
+        result.found = true;
+        result.targetInstance = rootObj;
+        return result;
+    }
+
+    queue.push_back({ rootObj, rootClass, {}, 0 });
+    visited.insert(rootObj);
+
+    while (!queue.empty()) {
+        QueueItem item = queue.front();
+        queue.pop_front();
+
+        if (item.depth >= maxDepth) continue;
+
+        void* klass_ptr = nullptr;
+        if (!SafeReadMemory(item.obj, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) continue;
+
+        if (g_il2cpp_api.class_get_fields) {
+            void* iter = nullptr;
+            while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
+                const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
+                size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
+
+                uintptr_t child_ptr = 0;
+                if (IsValidPtr(item.obj + f_offset) && SafeReadMemory(item.obj + f_offset, &child_ptr, sizeof(uintptr_t)) && IsValidPtr(child_ptr)) {
+                    if (visited.find(child_ptr) == visited.end()) {
+                        std::string childClass = GetObjClassName(child_ptr);
+                        if (!childClass.empty()) {
+                            std::string child_lower = childClass;
+                            std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
+
+                            std::vector<ObjectPathStep> nextPath = item.path;
+                            nextPath.push_back({ item.obj, item.className, f_name ? f_name : "", f_offset, child_ptr, childClass });
+
+                            // 匹配目标类名
+                            if (child_lower.find(target_lower) != std::string::npos || target_lower.find(child_lower) != std::string::npos) {
+                                result.found = true;
+                                result.targetInstance = child_ptr;
+                                result.steps = nextPath;
+                                return result;
+                            }
+
+                            visited.insert(child_ptr);
+                            queue.push_back({ child_ptr, childClass, nextPath, item.depth + 1 });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+struct ClassInspectInfo {
+    std::string className;
+    std::string imageName;
+    uintptr_t classAddress;
+    uintptr_t classRva;
+    struct MethodEntry { std::string name; uintptr_t rva; };
+    struct FieldEntry { std::string name; std::string typeName; size_t offset; };
+    std::vector<MethodEntry> methods;
+    std::vector<FieldEntry> fields;
+    bool valid;
+};
+
+static ClassInspectInfo g_inspectedClass;
+static char g_class_search_input[64] = "ZGameChess.ChessModelManager";
+
+ClassInspectInfo InspectClassByFullName(const std::string& targetName) {
+    ClassInspectInfo info;
+    info.className = targetName;
+    info.classAddress = 0;
+    info.classRva = 0;
+    info.valid = false;
+
+    if (targetName.empty() || !g_il2cpp_api.init()) return info;
+
+    void* domain = g_il2cpp_api.domain_get();
+    if (!domain) return info;
+
+    size_t asm_count = 0;
+    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
+    if (!assemblies) return info;
+
+    std::string target_lower = targetName;
+    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
+
+    for (size_t a = 0; a < asm_count; a++) {
+        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        const char* img_name = g_il2cpp_api.image_get_name ? g_il2cpp_api.image_get_name(img) : "";
+        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
+
+        for (size_t c = 0; c < cls_count; c++) {
+            void* klass = g_il2cpp_api.image_get_class(img, c);
+            if (!klass) continue;
+
+            const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass) : "";
+            const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : "";
+            std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
+            std::string full_class_lower = full_class;
+            std::transform(full_class_lower.begin(), full_class_lower.end(), full_class_lower.begin(), ::tolower);
+
+            if (full_class_lower == target_lower || full_class_lower.find(target_lower) != std::string::npos || target_lower.find(full_class_lower) != std::string::npos) {
+                info.className = full_class;
+                info.imageName = img_name ? img_name : "";
+                info.classAddress = (uintptr_t)klass;
+                info.classRva = info.classAddress > g_il2cppTrueBase ? (info.classAddress - g_il2cppTrueBase) : 0;
+                info.valid = true;
+
+                if (g_il2cpp_api.class_get_methods && g_il2cpp_api.method_get_name) {
+                    void* iter = nullptr;
+                    while (void* method = g_il2cpp_api.class_get_methods(klass, &iter)) {
+                        const char* m_name = g_il2cpp_api.method_get_name(method);
+                        uintptr_t func_ptr = *(uintptr_t*)method;
+                        uintptr_t rva = func_ptr > g_il2cppTrueBase ? (func_ptr - g_il2cppTrueBase) : 0;
+                        info.methods.push_back({ m_name ? m_name : "", rva });
+                    }
+                }
+
+                if (g_il2cpp_api.class_get_fields && g_il2cpp_api.field_get_name && g_il2cpp_api.field_get_offset) {
+                    void* iter = nullptr;
+                    while (void* field = g_il2cpp_api.class_get_fields(klass, &iter)) {
+                        const char* f_name = g_il2cpp_api.field_get_name(field);
+                        size_t f_offset = g_il2cpp_api.field_get_offset(field);
+                        void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
+                        const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
+                        info.fields.push_back({ f_name ? f_name : "", t_name ? t_name : "", f_offset });
+                    }
+                }
+                return info;
+            }
+        }
+    }
+    return info;
+}
+
 void DrawPathTraceFloatWindow() {
     if (!g_win_path_trace) return;
     if (!g_is_in_match.load(std::memory_order_relaxed)) return;
@@ -3231,193 +3423,7 @@ static int g_resolver_subtab = 0;
 static char g_custom_inspect_addr[32] = "0x0";
 static LiveInstanceDump g_custom_dump;
 
-struct ObjectPathStep {
-    uintptr_t fromObj;
-    std::string fromClass;
-    std::string fieldName;
-    size_t offset;
-    uintptr_t toObj;
-    std::string toClass;
-};
 
-struct ObjectPathFindingResult {
-    bool found;
-    std::string targetClassName;
-    uintptr_t targetInstance;
-    std::vector<ObjectPathStep> steps;
-};
-
-static ObjectPathFindingResult g_lastPathResult;
-
-ObjectPathFindingResult AutoFindPathToClass(uintptr_t rootObj, const std::string& targetClassName, int maxDepth = 6) {
-    ObjectPathFindingResult result;
-    result.found = false;
-    result.targetClassName = targetClassName;
-    result.targetInstance = 0;
-
-    if (!IsValidPtr(rootObj) || targetClassName.empty() || !g_il2cpp_api.init()) return result;
-
-    std::string target_lower = targetClassName;
-    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
-
-    struct QueueItem {
-        uintptr_t obj;
-        std::string className;
-        std::vector<ObjectPathStep> path;
-        int depth;
-    };
-
-    std::deque<QueueItem> queue;
-    std::unordered_set<uintptr_t> visited;
-
-    auto GetObjClassName = [](uintptr_t ptr) -> std::string {
-        if (!IsValidPtr(ptr)) return "";
-        void* klass_ptr = nullptr;
-        if (!SafeReadMemory(ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) return "";
-        const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
-        const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
-        return (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
-    };
-
-    std::string rootClass = GetObjClassName(rootObj);
-    if (rootClass.empty()) return result;
-
-    std::string root_lower = rootClass;
-    std::transform(root_lower.begin(), root_lower.end(), root_lower.begin(), ::tolower);
-    if (root_lower.find(target_lower) != std::string::npos || target_lower.find(root_lower) != std::string::npos) {
-        result.found = true;
-        result.targetInstance = rootObj;
-        return result;
-    }
-
-    queue.push_back({ rootObj, rootClass, {}, 0 });
-    visited.insert(rootObj);
-
-    while (!queue.empty()) {
-        QueueItem item = queue.front();
-        queue.pop_front();
-
-        if (item.depth >= maxDepth) continue;
-
-        void* klass_ptr = nullptr;
-        if (!SafeReadMemory(item.obj, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) continue;
-
-        if (g_il2cpp_api.class_get_fields) {
-            void* iter = nullptr;
-            while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
-                const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
-                size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
-
-                uintptr_t child_ptr = 0;
-                if (IsValidPtr(item.obj + f_offset) && SafeReadMemory(item.obj + f_offset, &child_ptr, sizeof(uintptr_t)) && IsValidPtr(child_ptr)) {
-                    if (visited.find(child_ptr) == visited.end()) {
-                        std::string childClass = GetObjClassName(child_ptr);
-                        if (!childClass.empty()) {
-                            std::string child_lower = childClass;
-                            std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
-
-                            std::vector<ObjectPathStep> nextPath = item.path;
-                            nextPath.push_back({ item.obj, item.className, f_name ? f_name : "", f_offset, child_ptr, childClass });
-
-                            // 匹配目标类名
-                            if (child_lower.find(target_lower) != std::string::npos || target_lower.find(child_lower) != std::string::npos) {
-                                result.found = true;
-                                result.targetInstance = child_ptr;
-                                result.steps = nextPath;
-                                return result;
-                            }
-
-                            visited.insert(child_ptr);
-                            queue.push_back({ child_ptr, childClass, nextPath, item.depth + 1 });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return result;
-}
-
-struct ClassInspectInfo {
-    std::string className;
-    std::string imageName;
-    uintptr_t classAddress;
-    uintptr_t classRva;
-    struct MethodEntry { std::string name; uintptr_t rva; };
-    struct FieldEntry { std::string name; std::string typeName; size_t offset; };
-    std::vector<MethodEntry> methods;
-    std::vector<FieldEntry> fields;
-    bool valid;
-};
-
-static ClassInspectInfo g_inspectedClass;
-static char g_class_search_input[64] = "ZGameChess.ChessModelManager";
-
-ClassInspectInfo InspectClassByFullName(const std::string& targetName) {
-    ClassInspectInfo info;
-    info.className = targetName;
-    info.classAddress = 0;
-    info.classRva = 0;
-    info.valid = false;
-
-    if (targetName.empty() || !g_il2cpp_api.init()) return info;
-
-    void* domain = g_il2cpp_api.domain_get();
-    if (!domain) return info;
-
-    size_t asm_count = 0;
-    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
-    if (!assemblies) return info;
-
-    std::string target_lower = targetName;
-    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
-
-    for (size_t a = 0; a < asm_count; a++) {
-        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
-        if (!img) continue;
-        const char* img_name = g_il2cpp_api.image_get_name ? g_il2cpp_api.image_get_name(img) : "";
-        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
-
-        for (size_t c = 0; c < cls_count; c++) {
-            void* klass = g_il2cpp_api.image_get_class(img, c);
-            if (!klass) continue;
-
-            const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass) : "";
-            const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : "";
-            std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
-            std::string full_class_lower = full_class;
-            std::transform(full_class_lower.begin(), full_class_lower.end(), full_class_lower.begin(), ::tolower);
-
-            if (full_class_lower == target_lower || full_class_lower.find(target_lower) != std::string::npos || target_lower.find(full_class_lower) != std::string::npos) {
-                info.className = full_class;
-                info.imageName = img_name ? img_name : "";
-                info.classAddress = (uintptr_t)klass;
-                info.classRva = info.classAddress > g_il2cppTrueBase ? (info.classAddress - g_il2cppTrueBase) : 0;
-                info.valid = true;
-
-                if (g_il2cpp_api.class_get_methods && g_il2cpp_api.method_get_name) {
-                    void* iter = nullptr;
-                    while (void* method = g_il2cpp_api.class_get_methods(klass, &iter)) {
-                        const char* m_name = g_il2cpp_api.method_get_name(method);
-                        uintptr_t func_ptr = *(uintptr_t*)method;
-                        uintptr_t rva = func_ptr > g_il2cppTrueBase ? (func_ptr - g_il2cppTrueBase) : 0;
-                        info.methods.push_back({ m_name ? m_name : "", rva });
-                    }
-                }
-
-                if (g_il2cpp_api.class_get_fields && g_il2cpp_api.field_get_name && g_il2cpp_api.field_get_offset) {
-                    void* iter = nullptr;
-                    while (void* field = g_il2cpp_api.class_get_fields(klass, &iter)) {
-                        const char* f_name = g_il2cpp_api.field_get_name(field);
-                        size_t f_offset = g_il2cpp_api.field_get_offset(field);
-                        void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
-                        const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
-                        info.fields.push_back({ f_name ? f_name : "", t_name ? t_name : "", f_offset });
-                    }
-                }
-                return info;
-            }
         }
     }
     return info;
