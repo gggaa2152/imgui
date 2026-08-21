@@ -3743,6 +3743,8 @@ void DrawSymbolResolverUI() {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"✅ 找到一条最短寻址路径：");
         ImGui::Indent(10.0f * sc);
+        ImGui::PushTextWrapPos(0.0f); // Enable text wrapping
+        
         if (g_lastPathResult.steps.empty()) {
             ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", g_lastPathResult.targetInstance);
         } else {
@@ -3763,6 +3765,8 @@ void DrawSymbolResolverUI() {
             ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
             ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"🎯 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
         }
+        
+        ImGui::PopTextWrapPos(); // Disable text wrapping
         ImGui::Unindent(10.0f * sc);
     }
 }void DrawMainMenu() {
