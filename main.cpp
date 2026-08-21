@@ -3545,49 +3545,6 @@ void DrawActionLogOverlay() {
 
 // ==========================================
 // 符号反查与动态反射模块 (Symbol Reflection & Inspector)
-// ==========================================
-
-inline std::string CleanIl2CppTypeName(const std::string& raw) {
-    if (raw.empty()) return "var";
-    if (raw == "System.Int32" || raw == "int") return "Int32";
-    if (raw == "System.Int64" || raw == "long") return "Int64";
-    if (raw == "System.UInt32" || raw == "uint") return "UInt32";
-    if (raw == "System.UInt64" || raw == "ulong") return "UInt64";
-    if (raw == "System.Single" || raw == "float") return "Single";
-    if (raw == "System.Double" || raw == "double") return "Double";
-    if (raw == "System.Boolean" || raw == "bool") return "Boolean";
-    if (raw == "System.String" || raw == "string") return "String";
-    if (raw == "System.Byte" || raw == "byte") return "Byte";
-    if (raw == "System.SByte" || raw == "sbyte") return "SByte";
-    if (raw == "System.Int16" || raw == "short") return "Int16";
-    if (raw == "System.UInt16" || raw == "ushort") return "UInt16";
-    if (raw == "System.Char" || raw == "char") return "Char";
-    if (raw == "System.Void" || raw == "void") return "Void";
-    if (raw == "UnityEngine.Transform") return "Transform";
-    if (raw == "UnityEngine.GameObject") return "GameObject";
-    if (raw == "UnityEngine.Vector2") return "Vector2";
-    if (raw == "UnityEngine.Vector3") return "Vector3";
-    if (raw == "UnityEngine.Color") return "Color";
-    
-    // Handle List`1 generics
-    if (raw.find("System.Collections.Generic.List`1") != std::string::npos || raw.find("List`1") != std::string::npos) {
-        size_t b = raw.find('[');
-        size_t e = raw.rfind(']');
-        if (b != std::string::npos && e != std::string::npos && e > b) {
-            std::string sub = raw.substr(b + 1, e - b - 1);
-            return "List<" + CleanIl2CppTypeName(sub) + ">";
-        }
-        return "List<GameObject>";
-    }
-    
-    // Remove namespaces
-    size_t lastDot = raw.rfind('.');
-    if (lastDot != std::string::npos && lastDot + 1 < raw.length()) {
-        return raw.substr(lastDot + 1);
-    }
-    return raw;
-}
-
 struct LiveFieldInfo {
     std::string name;
     std::string typeName;
