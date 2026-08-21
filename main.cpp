@@ -5096,7 +5096,6 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     // ==========================================
     // B. 原生 IL2CPP 字段反射 (实时每帧从物理内存读取最新动态值，受深度保护)
     // ==========================================
-    int bRealFieldCount = 0;
     if (klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
         int p_depth = 0;
         for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && p_depth < 20; p_depth++, cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
@@ -5241,7 +5240,6 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                     }
                 }
 
-                bRealFieldCount++;
                 fieldRows.push_back({ f_offset, display_name, type_str, clean_type, isBaseClass ? base_cls_str : "", isBaseClass, isBacking, rawVal, val32, val64, liveVal, isInt, isObjPtr, isNull, childCls });
             }
         }
@@ -5313,113 +5311,39 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     }
 
     // ==========================================
-    // D. 实例物理内存槽位全量融合补充 (自动将 +0x10, +0x18, +0x28 等未被 IL2CPP 反射登记的物理槽位全部合并呈现！)
+    // D. 对象内建结构 (仅展示 IL2CPP 对象的两条固定头信息: 对象头 klass 指针 + 同步锁 monitor)
+    //    设计说明: 原 D 段会"扫描对象内存 0x00~0x300 所有 8 字节槽位, 把看起来像指针/字符串/数字的值
+    //    全部猜成字段", 产生大量无意义的 "Slot_+0xNN". 那些并不是内存里真实的字段名.
+    //    真实字段一律来自 A/B/C 段的 IL2CPP 原生反射 —— class_get_fields 返回的名字即元数据/运行时里
+    //    真实的字段名, 内存里是什么就显示什么, 本段不再做任何猜测. 仅保留 0x00/0x08 两条对象内建
+    //    结构作为元信息(这是每个 IL2CPP 对象真实存在的内存布局, 绝非猜测).
     // ==========================================
     {
-        std::unordered_set<size_t> existing_offsets;
-        for (const auto& r : fieldRows) existing_offsets.insert(r.offset);
-
-        // 当 B 段已成功枚举出真实字段, 或当前对象为数组(元素已由 A 段呈现)时,
-        // 抑制 D 段对中间槽位的全量扫描, 只保留对象头(+0x00)与同步锁(+0x08)两个固定结构,
-        // 避免第二层下钻对象被一堆 "Slot_+0xNN" 淹没. 仅在 B 段完全没产出且非数组时,
-        // 才保留原始内存槽位探测作为兜底.
-        bool suppressMidSlots = (bRealFieldCount > 0 || isArray);
-
-        for (size_t slot_off = 0x00; slot_off <= 0x300; slot_off += sizeof(uintptr_t)) {
-            if (suppressMidSlots && slot_off != 0x00 && slot_off != 0x08) continue;
-            if (existing_offsets.find(slot_off) != existing_offsets.end()) continue;
+        // 固定内建结构 1: 对象头 (+0x00) -> 指向 IL2CPP 类 (Il2CppClass*)
+        {
+            size_t slot_off = 0x00;
             uintptr_t slot_ptr = 0;
             SafeReadMemory(currentObj + slot_off, &slot_ptr, sizeof(uintptr_t));
-            int32_t slot_int = 0;
-            SafeReadMemory(currentObj + slot_off, &slot_int, sizeof(int32_t));
-
-            if (slot_ptr == 0 && slot_int == 0 && g_inspector_hide_null && slot_off > 0x08) continue;
-
-            char slot_name[64];
-            std::string live_val = "";
-            bool isObject = false;
-            std::string slot_type = "Value";
-            std::string child_cls = "";
-
-            if (slot_off == 0x00) {
-                snprintf(slot_name, sizeof(slot_name), (const char*)u8"[对象头] _klass");
-                std::string full_kname = fullClassName;
-                if (IsValidIl2CppClass((void*)slot_ptr)) {
-                    const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name((void*)slot_ptr) : nullptr;
-                    const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace((void*)slot_ptr) : nullptr;
-                    std::string s_name = SafeReadCString(cn);
-                    std::string s_ns = SafeReadCString(cns);
-                    if (!s_name.empty()) full_kname = (!s_ns.empty()) ? (s_ns + "." + s_name) : s_name;
-                }
-                slot_type = "Il2CppClass*";
-                child_cls = full_kname;
-                char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", slot_ptr, full_kname.c_str());
-                live_val = buf;
-                isObject = true;
-            } else if (slot_off == 0x08) {
-                snprintf(slot_name, sizeof(slot_name), (const char*)u8"[同步锁] _monitor");
-                slot_type = "MonitorData*";
-                char buf[64];
-                if (slot_ptr == 0) snprintf(buf, sizeof(buf), "0 (0x0)");
-                else snprintf(buf, sizeof(buf), "0x%lx", slot_ptr);
-                live_val = buf;
-                isObject = IsValidPtr(slot_ptr);
-            } else {
-                if (IsValidPtr(slot_ptr)) {
-                    std::string s_val = ReadIl2CppString(slot_ptr);
-                    if (!s_val.empty()) {
-                        snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
-                        slot_type = "String";
-                        live_val = "\"" + s_val + "\"";
-                        isObject = false;
-                    } else {
-                        void* c_klass = nullptr;
-                        SafeReadMemory(slot_ptr, &c_klass, sizeof(void*));
-                        if (c_klass && IsValidIl2CppClass(c_klass)) {
-                            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : nullptr;
-                            const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(c_klass) : nullptr;
-                            std::string scn = SafeReadCString(cn);
-                            std::string scns = SafeReadCString(cns);
-                            std::string full_cname = (!scns.empty()) ? (scns + "." + scn) : scn;
-                            slot_type = full_cname.empty() ? "Object" : full_cname;
-                            child_cls = slot_type;
-
-                            // ★ 智能推导字段名：若识别出具体类名（如 SpriteHelperModel），自动生成友好字段标识！
-                            std::string clean_cls = CleanIl2CppTypeName(scn.empty() ? full_cname : scn);
-                            // 去掉前导非标识符垃圾(元数据读取残留的 '?' 等), 避免出现 _?battleModel 这类脏名.
-                            size_t ks2 = 0;
-                            while (ks2 < clean_cls.size()) {
-                                char c = clean_cls[ks2];
-                                bool ok = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_');
-                                if (ok) break;
-                                ks2++;
-                            }
-                            if (ks2 > 0 && ks2 < clean_cls.size()) clean_cls = clean_cls.substr(ks2);
-                            if (!clean_cls.empty() && clean_cls != "Object" && clean_cls != "ValueType") {
-                                std::string inferred_name = clean_cls;
-                                if (!inferred_name.empty()) inferred_name[0] = (char)::tolower(inferred_name[0]);
-                                snprintf(slot_name, sizeof(slot_name), "[推导] _%s", inferred_name.c_str());
-                            } else {
-                                snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
-                            }
-                        } else {
-                            snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
-                            slot_type = "NativePtr";
-                            child_cls = "NativePtr";
-                        }
-                        char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", slot_ptr, CleanIl2CppTypeName(slot_type).c_str());
-                        live_val = buf;
-                        isObject = true;
-                    }
-                } else {
-                    snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
-                    char buf[32]; snprintf(buf, sizeof(buf), "%d (0x%x)", slot_int, slot_int);
-                    live_val = buf;
-                    slot_type = "Int32";
-                }
+            std::string full_kname = fullClassName;
+            if (IsValidIl2CppClass((void*)slot_ptr)) {
+                const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name((void*)slot_ptr) : nullptr;
+                const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace((void*)slot_ptr) : nullptr;
+                std::string s_name = StripLeadingGarbage(SafeReadCString(cn));
+                std::string s_ns = StripLeadingGarbage(SafeReadCString(cns));
+                if (!s_name.empty()) full_kname = (!s_ns.empty()) ? (s_ns + "." + s_name) : s_name;
             }
-
-            fieldRows.push_back({ slot_off, slot_name, slot_type, CleanIl2CppTypeName(slot_type), "", false, false, slot_ptr, slot_int, (int64_t)slot_int, live_val, !isObject, isObject, (slot_ptr == 0), child_cls });
+            char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", slot_ptr, full_kname.c_str());
+            fieldRows.push_back({ slot_off, (const char*)u8"[对象头] _klass", "Il2CppClass*", "Il2CppClass*", "", false, false, slot_ptr, 0, (int64_t)slot_ptr, buf, false, true, (slot_ptr == 0), full_kname });
+        }
+        // 固定内建结构 2: 同步锁 (+0x08) -> MonitorData* (Unity 对象的内建锁, 真实存在)
+        {
+            size_t slot_off = 0x08;
+            uintptr_t slot_ptr = 0;
+            SafeReadMemory(currentObj + slot_off, &slot_ptr, sizeof(uintptr_t));
+            char buf[64];
+            if (slot_ptr == 0) snprintf(buf, sizeof(buf), "0 (0x0)");
+            else snprintf(buf, sizeof(buf), "0x%lx", slot_ptr);
+            fieldRows.push_back({ slot_off, (const char*)u8"[同步锁] _monitor", "MonitorData*", "MonitorData*", "", false, false, slot_ptr, 0, (int64_t)slot_ptr, buf, false, IsValidPtr(slot_ptr), (slot_ptr == 0), "MonitorData*" });
         }
     }
 
