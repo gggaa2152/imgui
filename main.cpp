@@ -3378,7 +3378,7 @@ void DrawVirtualKeyboard() {
     ImGui::SetWindowFontScale(0.95f);
 
     // Header / Target Display
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "输入内容:");
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"输入内容:");
     ImGui::SameLine();
     ImGui::Text("%s_", g_vkbd_target);
     ImGui::Separator();
@@ -3389,12 +3389,42 @@ void DrawVirtualKeyboard() {
     float base_btn_w = (avail_w - (spacing * 13.0f)) / 13.5f; // 13 keys wide approx
     float btn_h = (ImGui::GetContentRegionAvail().y - (spacing * 4.0f)) / 4.0f; // 4 rows
 
+    static float g_bs_hold_time = 0.0f;
+    static float g_bs_repeat_interval = 0.0f;
+
     auto KeyBtn = [&](const char* key, float width_mult = 1.0f) {
+        if (strcmp(key, "BS") == 0) {
+            ImGui::Button("BS", ImVec2(base_btn_w * width_mult, btn_h));
+            bool is_clicked = ImGui::IsItemClicked();
+            bool is_active = ImGui::IsItemActive();
+
+            if (is_clicked) {
+                size_t len = strlen(g_vkbd_target);
+                if (len > 0) g_vkbd_target[len - 1] = '\0';
+                g_bs_hold_time = 0.0f;
+                g_bs_repeat_interval = 0.0f;
+            } else if (is_active) {
+                g_bs_hold_time += io.DeltaTime;
+                // 按住超过 0.28 秒后，开启高频连续删除
+                if (g_bs_hold_time > 0.28f) {
+                    g_bs_repeat_interval += io.DeltaTime;
+                    // 每 0.04 秒连续删除一个字符
+                    if (g_bs_repeat_interval >= 0.04f) {
+                        g_bs_repeat_interval = 0.0f;
+                        size_t len = strlen(g_vkbd_target);
+                        if (len > 0) g_vkbd_target[len - 1] = '\0';
+                    }
+                }
+            } else {
+                g_bs_hold_time = 0.0f;
+                g_bs_repeat_interval = 0.0f;
+            }
+            return;
+        }
+
         if (ImGui::Button(key, ImVec2(base_btn_w * width_mult, btn_h))) {
             size_t len = strlen(g_vkbd_target);
-            if (strcmp(key, "BS") == 0) {
-                if (len > 0) g_vkbd_target[len - 1] = '\0';
-            } else if (strcmp(key, "CLR") == 0) {
+            if (strcmp(key, "CLR") == 0) {
                 g_vkbd_target[0] = '\0';
             } else if (strcmp(key, "ENTER") == 0) {
                 g_show_vkbd = false;
