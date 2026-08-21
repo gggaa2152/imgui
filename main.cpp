@@ -3264,7 +3264,7 @@ void DrawPathTraceFloatWindow() {
             ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
             ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"🎯 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
         }
-    
+    }
 
     EndContentFloatWindow("pt_grip", &g_path_trace_scale);
 }
