@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aether Cloud - 企业级分布式计算与高并发遥测平台</title>
+    <meta name="description" content="Aether Cloud 提供新一代高性能分布式架构、实时遥测分析与低延迟微服务解决方案。">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0d14;
+            --bg-secondary: #101522;
+            --bg-card: rgba(20, 26, 40, 0.7);
+            --bg-card-hover: rgba(28, 36, 56, 0.85);
+            --accent-primary: #6366f1;
+            --accent-secondary: #06b6d4;
+            --accent-glow: rgba(99, 102, 241, 0.35);
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --border-color: rgba(255, 255, 255, 0.08);
+            --border-highlight: rgba(99, 102, 241, 0.4);
+            --success: #10b981;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: 'Fira Code', monospace;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            line-height: 1.6;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(circle at 15% 20%, rgba(99, 102, 241, 0.12) 0%, transparent 40%),
+                radial-gradient(circle at 85% 60%, rgba(6, 182, 212, 0.10) 0%, transparent 45%),
+                radial-gradient(circle at 50% 90%, rgba(139, 92, 246, 0.08) 0%, transparent 50%);
+            background-attachment: fixed;
+        }
+
+        /* 顶部导航栏 */
+        .navbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 70px;
+            background: rgba(10, 13, 20, 0.8);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 40px;
+            z-index: 1000;
+        }
+
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .brand-logo {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 16px var(--accent-glow);
+            transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .brand-logo:hover {
+            transform: scale(1.1) rotate(5deg);
+        }
+
+        .brand-logo svg {
+            width: 22px;
+            height: 22px;
+            fill: white;
+        }
+
+        .brand-name {
+            font-size: 1.25rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #ffffff 40%, #94a3b8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 32px;
+            list-style: none;
+        }
+
+        .nav-link {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.92rem;
+            font-weight: 500;
+            transition: color 0.2s, transform 0.2s;
+        }
+
+        .nav-link:hover {
+            color: #ffffff;
+            transform: translateY(-1px);
+        }
+
+        .nav-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: #34d399;
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background-color: #10b981;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+
+        .btn-console {
+            background: linear-gradient(135deg, var(--accent-primary), #4f46e5);
+            color: #ffffff;
+            border: none;
+            padding: 9px 20px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 14px var(--accent-glow);
+            transition: all 0.25s ease;
+        }
+
+        .btn-console:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5);
+        }
+
+        /* 主体内容 */
+        .hero {
+            padding: 160px 40px 100px;
+            max-width: 1200px;
+            margin: 0 auto;
+            text-align: center;
+            position: relative;
+        }
+
+        .hero-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-highlight);
+            padding: 6px 18px;
+            border-radius: 30px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #cbd5e1;
+            margin-bottom: 28px;
+            box-shadow: 0 0 20px rgba(99, 102, 241, 0.15);
+        }
+
+        .hero-title {
+            font-size: 3.8rem;
+            font-weight: 800;
+            line-height: 1.15;
+            margin-bottom: 24px;
+            letter-spacing: -1.5px;
+        }
+
+        .gradient-text {
+            background: linear-gradient(135deg, #ffffff 20%, #818cf8 60%, #06b6d4 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-subtitle {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            max-width: 780px;
+            margin: 0 auto 40px;
+            font-weight: 400;
+        }
+
+        .hero-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 18px;
+            margin-bottom: 70px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-primary), #4f46e5);
+            color: white;
+            padding: 14px 32px;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 600;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            cursor: pointer;
+            box-shadow: 0 4px 20px var(--accent-glow);
+            transition: all 0.25s;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(99, 102, 241, 0.6);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.05);
+            color: #ffffff;
+            padding: 14px 32px;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 600;
+            border: 1px solid var(--border-color);
+            cursor: pointer;
+            backdrop-filter: blur(8px);
+            transition: all 0.25s;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-2px);
+        }
+
+        /* 终端遥测演示框 */
+        .terminal-preview {
+            max-width: 960px;
+            margin: 0 auto 120px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            overflow: hidden;
+            box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.7), 0 0 40px rgba(99, 102, 241, 0.1);
+            text-align: left;
+        }
+
+        .terminal-header {
+            background: rgba(255, 255, 255, 0.03);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .terminal-dots {
+            display: flex;
+            gap: 8px;
+        }
+
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .dot.red { background: #ef4444; }
+        .dot.yellow { background: #eab308; }
+        .dot.green { background: #22c55e; }
+
+        .terminal-title {
+            font-family: var(--font-mono);
+            font-size: 0.82rem;
+            color: var(--text-muted);
+        }
+
+        .terminal-body {
+            padding: 24px;
+            font-family: var(--font-mono);
+            font-size: 0.88rem;
+            color: #cbd5e1;
+            line-height: 1.7;
+            max-height: 280px;
+            overflow-y: auto;
+        }
+
+        .log-line {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 6px;
+        }
+
+        .log-time { color: var(--text-muted); }
+        .log-tag { color: var(--accent-secondary); font-weight: 600; }
+        .log-ok { color: #34d399; }
+        .log-info { color: #818cf8; }
+
+        /* 特性网格 */
+        .features-section {
+            max-width: 1200px;
+            margin: 0 auto 120px;
+            padding: 0 40px;
+        }
+
+        .section-header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        .section-title {
+            font-size: 2.2rem;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }
+
+        .section-desc {
+            color: var(--text-secondary);
+            font-size: 1.05rem;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+            gap: 24px;
+        }
+
+        .feature-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            padding: 32px;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--accent-primary), transparent);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .feature-card:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--border-highlight);
+            transform: translateY(-5px);
+            box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+        }
+
+        .feature-card:hover::before {
+            opacity: 1;
+        }
+
+        .card-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 10px;
+            background: rgba(99, 102, 241, 0.12);
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+
+        .card-icon svg {
+            width: 24px;
+            height: 24px;
+            fill: #818cf8;
+        }
+
+        .card-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #ffffff;
+        }
+
+        .card-desc {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            line-height: 1.6;
+        }
+
+        /* 统计数据横幅 */
+        .stats-banner {
+            max-width: 1200px;
+            margin: 0 auto 120px;
+            padding: 40px;
+            background: linear-gradient(135deg, rgba(20, 26, 40, 0.8), rgba(16, 21, 34, 0.8));
+            border: 1px solid var(--border-color);
+            border-radius: 18px;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 30px;
+            text-align: center;
+        }
+
+        .stat-val {
+            font-size: 2.6rem;
+            font-weight: 800;
+            color: #ffffff;
+            margin-bottom: 6px;
+            background: linear-gradient(135deg, #ffffff, #818cf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        /* 隐秘开发者入口弹窗 (Stealth Camouflage Modal) */
+        .stealth-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(12px);
+            z-index: 2000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-box {
+            background: #111827;
+            border: 1px solid #374151;
+            border-radius: 12px;
+            width: 480px;
+            padding: 28px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.9);
+            font-family: var(--font-mono);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #1f2937;
+            padding-bottom: 12px;
+        }
+
+        .modal-title {
+            color: #38bdf8;
+            font-size: 1.05rem;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            color: #9ca3af;
+            cursor: pointer;
+            font-size: 1.2rem;
+            background: none;
+            border: none;
+        }
+
+        .modal-body input {
+            width: 100%;
+            background: #030712;
+            border: 1px solid #374151;
+            padding: 12px 16px;
+            border-radius: 6px;
+            color: #f9fafb;
+            font-family: var(--font-mono);
+            font-size: 0.95rem;
+            margin-bottom: 16px;
+            outline: none;
+        }
+
+        .modal-body input:focus {
+            border-color: #6366f1;
+        }
+
+        .modal-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        /* 页脚 */
+        footer {
+            border-top: 1px solid var(--border-color);
+            background: rgba(10, 13, 20, 0.9);
+            padding: 50px 40px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.88rem;
+        }
+
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 24px;
+            margin-bottom: 16px;
+        }
+
+        .footer-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        .footer-links a:hover {
+            color: #ffffff;
+        }
+
+        @media (max-width: 768px) {
+            .navbar { padding: 0 20px; }
+            .nav-links { display: none; }
+            .hero-title { font-size: 2.5rem; }
+            .stats-banner { grid-template-columns: repeat(2, 1fr); padding: 24px; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 顶部导航 -->
+    <nav class="navbar">
+        <a class="nav-brand" id="brandLogo" title="连续点击3次开启隐秘入口">
+            <div class="brand-logo">
+                <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            </div>
+            <span class="brand-name">Aether Cloud</span>
+        </a>
+
+        <ul class="nav-links">
+            <li><a href="#features" class="nav-link">核心架构</a></li>
+            <li><a href="#telemetry" class="nav-link">实时遥测</a></li>
+            <li><a href="#stats" class="nav-link">性能指标</a></li>
+            <li><a href="#solutions" class="nav-link">企业解决方案</a></li>
+            <li><a href="#docs" class="nav-link">开发者文档</a></li>
+        </ul>
+
+        <div class="nav-actions">
+            <div class="status-badge">
+                <span class="pulse-dot"></span>
+                <span>节点全量正常运行</span>
+            </div>
+            <button class="btn-console" onclick="openConsole()">工作控制台</button>
+        </div>
+    </nav>
+
+    <!-- 主横幅 Hero -->
+    <header class="hero">
+        <div class="hero-pill">
+            <span style="color: #818cf8; font-weight: 600;">NEW</span>
+            <span>Aether Engine v2.4 LTS 已正式发布</span>
+        </div>
+        <h1 class="hero-title">
+            构建高弹性、低延迟的<br>
+            <span class="gradient-text">分布式内存遥测与算力网络</span>
+        </h1>
+        <p class="hero-subtitle">
+            专为极速高并发场景打造。提供纳秒级内省追踪、毫秒级集群同步以及全栈自愈式微服务架构。
+        </p>
+        <div class="hero-buttons">
+            <button class="btn-primary" onclick="openConsole()">立即部署集群</button>
+            <button class="btn-secondary" onclick="scrollToSection('telemetry')">查看系统日志</button>
+        </div>
+
+        <!-- 终端实时滚动演示 -->
+        <div class="terminal-preview" id="telemetry">
+            <div class="terminal-header">
+                <div class="terminal-dots">
+                    <div class="dot red"></div>
+                    <div class="dot yellow"></div>
+                    <div class="dot green"></div>
+                </div>
+                <div class="terminal-title">aether-daemon :: live-cluster-telemetry.log</div>
+                <div style="font-size: 0.75rem; color: #10b981; font-family: var(--font-mono);">[LIVE STREAMING]</div>
+            </div>
+            <div class="terminal-body" id="logTerminal">
+                <div class="log-line"><span class="log-time">[00:00:01]</span> <span class="log-tag">[BOOT]</span> <span class="log-ok">Aether Cluster Manager daemon initialized on ARM64-v8a</span></div>
+                <div class="log-line"><span class="log-time">[00:00:02]</span> <span class="log-tag">[NETWORK]</span> <span>Connected to global distributed mesh node 0x741b86f880</span></div>
+                <div class="log-line"><span class="log-time">[00:00:03]</span> <span class="log-tag">[METRICS]</span> <span class="log-info">Allocated 16384 MB virtual ring-buffer with 0 page faults</span></div>
+                <div class="log-line"><span class="log-time">[00:00:04]</span> <span class="log-tag">[SYNC]</span> <span class="log-ok">Heartbeat acknowledged • Latency: 0.42ms • Packet Loss: 0.00%</span></div>
+            </div>
+        </div>
+    </header>
+
+    <!-- 统计指标 -->
+    <section class="stats-banner" id="stats">
+        <div>
+            <div class="stat-val">99.999%</div>
+            <div class="stat-label">SLA 服务可用性</div>
+        </div>
+        <div>
+            <div class="stat-val">&lt; 0.8ms</div>
+            <div class="stat-label">核心内省响应延迟</div>
+        </div>
+        <div>
+            <div class="stat-val">520M+</div>
+            <div class="stat-label">日均遥测事件吞吐</div>
+        </div>
+        <div>
+            <div class="stat-val">128 个</div>
+            <div class="stat-label">全球边缘加速节点</div>
+        </div>
+    </section>
+
+    <!-- 核心特性网格 -->
+    <section class="features-section" id="features">
+        <div class="section-header">
+            <h2 class="section-title">全栈赋能的下一代架构</h2>
+            <p class="section-desc">无缝集成底层内存反射、并发调度与毫秒级高可用控制流。</p>
+        </div>
+
+        <div class="features-grid">
+            <div class="feature-card">
+                <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                </div>
+                <h3 class="card-title">极致性能加速</h3>
+                <p class="card-desc">基于 C++20 与原生指令集优化，零拷贝内存结构与自适应缓存让计算吞吐达到硬件极限。</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                </div>
+                <h3 class="card-title">端到端防御与隔离</h3>
+                <p class="card-desc">全链路内存地址混淆保护与抗逆向沙箱，确保敏感运行时状态安全可靠。</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16m-7 6h7"/></svg>
+                </div>
+                <h3 class="card-title">动态对象自省与下钻</h3>
+                <p class="card-desc">实时遍历分析多层级指针依赖树与泛型集合结构，毫秒级定位目标字段物理地址。</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                </div>
+                <h3 class="card-title">多架构跨平台兼容</h3>
+                <p class="card-desc">原生支持 ARM64、ARMv7、x86_64 容器环境与各类模拟器无缝挂载运行。</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                </div>
+                <h3 class="card-title">智能遥测与日志聚合</h3>
+                <p class="card-desc">可视化多维数据流水线，随时导出完整诊断快照与调试数据。</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="card-icon">
+                    <svg viewBox="0 0 24 24"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/></svg>
+                </div>
+                <h3 class="card-title">一键热重载与配置分发</h3>
+                <p class="card-desc">无需重启主进程，支持运行时动态配置下发与脚本级热修补能力。</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- 隐秘开发者入口弹窗 (Stealth Camouflage Modal) -->
+    <div class="stealth-modal" id="stealthModal">
+        <div class="modal-box">
+            <div class="modal-header">
+                <span class="modal-title">⚡ Aether Stealth Developer Gateway</span>
+                <button class="modal-close" onclick="closeStealthModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <p style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 12px;">请输入授权凭证或管理指令开启开发者控制台：</p>
+                <input type="password" id="stealthInput" placeholder="Enter Access PIN (Default: 8888)..." onkeydown="if(event.key==='Enter') executeStealth()">
+                <p id="stealthMsg" style="font-size: 0.82rem; color: #ef4444; min-height: 20px;"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" style="padding: 8px 18px; font-size: 0.85rem;" onclick="closeStealthModal()">取消</button>
+                <button class="btn-primary" style="padding: 8px 18px; font-size: 0.85rem;" onclick="executeStealth()">确认授权</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 页脚 -->
+    <footer>
+        <div class="footer-links">
+            <a href="#">隐私政策</a>
+            <a href="#">服务条款</a>
+            <a href="#">安全合规</a>
+            <a href="#">系统状态</a>
+            <a href="#">联系工程师</a>
+        </div>
+        <p>© 2026 Aether Cloud Inc. All rights reserved. 高性能分布式基础设施与遥测技术实验室。</p>
+    </footer>
+
+    <!-- 交互脚本 -->
+    <script>
+        // 1. 模拟实时滚动日志
+        const logData = [
+            { tag: "DISPATCH", text: "Task #8402 scheduled to worker node-0x4a • Threads: 8" },
+            { tag: "MEMORY", text: "Class metadata cache warmed up (512 types mapped)" },
+            { tag: "RESOLVE", text: "Singleton instance ChessModelManager verified at 0x741b86f880" },
+            { tag: "METRICS", text: "P99 Latency: 0.76ms | QPS: 12,480 | Health: 100%" },
+            { tag: "GC", text: "Generational sweep completed in 0.12ms (0 bytes leaked)" },
+            { tag: "INSPECT", text: "Object inspection channel ready on port :8080" }
+        ];
+
+        let logIdx = 0;
+        const logBox = document.getElementById('logTerminal');
+
+        setInterval(() => {
+            if (!logBox) return;
+            const now = new Date().toTimeString().split(' ')[0];
+            const item = logData[logIdx % logData.length];
+            const div = document.createElement('div');
+            div.className = 'log-line';
+            div.innerHTML = `<span class="log-time">[${now}]</span> <span class="log-tag">[${item.tag}]</span> <span>${item.text}</span>`;
+            logBox.appendChild(div);
+            logBox.scrollTop = logBox.scrollHeight;
+            logIdx++;
+            if (logBox.children.length > 20) {
+                logBox.removeChild(logBox.children[0]);
+            }
+        }, 2200);
+
+        // 2. 伪装网页隐秘入口触发机制
+        // 方式一：连续快速点击 Logo 3 次
+        let logoClicks = 0;
+        let clickTimer = null;
+        const brandLogo = document.getElementById('brandLogo');
+        if (brandLogo) {
+            brandLogo.addEventListener('click', (e) => {
+                e.preventDefault();
+                logoClicks++;
+                clearTimeout(clickTimer);
+                clickTimer = setTimeout(() => { logoClicks = 0; }, 600);
+                if (logoClicks >= 3) {
+                    openStealthModal();
+                    logoClicks = 0;
+                }
+            });
+        }
+
+        // 方式二：快捷键 Ctrl + Shift + S
+        window.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.shiftKey && (e.key === 'S' || e.key === 's')) {
+                e.preventDefault();
+                openStealthModal();
+            }
+        });
+
+        function openStealthModal() {
+            document.getElementById('stealthModal').style.display = 'flex';
+            document.getElementById('stealthInput').value = '';
+            document.getElementById('stealthMsg').innerText = '';
+            setTimeout(() => document.getElementById('stealthInput').focus(), 100);
+        }
+
+        function closeStealthModal() {
+            document.getElementById('stealthModal').style.display = 'none';
+        }
+
+        function executeStealth() {
+            const val = document.getElementById('stealthInput').value.trim();
+            const msg = document.getElementById('stealthMsg');
+            if (val === '8888' || val === 'admin' || val === 'sv') {
+                msg.style.color = '#34d399';
+                msg.innerText = '✓ 授权成功！正在解锁开发者调试控制台...';
+                setTimeout(() => {
+                    alert('【开发者网关】已验证通过！您现在可以挂载调试工具。');
+                    closeStealthModal();
+                }, 800);
+            } else {
+                msg.style.color = '#ef4444';
+                msg.innerText = '✕ 凭证错误，访问已被安全日志记录。';
+            }
+        }
+
+        function openConsole() {
+            alert('Aether 控制台已连接到生产节点 (状态: 正常运行)');
+        }
+
+        function scrollToSection(id) {
+            const el = document.getElementById(id);
+            if (el) el.scrollIntoView({ behavior: 'smooth' });
+        }
+    </script>
+</body>
+</html>
