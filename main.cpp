@@ -2874,7 +2874,7 @@ void DrawActionLogOverlay() {
     ImGui::PopStyleVar(2);
 }
 
-// ==================== IL2CPP Dynamic Symbol & Offset Reverse Resolver ====================
+// ==================== IL2CPP Dynamic Symbol & Live Instance Resolver ====================
 struct Il2CppApis {
     typedef void* (*domain_get_t)();
     typedef void** (*domain_get_assemblies_t)(void* domain, size_t* size);
@@ -2944,23 +2944,93 @@ struct Il2CppApis {
 
 static Il2CppApis g_il2cpp_api;
 
-struct SymbolReverseItem {
-    std::string key;
-    std::string category;
-    uintptr_t targetVal;
-    bool isFunc;
-    std::string className;
-    std::string memberName;
+struct LiveFieldInfo {
+    std::string name;
     std::string typeName;
-    bool matched;
+    size_t offset;
+    uintptr_t rawValue;
+    std::string childClassName;
+    bool matchesKnown;
+    std::string matchDesc;
 };
 
-static std::vector<SymbolReverseItem> g_reverseItems;
-static std::mutex g_reverseMutex;
-static std::atomic<bool> g_reverseScanning{false};
-static std::atomic<int> g_reverseScannedClasses{0};
-static std::atomic<int> g_reverseTotalClasses{0};
-static std::atomic<int> g_reverseMatchedCount{0};
+struct LiveInstanceDump {
+    std::string label;
+    uintptr_t address;
+    std::string fullClassName;
+    std::vector<LiveFieldInfo> fields;
+    bool valid;
+};
+
+LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
+    LiveInstanceDump dump;
+    dump.label = label ? label : "Unknown";
+    dump.address = ptr;
+    dump.valid = false;
+
+    if (!IsValidPtr(ptr) || !g_il2cpp_api.init()) return dump;
+
+    void* klass_ptr = nullptr;
+    if (!SafeRead((void*)ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) {
+        return dump;
+    }
+
+    const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : nullptr;
+    const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : nullptr;
+    if (!c_name || !c_name[0]) return dump;
+
+    dump.fullClassName = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
+    dump.valid = true;
+
+    if (g_il2cpp_api.class_get_fields) {
+        void* iter = nullptr;
+        while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
+            const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
+            size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
+            void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
+            const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
+
+            LiveFieldInfo fInfo;
+            fInfo.name = f_name ? f_name : "";
+            fInfo.typeName = t_name ? t_name : "";
+            fInfo.offset = f_offset;
+            fInfo.rawValue = 0;
+            fInfo.matchesKnown = false;
+
+            if (IsValidPtr(ptr + f_offset)) {
+                SafeRead((void*)(ptr + f_offset), &fInfo.rawValue, sizeof(uintptr_t));
+                if (IsValidPtr(fInfo.rawValue)) {
+                    void* sub_klass = nullptr;
+                    if (SafeRead((void*)fInfo.rawValue, &sub_klass, sizeof(void*)) && IsValidPtr((uintptr_t)sub_klass)) {
+                        const char* sub_cname = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(sub_klass) : nullptr;
+                        if (sub_cname && sub_cname[0]) {
+                            fInfo.childClassName = sub_cname;
+                        }
+                    }
+                }
+            }
+
+            // 智能关联已知配置项
+            std::string lstr = dump.label;
+            if (f_offset == g_off.addr2 && lstr.find("addr1") != std::string::npos) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 addr2 下级指针】"; }
+            else if (f_offset == g_off.addr3 && lstr.find("addr2") != std::string::npos) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 addr3 下级指针】"; }
+            else if (f_offset == g_off.segmentcsogame && lstr.find("addr1") != std::string::npos) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 segmentcsogame 对局基址】"; }
+            else if (f_offset == g_off.segment_my_player_id) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 segment_my_player_id 我的ID】"; }
+            else if (f_offset == g_off.board_hero_id) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 board_hero_id 棋盘英雄ID】"; }
+            else if (f_offset == g_off.board_x) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 board_x 棋盘X坐标】"; }
+            else if (f_offset == g_off.board_y) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 board_y 棋盘Y坐标】"; }
+            else if (f_offset == g_off.pi_name) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 pi_name 玩家名字】"; }
+            else if (f_offset == g_off.pi_money) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 pi_money 玩家金币】"; }
+            else if (f_offset == g_off.pi_level) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 pi_level 玩家等级】"; }
+            else if (f_offset == g_off.shop_hero_id) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 shop_hero_id 商店卡牌ID】"; }
+            else if (f_offset == g_off.bench_hero_id) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 bench_hero_id 备战席英雄ID】"; }
+
+            dump.fields.push_back(fInfo);
+        }
+    }
+
+    return dump;
+}
 
 struct KwSearchResult {
     std::string className;
@@ -2974,145 +3044,6 @@ static std::vector<KwSearchResult> g_kwResults;
 static std::mutex g_kwMutex;
 static char g_kw_search_input[64] = "Player";
 static std::atomic<bool> g_kwSearching{false};
-
-void InitKnownTargets() {
-    std::lock_guard<std::mutex> lock(g_reverseMutex);
-    g_reverseItems.clear();
-    g_reverseItems.push_back({ "func_get_Instance", (const char*)u8"核心函数", g_off.func_get_Instance, true, "", "", "", false });
-    g_reverseItems.push_back({ "func_quit", (const char*)u8"核心函数", g_off.func_quit, true, "", "", "", false });
-    g_reverseItems.push_back({ "func_set_IsGameEnd", (const char*)u8"核心函数", g_off.func_set_IsGameEnd, true, "", "", "", false });
-    g_reverseItems.push_back({ "func_get_hex", (const char*)u8"核心函数", g_off.func_get_hex, true, "", "", "", false });
-    g_reverseItems.push_back({ "func_shop_listen", (const char*)u8"核心函数", g_off.func_shop_listen, true, "", "", "", false });
-    g_reverseItems.push_back({ "func_buy_hero_new", (const char*)u8"核心函数", g_off.func_buy_hero_new, true, "", "", "", false });
-    g_reverseItems.push_back({ "func_SendWillRenderCanvases", (const char*)u8"核心函数", g_off.func_SendWillRenderCanvases, true, "", "", "", false });
-
-    g_reverseItems.push_back({ "board_hero_id", (const char*)u8"棋盘属性", g_off.board_hero_id, false, "", "", "", false });
-    g_reverseItems.push_back({ "board_x", (const char*)u8"棋盘属性", g_off.board_x, false, "", "", "", false });
-    g_reverseItems.push_back({ "board_y", (const char*)u8"棋盘属性", g_off.board_y, false, "", "", "", false });
-    g_reverseItems.push_back({ "segment_my_player_id", (const char*)u8"对局属性", g_off.segment_my_player_id, false, "", "", "", false });
-    g_reverseItems.push_back({ "addr2", (const char*)u8"链路指针", g_off.addr2, false, "", "", "", false });
-    g_reverseItems.push_back({ "addr3", (const char*)u8"链路指针", g_off.addr3, false, "", "", "", false });
-    g_reverseItems.push_back({ "addra", (const char*)u8"链路指针", g_off.addra, false, "", "", "", false });
-    g_reverseItems.push_back({ "segmentcsogame", (const char*)u8"链路指针", g_off.segmentcsogame, false, "", "", "", false });
-    g_reverseItems.push_back({ "next_opponents_list", (const char*)u8"对局属性", g_off.next_opponents_list, false, "", "", "", false });
-    g_reverseItems.push_back({ "pi_name", (const char*)u8"玩家属性", g_off.pi_name, false, "", "", "", false });
-    g_reverseItems.push_back({ "pi_id", (const char*)u8"玩家属性", g_off.pi_id, false, "", "", "", false });
-    g_reverseItems.push_back({ "pi_money", (const char*)u8"玩家属性", g_off.pi_money, false, "", "", "", false });
-    g_reverseItems.push_back({ "pi_level", (const char*)u8"玩家属性", g_off.pi_level, false, "", "", "", false });
-    g_reverseItems.push_back({ "pi_win_streak", (const char*)u8"玩家属性", g_off.pi_win_streak, false, "", "", "", false });
-    g_reverseItems.push_back({ "pi_lose_streak", (const char*)u8"玩家属性", g_off.pi_lose_streak, false, "", "", "", false });
-    g_reverseItems.push_back({ "ph_heroId", (const char*)u8"牌库属性", g_off.ph_heroId, false, "", "", "", false });
-    g_reverseItems.push_back({ "ph_remaining", (const char*)u8"牌库属性", g_off.ph_remaining, false, "", "", "", false });
-    g_reverseItems.push_back({ "ph_total", (const char*)u8"牌库属性", g_off.ph_total, false, "", "", "", false });
-    g_reverseItems.push_back({ "shop_hero_id", (const char*)u8"商店属性", g_off.shop_hero_id, false, "", "", "", false });
-    g_reverseItems.push_back({ "bench_hero_id", (const char*)u8"备战席属性", g_off.bench_hero_id, false, "", "", "", false });
-}
-
-void DoReverseSymbolScan() {
-    if (!g_il2cpp_api.init()) {
-        AddActionLog((const char*)u8"-> [反查错误] 无法加载 libil2cpp.so 导出反射符号接口!");
-        g_reverseScanning.store(false);
-        return;
-    }
-
-    InitKnownTargets();
-    void* domain = g_il2cpp_api.domain_get();
-    if (!domain) {
-        AddActionLog((const char*)u8"-> [反查错误] il2cpp_domain_get 返回空!");
-        g_reverseScanning.store(false);
-        return;
-    }
-
-    size_t asm_count = 0;
-    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
-    if (!assemblies || asm_count == 0) {
-        AddActionLog((const char*)u8"-> [反查错误] 未找到已加载的 Assemblies!");
-        g_reverseScanning.store(false);
-        return;
-    }
-
-    int total_classes = 0;
-    for (size_t a = 0; a < asm_count; a++) {
-        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
-        if (img && g_il2cpp_api.image_get_class_count) {
-            total_classes += (int)g_il2cpp_api.image_get_class_count(img);
-        }
-    }
-    g_reverseTotalClasses.store(total_classes > 0 ? total_classes : 1000);
-    g_reverseScannedClasses.store(0);
-
-    int matched_cnt = 0;
-
-    for (size_t a = 0; a < asm_count; a++) {
-        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
-        if (!img) continue;
-        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
-
-        for (size_t c = 0; c < cls_count; c++) {
-            g_reverseScannedClasses++;
-            void* klass = g_il2cpp_api.image_get_class(img, c);
-            if (!klass) continue;
-
-            const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass) : "";
-            const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : "";
-            std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
-
-            if (g_il2cpp_api.class_get_methods && g_il2cpp_api.method_get_name) {
-                void* iter = nullptr;
-                while (void* method = g_il2cpp_api.class_get_methods(klass, &iter)) {
-                    const char* m_name = g_il2cpp_api.method_get_name(method);
-                    uintptr_t func_ptr = *(uintptr_t*)method;
-                    if (func_ptr > g_il2cppTrueBase) {
-                        uintptr_t rva = func_ptr - g_il2cppTrueBase;
-                        std::lock_guard<std::mutex> lock(g_reverseMutex);
-                        for (auto& item : g_reverseItems) {
-                            if (item.isFunc && !item.matched && item.targetVal == rva) {
-                                item.matched = true;
-                                item.className = full_class;
-                                item.memberName = m_name ? m_name : "";
-                                item.typeName = "Method()";
-                                matched_cnt++;
-                                AddActionLog((const char*)u8"-> [匹配函数] 0x%lx -> %s::%s()", rva, full_class.c_str(), m_name);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (g_il2cpp_api.class_get_fields && g_il2cpp_api.field_get_name && g_il2cpp_api.field_get_offset) {
-                void* iter = nullptr;
-                while (void* field = g_il2cpp_api.class_get_fields(klass, &iter)) {
-                    const char* f_name = g_il2cpp_api.field_get_name(field);
-                    size_t f_offset = g_il2cpp_api.field_get_offset(field);
-                    void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
-                    const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
-
-                    std::lock_guard<std::mutex> lock(g_reverseMutex);
-                    for (auto& item : g_reverseItems) {
-                        if (!item.isFunc && !item.matched && item.targetVal == f_offset) {
-                            bool sensible = true;
-                            if (item.key.find("board") != std::string::npos && full_class.find("Chess") == std::string::npos && full_class.find("Board") == std::string::npos && full_class.find("Hex") == std::string::npos) sensible = false;
-                            if (item.key.find("pi_") != std::string::npos && full_class.find("Player") == std::string::npos && full_class.find("User") == std::string::npos && full_class.find("Info") == std::string::npos) sensible = false;
-                            
-                            if (sensible || item.className.empty()) {
-                                item.matched = true;
-                                item.className = full_class;
-                                item.memberName = f_name ? f_name : "";
-                                item.typeName = t_name ? t_name : "";
-                                matched_cnt++;
-                                AddActionLog((const char*)u8"-> [匹配字段] 0x%lx -> %s::%s (%s)", f_offset, full_class.c_str(), f_name, t_name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    g_reverseMatchedCount.store(matched_cnt);
-    g_reverseScanning.store(false);
-    AddActionLog((const char*)u8"-> [反查完成] 已遍历 %d 个类，成功反查匹配出 %d 个目标符号！", g_reverseScannedClasses.load(), matched_cnt);
-}
 
 void DoKeywordSearch(std::string kw) {
     if (kw.empty() || !g_il2cpp_api.init()) {
@@ -3166,7 +3097,7 @@ void DoKeywordSearch(std::string kw) {
                         const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
 
                         std::lock_guard<std::mutex> lock(g_kwMutex);
-                        if (g_kwResults.size() < 300) {
+                        if (g_kwResults.size() < 400) {
                             g_kwResults.push_back({ full_class, f_str, t_name ? t_name : "", (uintptr_t)f_offset, false });
                         }
                     }
@@ -3186,7 +3117,7 @@ void DoKeywordSearch(std::string kw) {
                         uintptr_t rva = func_ptr > g_il2cppTrueBase ? (func_ptr - g_il2cppTrueBase) : 0;
 
                         std::lock_guard<std::mutex> lock(g_kwMutex);
-                        if (g_kwResults.size() < 300) {
+                        if (g_kwResults.size() < 400) {
                             g_kwResults.push_back({ full_class, m_str + "()", "Method", rva, true });
                         }
                     }
@@ -3200,92 +3131,117 @@ void DoKeywordSearch(std::string kw) {
 }
 
 static int g_resolver_subtab = 0;
+static char g_custom_inspect_addr[32] = "0x0";
+static LiveInstanceDump g_custom_dump;
+
+void DrawLiveInstanceTree(const LiveInstanceDump& dump, float scale) {
+    if (!dump.valid) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), (const char*)u8"[%s] (0x%lx) -> [地址未就绪或非有效 C# 堆实例]", dump.label.c_str(), dump.address);
+        return;
+    }
+
+    std::string header = "[" + dump.label + "] (0x" + [] (uintptr_t val) {
+        char buf[32]; snprintf(buf, sizeof(buf), "%lx", val); return std::string(buf);
+    }(dump.address) + ") -> C# 类: " + dump.fullClassName + " (包含 " + std::to_string(dump.fields.size()) + " 个成员字段)";
+
+    if (ImGui::TreeNode(header.c_str())) {
+        ImGui::Indent(10.0f * scale);
+        for (const auto& f : dump.fields) {
+            ImVec4 col = f.matchesKnown ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
+            
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
+            ImGui::SameLine();
+            ImGui::TextColored(col, "%s", f.name.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(%s)", f.typeName.c_str());
+
+            if (f.rawValue != 0) {
+                ImGui::SameLine();
+                if (!f.childClassName.empty()) {
+                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.9f, 1.0f), "= 0x%lx [指向类: %s]", f.rawValue, f.childClassName.c_str());
+                } else {
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "= 0x%lx", f.rawValue);
+                }
+            }
+
+            if (f.matchesKnown) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", f.matchDesc.c_str());
+            }
+        }
+        ImGui::Unindent(10.0f * scale);
+        ImGui::TreePop();
+    }
+}
 
 void DrawSymbolResolverUI() {
     float scale = g_autoScale * g_scale;
 
-    ImGui::TextColored(ImVec4(0.3f, 0.85f, 1.0f, 1.0f), (const char*)u8"IL2CPP 运行时反射引擎 | 基址: 0x%lx", g_il2cppTrueBase);
-    if (g_reverseScanning.load()) {
-        float time = ImGui::GetTime();
-        int dots = ((int)(time * 3)) % 4;
-        std::string dotStr = std::string(dots, '.');
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"正在全量遍历内存类树中 (已扫描: %d / %d 类)%s", g_reverseScannedClasses.load(), g_reverseTotalClasses.load(), dotStr.c_str());
-    } else {
-        int matched = g_reverseMatchedCount.load();
-        int total = (int)g_reverseItems.size();
-        if (total > 0) {
-            ImGui::TextColored(matched > 0 ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f), 
-                (const char*)u8"反查就绪: 已成功匹配 %d / %d 个核心符号名称", matched, total);
-        }
-    }
-
-    ImGui::Spacing();
-
-    if (ImGui::Button(g_reverseScanning.load() ? (const char*)u8"扫描进行中..." : (const char*)u8"⚡ 一键全量反查已知偏移符号与类名", ImVec2(280 * scale, 34 * scale))) {
-        if (!g_reverseScanning.load()) {
-            g_reverseScanning.store(true);
-            std::thread(DoReverseSymbolScan).detach();
-        }
-    }
+    ImGui::TextColored(ImVec4(0.3f, 0.85f, 1.0f, 1.0f), (const char*)u8"IL2CPP 运行时反射与实例层级解析引擎 | 基址: 0x%lx", g_il2cppTrueBase);
+    
+    // 子标签切换
+    if (ImGui::Button(g_resolver_subtab == 0 ? (const char*)u8"● 局内实例寻址链路深度反查" : (const char*)u8"○ 局内实例寻址链路深度反查", ImVec2(220 * scale, 30 * scale))) g_resolver_subtab = 0;
     ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"📋 导出反查清单到日志", ImVec2(180 * scale, 34 * scale))) {
-        std::lock_guard<std::mutex> lock(g_reverseMutex);
-        AddActionLog((const char*)u8"==================== IL2CPP 符号反查结果清单 ====================");
-        for (const auto& item : g_reverseItems) {
-            if (item.matched) {
-                AddActionLog((const char*)u8"[%s] %s (0x%lx) -> %s::%s [%s]", 
-                    item.category.c_str(), item.key.c_str(), item.targetVal, item.className.c_str(), item.memberName.c_str(), item.typeName.c_str());
-            } else {
-                AddActionLog((const char*)u8"[%s] %s (0x%lx) -> [未匹配到类名]", item.category.c_str(), item.key.c_str(), item.targetVal);
-            }
-        }
-        AddActionLog((const char*)u8"==================================================================");
-    }
+    if (ImGui::Button(g_resolver_subtab == 1 ? (const char*)u8"● 全局元数据关键字搜索" : (const char*)u8"○ 全局元数据关键字搜索", ImVec2(190 * scale, 30 * scale))) g_resolver_subtab = 1;
+    ImGui::SameLine();
+    if (ImGui::Button(g_resolver_subtab == 2 ? (const char*)u8"● 任意内存指针实时探查" : (const char*)u8"○ 任意内存指针实时探查", ImVec2(190 * scale, 30 * scale))) g_resolver_subtab = 2;
 
     DrawGlassSeparator();
 
-    if (ImGui::Button(g_resolver_subtab == 0 ? (const char*)u8"● 已知偏移反查结果" : (const char*)u8"○ 已知偏移反查结果", ImVec2(170 * scale, 28 * scale))) g_resolver_subtab = 0;
-    ImGui::SameLine();
-    if (ImGui::Button(g_resolver_subtab == 1 ? (const char*)u8"● 全局元数据关键字搜索" : (const char*)u8"○ 全局元数据关键字搜索", ImVec2(190 * scale, 28 * scale))) g_resolver_subtab = 1;
-
-    ImGui::Spacing();
-
     if (g_resolver_subtab == 0) {
-        if (g_reverseItems.empty()) {
-            InitKnownTargets();
+        ImGui::TextColored(UITheme().primary, (const char*)u8"当前对局所有活动实例的真实 C# 类名与成员字段结构树：");
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"（点击展开查看类的所有变量名字、数据类型与配置项关联）");
+
+        if (ImGui::Button((const char*)u8"📋 导出全部实例字段结构到操作日志", ImVec2(260 * scale, 32 * scale))) {
+            AddActionLog((const char*)u8"==================== 实时实例反射结构清单 ====================");
+            auto DumpToLog = [](const LiveInstanceDump& d) {
+                if (d.valid) {
+                    AddActionLog((const char*)u8"[%s] (0x%lx) -> Class: %s (字段数: %zu)", d.label.c_str(), d.address, d.fullClassName.c_str(), d.fields.size());
+                    for (const auto& f : d.fields) {
+                        if (f.matchesKnown) {
+                            AddActionLog((const char*)u8"   +0x%lx: %s (%s) %s", f.offset, f.name.c_str(), f.typeName.c_str(), f.matchDesc.c_str());
+                        }
+                    }
+                }
+            };
+            DumpToLog(InspectLiveInstance("1. 单例实例 (g_dbg_addr1)", g_dbg_addr1));
+            DumpToLog(InspectLiveInstance("2. 上下文指针 (addr2)", g_dbg_addr2));
+            DumpToLog(InspectLiveInstance("3. 列表指针 (addr3)", g_dbg_addr3));
+            DumpToLog(InspectLiveInstance("4. 对局基址 (segmentcsogame)", g_dbg_segmentcsogame));
+            DumpToLog(InspectLiveInstance("5. 棋盘总览 (addr19)", g_dbg_addr19));
+            DumpToLog(InspectLiveInstance("6. 商店总览 (addr14)", g_dbg_addr14));
+            DumpToLog(InspectLiveInstance("7. 备战席总览 (addr17)", g_dbg_addr17));
+            DumpToLog(InspectLiveInstance("8. 玩家信息 (addr13)", g_dbg_addr13));
+            DumpToLog(InspectLiveInstance("9. 海克斯控制器 (hexctrl)", g_dbg_hexctrl));
+            AddActionLog((const char*)u8"===============================================================");
         }
 
-        ImGui::TextColored(UITheme().primary, (const char*)u8"核心配置项反查表（用于下个版本自动反射）：");
-        
-        ImGui::BeginChild("ReverseResultList", ImVec2(0, 0), true);
-        {
-            std::lock_guard<std::mutex> lock(g_reverseMutex);
-            for (size_t i = 0; i < g_reverseItems.size(); i++) {
-                const auto& it = g_reverseItems[i];
-                ImGui::PushID((int)i);
-                
-                ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "[%s]", it.category.c_str());
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", it.key.c_str());
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "(0x%lx)", it.targetVal);
-                ImGui::SameLine();
+        ImGui::Spacing();
 
-                if (it.matched) {
-                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "[已匹配]");
-                    ImGui::Indent(20.0f * scale);
-                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "C# 类: %s", it.className.c_str());
-                    ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "   成员: %s   类型: %s", it.memberName.c_str(), it.typeName.c_str());
-                    ImGui::Unindent(20.0f * scale);
-                } else {
-                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[待反查 / 点击上方开始扫描]");
+        ImGui::BeginChild("LiveInstanceTreeList", ImVec2(0, 0), true);
+        {
+            DrawLiveInstanceTree(InspectLiveInstance("1. 获取实例单例 (g_dbg_addr1)", g_dbg_addr1), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("2. 我的茶叶上下文 (addr2)", g_dbg_addr2), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("3. 列表指针 (addr3)", g_dbg_addr3), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("4. 对局基址与我的玩家属性 (segmentcsogame)", g_dbg_segmentcsogame), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("5. 棋盘与棋子总览 (addr19 / board_hero_id)", g_dbg_addr19), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("6. 商店与卡槽总览 (addr14)", g_dbg_addr14), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("7. 备战席总览 (addr17)", g_dbg_addr17), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("8. 玩家信息 (addr13 / pi_name / pi_money)", g_dbg_addr13), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("9. 牌库节点4 (addr4)", g_dbg_addr4), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("10. 牌库字典 (addr7)", g_dbg_addr7), scale);
+            DrawLiveInstanceTree(InspectLiveInstance("11. 海克斯控制器 (hexctrl / addr26)", g_dbg_hexctrl), scale);
+
+            if (!g_shop_slots.empty()) {
+                for (size_t s = 0; s < g_shop_slots.size(); s++) {
+                    char s_lbl[64]; snprintf(s_lbl, sizeof(s_lbl), "12.%zu 商店卡槽 %zu 地址", s + 1, s + 1);
+                    DrawLiveInstanceTree(InspectLiveInstance(s_lbl, g_shop_slots[s]), scale);
                 }
-                ImGui::Separator();
-                ImGui::PopID();
             }
         }
         ImGui::EndChild();
-    } else {
+    }
+    else if (g_resolver_subtab == 1) {
         ImGui::TextColored(UITheme().primary, (const char*)u8"搜索内存中任意类名、方法名或字段（如: Player, Chess, Hero, Shop）:");
         
         ImGui::SetNextItemWidth(260.0f * scale);
@@ -3300,7 +3256,7 @@ void DrawSymbolResolverUI() {
         }
 
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"搜索结果列表 (最多展示 300 条):");
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"搜索结果列表 (最多展示 400 条):");
 
         ImGui::BeginChild("KwSearchResults", ImVec2(0, 0), true);
         {
@@ -3318,7 +3274,7 @@ void DrawSymbolResolverUI() {
                         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "[字段]");
                     }
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "0x%lx", res.offsetOrRva);
+                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "0x%-4lx", res.offsetOrRva);
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "%s::%s", res.className.c_str(), res.memberName.c_str());
                     if (!res.typeName.empty() && !res.isFunc) {
@@ -3328,6 +3284,36 @@ void DrawSymbolResolverUI() {
 
                     ImGui::PopID();
                 }
+            }
+        }
+        ImGui::EndChild();
+    }
+    else if (g_resolver_subtab == 2) {
+        ImGui::TextColored(UITheme().primary, (const char*)u8"输入任意 16 进制内存指针地址，实时解析其所属的 C# 类名与全部字段：");
+        
+        ImGui::SetNextItemWidth(240.0f * scale);
+        ImGui::InputText("##CustomInspectInput", g_custom_inspect_addr, sizeof(g_custom_inspect_addr));
+        ImGui::SameLine();
+        if (ImGui::Button((const char*)u8"🔬 立即探查指针", ImVec2(140 * scale, 30 * scale))) {
+            uintptr_t addr = 0;
+            if (sscanf(g_custom_inspect_addr, "%lx", &addr) == 1 || sscanf(g_custom_inspect_addr, "0x%lx", &addr) == 1) {
+                g_custom_dump = InspectLiveInstance("自定义指针", addr);
+                if (g_custom_dump.valid) {
+                    AddActionLog((const char*)u8"-> [探查成功] 0x%lx 对应类名: %s (字段数: %zu)", addr, g_custom_dump.fullClassName.c_str(), g_custom_dump.fields.size());
+                } else {
+                    AddActionLog((const char*)u8"-> [探查失败] 0x%lx 不是有效的 C# 堆对象指针", addr);
+                }
+            }
+        }
+
+        ImGui::Spacing();
+
+        ImGui::BeginChild("CustomInspectView", ImVec2(0, 0), true);
+        {
+            if (g_custom_dump.address != 0) {
+                DrawLiveInstanceTree(g_custom_dump, scale);
+            } else {
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"在上方输入框输入一个地址（如 0x28a00000），点击探查即可实时解析。");
             }
         }
         ImGui::EndChild();
