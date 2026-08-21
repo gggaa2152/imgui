@@ -2879,9 +2879,26 @@ static void CacheValidClasses() {
 }
 
 static bool IsValidIl2CppClass(void* klass) {
-    if (!klass) return false;
-    if (!g_classes_cached) CacheValidClasses();
-    return g_valid_classes.find(klass) != g_valid_classes.end();
+    if (!klass || !IsValidPtr((uintptr_t)klass)) return false;
+    if (((uintptr_t)klass & 0x7) != 0) return false;
+    
+    // 快速缓存匹配
+    if (g_valid_classes.find(klass) != g_valid_classes.end()) return true;
+
+    // 动态验证泛型类、实例化类与数组类 (支持 List<T>, Dictionary<K,V>, T[] 等运行时动态生成的泛型类)
+    if (g_il2cpp_api.init() && g_il2cpp_api.class_get_name) {
+        const char* c_name = g_il2cpp_api.class_get_name(klass);
+        if (IsValidPtr((uintptr_t)c_name)) {
+            char first_char = 0;
+            if (SafeReadMemory((uintptr_t)c_name, &first_char, sizeof(char))) {
+                if (first_char != 0) {
+                    g_valid_classes.insert(klass);
+                    return true;
+                }
+            }
+        }
+    }
+    return IsValidPtr((uintptr_t)klass);
 }
 
 static bool StringEqualsIgnoreCase(const std::string& a, const std::string& b) {
@@ -4740,7 +4757,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         if (ptr == 0 && !g_dbg_player_addrs.empty()) ptr = g_dbg_player_addrs[0];
 
         if (IsValidPtr(ptr)) {
-            PushInspectObject("RootSingleton", "Singleton", ptr);
+            PushInspectObject("ChessModelManager", "ChessModelManager", ptr);
         }
     }
 
@@ -4749,7 +4766,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         return;
     }
 
-    // 2. 商业级粉色高亮面包屑导航栏 (Breadcrumbs Navigation Bar)
+    // 2. 商业级粉色高亮面包屑导航栏 (Breadcrumbs Navigation Bar - 与 IL2CPP Tool 完全一致)
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.15f, 0.30f, 0.8f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.40f, 0.20f, 0.50f, 1.0f));
 
@@ -4766,7 +4783,6 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         } else {
             char bc_btn[64]; snprintf(bc_btn, sizeof(bc_btn), "%s >##bc_%zu", bc.displayName.c_str(), i);
             if (ImGui::Button(bc_btn)) {
-                // 点击面包屑退回该层
                 g_inspect_breadcrumbs.erase(g_inspect_breadcrumbs.begin() + i + 1, g_inspect_breadcrumbs.end());
                 break;
             }
@@ -4777,7 +4793,18 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
 
     ImGui::Spacing();
 
-    // 3. 过滤工具栏 (Filter & Checkboxes)
+    // 3. 当前完整路径链路指示器 (与商业截图一致: _battleModel . battleTableInfo . <stTableInfo>k__BackingField . vecPlayerList)
+    if (g_inspect_breadcrumbs.size() > 1) {
+        std::string fullPathStr = "";
+        for (size_t i = 0; i < g_inspect_breadcrumbs.size(); i++) {
+            if (i > 0) fullPathStr += " . ";
+            fullPathStr += g_inspect_breadcrumbs[i].displayName;
+        }
+        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.95f, 1.0f), "%s", fullPathStr.c_str());
+        ImGui::Spacing();
+    }
+
+    // 4. 过滤工具栏 (Filter & Checkboxes)
     ImGui::SetNextItemWidth(180.0f * g_autoScale);
     ImGui::InputText("##InspectorFilter", g_inspector_filter, sizeof(g_inspector_filter));
     ImGui::SameLine();
@@ -4804,7 +4831,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // 4. 当前对象全量字段表格解析 (Full Fields Dump & Live Value Inspector)
+    // 5. 当前对象全量字段表格解析 (Full Real Fields Reflection & Array Expansion)
     uintptr_t currentObj = g_inspect_breadcrumbs.back().objectAddress;
     if (!IsValidPtr(currentObj)) {
         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[错误] 当前对象内存指针无效: 0x%lx", currentObj);
@@ -4815,7 +4842,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     SafeReadMemory(currentObj, &klass_ptr, sizeof(void*));
 
     std::string fullClassName = g_inspect_breadcrumbs.back().className;
-    if (IsValidIl2CppClass(klass_ptr)) {
+    if (klass_ptr && IsValidIl2CppClass(klass_ptr)) {
         const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
         const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
         fullClassName = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : (c_name ? std::string(c_name) : fullClassName);
@@ -4825,11 +4852,10 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     std::string filter_lower = g_inspector_filter;
     std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
 
-    // 收集当前对象的所有字段数据以进行【按偏移严格升序排序】
     std::vector<InspectorFieldRow> fieldRows;
 
     // ==========================================
-    // A. 数组类型直解 (Array / T[])
+    // A. 数组类型专属展开 (当对象本身为 T[] / Array 时)
     // ==========================================
     bool isArray = (fullClassName.find("[]") != std::string::npos || fullClassName.find("Array") != std::string::npos || fullClassName == "System.Array");
     if (isArray) {
@@ -4843,7 +4869,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         else if (len_10 > 0 && len_10 <= 5000) { arr_len = len_10; elem_start_off = 0x18; }
 
         if (arr_len > 0) {
-            for (uint32_t i = 0; i < arr_len && i < 100; i++) {
+            for (uint32_t i = 0; i < arr_len && i < 200; i++) {
                 size_t elem_off = elem_start_off + i * sizeof(uintptr_t);
                 uintptr_t elem_ptr = 0;
                 SafeReadMemory(currentObj + elem_off, &elem_ptr, sizeof(uintptr_t));
@@ -4859,9 +4885,10 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 if (IsValidPtr(elem_ptr)) {
                     void* c_klass = nullptr;
                     SafeReadMemory(elem_ptr, &c_klass, sizeof(void*));
-                    if (IsValidIl2CppClass(c_klass)) {
+                    if (c_klass && IsValidIl2CppClass(c_klass)) {
                         const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
-                        elem_type = cn ? CleanIl2CppTypeName(cn) : "Object";
+                        const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(c_klass) : "";
+                        elem_type = (cns && cns[0]) ? (std::string(cns) + "." + cn) : (cn ? cn : "Object");
                         child_cls = elem_type;
                     }
                     char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", elem_ptr, elem_type.c_str());
@@ -4873,123 +4900,15 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                     elem_type = "Int32";
                 }
 
-                fieldRows.push_back({ elem_off, idx_name, elem_type, elem_type, "", false, false, elem_ptr, elem_val32, (int64_t)elem_val32, live_val, !isObject, isObject, false, child_cls });
+                fieldRows.push_back({ elem_off, idx_name, elem_type, elem_type, "", false, false, elem_ptr, elem_val32, (int64_t)elem_val32, live_val, !isObject, isObject, (elem_ptr == 0 && elem_val32 == 0), child_cls });
             }
         }
     }
 
     // ==========================================
-    // B. 列表 List<T> 直解
+    // B. 原生 IL2CPP 反射 (针对所有普通类与泛型类 List<T>, CSOGame, ChessModelManager)
     // ==========================================
-    bool isList = (fullClassName.find("System.Collections.Generic.List") != std::string::npos || fullClassName.find("List`1") != std::string::npos || fullClassName == "List");
-    if (isList) {
-        uintptr_t items_arr = 0;
-        int32_t list_size = 0;
-        SafeReadMemory(currentObj + 0x10, &items_arr, sizeof(uintptr_t));
-        SafeReadMemory(currentObj + 0x18, &list_size, sizeof(int32_t));
-        if (!IsValidPtr(items_arr)) {
-            SafeReadMemory(currentObj + 0x18, &items_arr, sizeof(uintptr_t));
-            SafeReadMemory(currentObj + 0x10, &list_size, sizeof(int32_t));
-        }
-
-        if (IsValidPtr(items_arr) && list_size > 0 && list_size <= 2000) {
-            for (int i = 0; i < list_size && i < 100; i++) {
-                size_t elem_off = 0x20 + i * sizeof(uintptr_t);
-                uintptr_t elem_ptr = 0;
-                SafeReadMemory(items_arr + elem_off, &elem_ptr, sizeof(uintptr_t));
-                int32_t elem_val32 = 0;
-                SafeReadMemory(items_arr + elem_off, &elem_val32, sizeof(int32_t));
-
-                std::string item_name = "Item[" + std::to_string(i) + "]";
-                std::string elem_type = "Object";
-                std::string live_val = "";
-                bool isObject = false;
-                std::string child_cls = "";
-
-                if (IsValidPtr(elem_ptr)) {
-                    void* c_klass = nullptr;
-                    SafeReadMemory(elem_ptr, &c_klass, sizeof(void*));
-                    if (IsValidIl2CppClass(c_klass)) {
-                        const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
-                        elem_type = cn ? CleanIl2CppTypeName(cn) : "Object";
-                        child_cls = elem_type;
-                    }
-                    char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", elem_ptr, elem_type.c_str());
-                    live_val = buf;
-                    isObject = true;
-                } else {
-                    char buf[32]; snprintf(buf, sizeof(buf), "%d", elem_val32);
-                    live_val = buf;
-                    elem_type = "Int32";
-                }
-
-                fieldRows.push_back({ (size_t)i, item_name, elem_type, elem_type, "", false, false, elem_ptr, elem_val32, (int64_t)elem_val32, live_val, !isObject, isObject, false, child_cls });
-            }
-        }
-    }
-
-    // ==========================================
-    // C. 字典 Dictionary<TKey, TValue> 直解
-    // ==========================================
-    bool isDict = (fullClassName.find("System.Collections.Generic.Dictionary") != std::string::npos || fullClassName.find("Dictionary`2") != std::string::npos || fullClassName == "Dictionary");
-    if (isDict) {
-        uintptr_t entries_arr = 0;
-        int32_t dict_count = 0;
-        SafeReadMemory(currentObj + 0x18, &entries_arr, sizeof(uintptr_t));
-        SafeReadMemory(currentObj + 0x20, &dict_count, sizeof(int32_t));
-        if (!IsValidPtr(entries_arr)) {
-            SafeReadMemory(currentObj + 0x10, &entries_arr, sizeof(uintptr_t));
-            SafeReadMemory(currentObj + 0x18, &dict_count, sizeof(int32_t));
-        }
-
-        if (IsValidPtr(entries_arr) && dict_count > 0 && dict_count <= 2000) {
-            size_t entry_stride = 24;
-            for (int i = 0; i < dict_count && i < 100; i++) {
-                uintptr_t entry_addr = entries_arr + 0x20 + i * entry_stride;
-                uintptr_t key_ptr = 0;
-                SafeReadMemory(entry_addr + 0x08, &key_ptr, sizeof(uintptr_t));
-                uintptr_t val_ptr = 0;
-                SafeReadMemory(entry_addr + 0x10, &val_ptr, sizeof(uintptr_t));
-                int32_t val_int = 0;
-                SafeReadMemory(entry_addr + 0x10, &val_int, sizeof(int32_t));
-
-                std::string key_label = "Entry[" + std::to_string(i) + "]";
-                if (IsValidPtr(key_ptr)) {
-                    std::string k_str = ReadIl2CppString(key_ptr);
-                    if (!k_str.empty()) key_label = "[\"" + k_str + "\"]";
-                }
-
-                std::string elem_type = "Object";
-                std::string live_val = "";
-                bool isObject = false;
-                std::string child_cls = "";
-
-                if (IsValidPtr(val_ptr)) {
-                    void* c_klass = nullptr;
-                    SafeReadMemory(val_ptr, &c_klass, sizeof(void*));
-                    if (IsValidIl2CppClass(c_klass)) {
-                        const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
-                        elem_type = cn ? CleanIl2CppTypeName(cn) : "Object";
-                        child_cls = elem_type;
-                    }
-                    char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", val_ptr, elem_type.c_str());
-                    live_val = buf;
-                    isObject = true;
-                } else {
-                    char buf[32]; snprintf(buf, sizeof(buf), "%d", val_int);
-                    live_val = buf;
-                    elem_type = "Int32";
-                }
-
-                fieldRows.push_back({ (size_t)i, key_label, elem_type, elem_type, "", false, false, val_ptr, val_int, (int64_t)val_int, live_val, !isObject, isObject, false, child_cls });
-            }
-        }
-    }
-
-    // ==========================================
-    // D. 全继承链字段反射 (包含当前类与所有父类)
-    // ==========================================
-    if (IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
+    if (klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
         for (void* cur_klass = klass_ptr; cur_klass != nullptr; cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
             const char* cur_cls_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(cur_klass) : "";
 
@@ -5060,19 +4979,17 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                         if (isObjectPtr) {
                             void* c_klass = nullptr;
                             SafeReadMemory(rawVal, &c_klass, sizeof(void*));
-                            if (IsValidIl2CppClass(c_klass)) {
+                            if (c_klass && IsValidIl2CppClass(c_klass)) {
                                 const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
-                                childClassName = cn ? CleanIl2CppTypeName(cn) : clean_type;
+                                const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(c_klass) : "";
+                                childClassName = (cns && cns[0]) ? (std::string(cns) + "." + cn) : (cn ? cn : clean_type);
                             }
                         }
                         if (childClassName.empty()) childClassName = clean_type;
 
-                        // 识别 List 数量
-                        if (childClassName.find("List") != std::string::npos && isObjectPtr) {
-                            int32_t l_sz = 0;
-                            SafeReadMemory(rawVal + 0x18, &l_sz, sizeof(int32_t));
-                            char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s, Count: %d)", rawVal, childClassName.c_str(), l_sz);
-                            live_val = buf;
+                        // 格式化输出 (与 IL2CPP Tool 商业截图严格一致)
+                        if (clean_type.find("[]") != std::string::npos || type_str.find("[]") != std::string::npos) {
+                            live_val = type_str.empty() ? clean_type : type_str;
                         } else {
                             char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", rawVal, childClassName.c_str());
                             live_val = buf;
@@ -5098,7 +5015,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     }
 
     // ==========================================
-    // E. 实例物理内存槽位兜底 (如果反射无字段，则自动扫描物理内存槽位，确保绝不为空！)
+    // C. 实例物理内存槽位兜底 (仅当完全无法通过反射获取字段时)
     // ==========================================
     if (fieldRows.empty()) {
         for (size_t slot_off = 0x10; slot_off <= 0x180; slot_off += 8) {
@@ -5118,7 +5035,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
             if (IsValidPtr(slot_ptr)) {
                 void* c_klass = nullptr;
                 SafeReadMemory(slot_ptr, &c_klass, sizeof(void*));
-                if (IsValidIl2CppClass(c_klass)) {
+                if (c_klass && IsValidIl2CppClass(c_klass)) {
                     const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
                     slot_type = cn ? CleanIl2CppTypeName(cn) : "Object";
                     child_cls = slot_type;
@@ -5141,10 +5058,6 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         return a.offset < b.offset;
     });
 
-    // 状态统计栏
-    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), (const char*)u8"[对象信息] 类型: %s | 物理地址: 0x%lx | 展开字段数: %zu", fullClassName.c_str(), currentObj, fieldRows.size());
-    ImGui::Spacing();
-
     // 3 列表格 (字段/属性 | 值 | 类型)
     float col0_w = avail_x * 0.40f;
     float col1_w = avail_x * 0.38f;
@@ -5155,7 +5068,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::SetColumnWidth(1, col1_w);
     ImGui::SetColumnWidth(2, col2_w);
 
-    // 表头 (与截图严格对齐)
+    // 表头 (与截图严格对齐: 字段/属性 | 值 | 类型)
     ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"字段/属性");
     ImGui::NextColumn();
     ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"值");
@@ -5224,7 +5137,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     // 5. 底部操作栏 (Dump Object 按钮)
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.15f, 0.45f, 0.95f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.25f, 0.55f, 1.0f));
-    if (ImGui::Button((const char*)u8"Dump Object (导出对象全量数据到剪贴板)", ImVec2(avail_x, 38.0f * g_autoScale))) {
+    if (ImGui::Button((const char*)u8"Dump Object", ImVec2(avail_x, 38.0f * g_autoScale))) {
         ImGui::SetClipboardText(dump_buffer.c_str());
         AddActionLog((const char*)u8"-> [Dump] 成功将对象 %s (0x%lx) 的全量字段数据复制到系统剪贴板!", fullClassName.c_str(), currentObj);
     }
