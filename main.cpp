@@ -3174,7 +3174,9 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                 bool fieldMatch = (!field_lower.empty() && field_lower.find(target_lower) != std::string::npos);
                 bool typeMatch = (!type_lower.empty() && type_lower.find(target_lower) != std::string::npos) ||
                                  (!clean_type_lower.empty() && clean_type_lower.find(target_lower) != std::string::npos);
-                bool stringValMatch = (!str_content.empty() && str_content.find(target_raw) != std::string::npos);
+                std::string str_content_lower = str_content;
+                std::transform(str_content_lower.begin(), str_content_lower.end(), str_content_lower.begin(), ::tolower);
+                bool stringValMatch = (!str_content.empty() && (str_content.find(target_raw) != std::string::npos || str_content_lower.find(target_lower) != std::string::npos));
                 bool intValMatch = hasTargetInt && (val32 == targetIntVal || val64 == targetIntVal || (int64_t)rawVal == targetIntVal);
                 bool offsetMatch = hasTargetInt && (f_offset == (size_t)targetIntVal);
                 bool ptrMatch = hasTargetHexPtr && (rawVal == targetHexPtr || (item.obj + f_offset) == targetHexPtr);
