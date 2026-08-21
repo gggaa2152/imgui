@@ -3710,17 +3710,17 @@ void DrawSymbolResolverUI() {
     float sc = g_autoScale * g_scale;
     ImGui::SetWindowFontScale(sc);
 
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🔍 寻址起点(单例类):");
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
     ImGui::SetNextItemWidth(250.0f * sc);
-    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"⌨️ 键盘##1")) { g_vkbd_target = g_root_class_input; g_vkbd_target_size = sizeof(g_root_class_input); g_show_vkbd = true; }
+    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"[键盘]##1")) { g_vkbd_target = g_root_class_input; g_vkbd_target_size = sizeof(g_root_class_input); g_show_vkbd = true; }
 
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🎯 寻址终点(类名或字段名):");
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名或字段名):");
     ImGui::SetNextItemWidth(250.0f * sc);
-    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"⌨️ 键盘##2")) { g_vkbd_target = g_class_search_input; g_vkbd_target_size = sizeof(g_class_search_input); g_show_vkbd = true; }
+    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"[键盘]##2")) { g_vkbd_target = g_class_search_input; g_vkbd_target_size = sizeof(g_class_search_input); g_show_vkbd = true; }
 
     ImGui::Spacing();
     
-    if (ImGui::Button((const char*)u8"🚀 开始自动寻址！", ImVec2(300 * sc, 35 * sc))) {
+    if (ImGui::Button((const char*)u8"> 开始自动寻址！", ImVec2(300 * sc, 35 * sc))) {
         uintptr_t rootObj = g_dbg_addr1; // Default to hero entity
         if (strlen(g_root_class_input) > 0) {
             uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
@@ -3741,7 +3741,7 @@ void DrawSymbolResolverUI() {
 
     if (g_lastPathResult.found) {
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"✅ 找到一条最短寻址路径：");
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 找到一条最短寻址路径：");
         ImGui::Indent(10.0f * sc);
         ImGui::PushTextWrapPos(0.0f); // Enable text wrapping
         
@@ -3752,18 +3752,18 @@ void DrawSymbolResolverUI() {
                 const auto& st = g_lastPathResult.steps[s];
                 ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[第 %zu 层] %s", s + 1, st.fromClass.c_str());
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "➔ [+0x%lx: %s] ➔", st.offset, st.fieldName.c_str());
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "-> [+0x%lx: %s] ->", st.offset, st.fieldName.c_str());
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
             }
 
-            std::string off_summary = (const char*)u8"⚡ 偏移链提取: 起点单例";
+            std::string off_summary = (const char*)u8"[提取] 偏移链: 起点单例";
             for (const auto& st : g_lastPathResult.steps) {
                 char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
                 off_summary += obuf;
             }
             ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
-            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"🎯 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
         }
         
         ImGui::PopTextWrapPos(); // Disable text wrapping
