@@ -3227,7 +3227,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     int nodesProcessed = 0;
     const int maxNodes = 35000;
 
-    while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 150) {
+    while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 1500) {
         QueueItem item = queue.front();
         queue.pop_front();
         nodesProcessed++;
@@ -3446,10 +3446,10 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         // ==========================================
         if (klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
             int p_depth = 0;
-            for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && p_depth < 10; p_depth++, cur_klass = (g_il2cpp_api.class_get_parent ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr)) {
+            for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && p_depth < 20; p_depth++, cur_klass = (g_il2cpp_api.class_get_parent ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr)) {
                 void* iter = nullptr;
                 int field_count = 0;
-                while (field_count < 150 && (field_count++, true)) {
+                while (field_count < 8000 && (field_count++, true)) {
                     void* field = g_il2cpp_api.class_get_fields(cur_klass, &iter);
                     if (!field) break;
 
@@ -5049,7 +5049,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     // ==========================================
     if (klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
         int p_depth = 0;
-        for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && p_depth < 10; p_depth++, cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
+        for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && p_depth < 20; p_depth++, cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
             const char* cur_cls_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(cur_klass) : nullptr;
             std::string base_cls_str = SafeReadCString(cur_cls_name);
 
@@ -5057,7 +5057,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
 
             void* iter = nullptr;
             int f_count = 0;
-            while (f_count < 150 && (f_count++, true)) {
+            while (f_count < 8000 && (f_count++, true)) {
                 void* field = g_il2cpp_api.class_get_fields(cur_klass, &iter);
                 if (!field) break;
 
@@ -5161,7 +5161,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && m_p_depth < 8; m_p_depth++, cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
             void* iter = nullptr;
             int m_count = 0;
-            while (m_count < 100 && (m_count++, true)) {
+            while (m_count < 8000 && (m_count++, true)) {
                 void* method = g_il2cpp_api.class_get_methods(cur_klass, &iter);
                 if (!method) break;
 
