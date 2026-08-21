@@ -4278,6 +4278,11 @@ static std::vector<std::string> GetPinyinCandidates(const std::string& py) {
 //       每帧轮询 EditText 文本增量，回传给 ImGui 当前激活的输入框（io.AddInputCharactersUTF8）。
 // 注意：系统软键盘是独立系统窗口，其触摸由系统直接处理，不经过 hook_nativeInjectEvent，无需改触摸透传。
 // ============================================================
+// 前向声明：g_jvm / g_context 在文件末尾的 JNI hook 处（约 6375/6377 行）定义，
+// 此处提前声明以便本段 IME 代码在定义之前即可引用，避免 "undeclared identifier" 编译错误。
+extern JavaVM* g_jvm;
+extern jobject  g_context;
+
 static jobject     g_ime_edittext = nullptr;
 static bool        g_ime_open = false;
 static bool        g_ime_pending_show = false;
