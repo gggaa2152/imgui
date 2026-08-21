@@ -5189,7 +5189,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
 
             if (row.isInt) {
                 ImGui::SameLine();
-                char apply_btn[64]; snprintf(apply_btn, sizeof(apply_btn), (const char*)u8"★ 设为 pi_money##ins_%zu", r);
+                char apply_btn[64]; snprintf(apply_btn, sizeof(apply_btn), (const char*)u8"[设为金币]##ins_%zu", r);
                 if (ImGui::Button(apply_btn)) {
                     g_off.pi_money = row.offset;
                     SaveConfig();
@@ -5294,7 +5294,7 @@ void DrawSymbolResolverUI() {
     ImGui::Spacing();
     
     // 3. 开始全量自动寻址按钮
-    if (ImGui::Button((const char*)u8"🔍 在对象检查器中全量浏览此单例 (逐层展开全部字段并下钻 >)", ImVec2(avail_x, 36 * g_autoScale))) {
+    if (ImGui::Button((const char*)u8"[ 全量浏览 ] 在对象检查器中查看此单例 (逐层展开全部字段并下钻 >)", ImVec2(avail_x, 36 * g_autoScale))) {
         uintptr_t rootObj = g_dbg_addr1;
         if (strlen(g_root_class_input) > 0) {
             if (strncmp(g_root_class_input, "0x", 2) == 0 || strncmp(g_root_class_input, "0X", 2) == 0) {
@@ -5314,7 +5314,7 @@ void DrawSymbolResolverUI() {
     ImGui::Spacing();
     if (g_is_searching_path) {
         char search_label[128];
-        snprintf(search_label, sizeof(search_label), (const char*)u8"⏳ 正在全量深度寻址中... (已检索 %d 个节点)", (int)g_search_progress_nodes);
+        snprintf(search_label, sizeof(search_label), (const char*)u8"[ 正在深度寻址中... ] (已检索 %d 个节点)", (int)g_search_progress_nodes);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.35f, 0.8f));
         ImGui::Button(search_label, ImVec2(avail_x, 38 * g_autoScale));
         ImGui::PopStyleColor();
@@ -5501,7 +5501,7 @@ void DrawSymbolResolverUI() {
                 ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", live_val.c_str());
                 if (is_int) {
                     ImGui::SameLine();
-                    char btn_apply_id[64]; snprintf(btn_apply_id, sizeof(btn_apply_id), (const char*)u8"★ 设为 pi_money##p%zu_s%zu_%s", p, s, isExplored ? "e" : "m");
+                    char btn_apply_id[64]; snprintf(btn_apply_id, sizeof(btn_apply_id), (const char*)u8"[设为金币]##p%zu_s%zu_%s", p, s, isExplored ? "e" : "m");
                     if (ImGui::Button(btn_apply_id)) {
                         g_off.pi_money = st.offset;
                         SaveConfig();
