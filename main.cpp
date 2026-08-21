@@ -2768,6 +2768,76 @@ void DrawHextechCapsule() {
     EndContentFloatWindow("hex_grip", &g_hextech_scale);
 }
 
+// ==================== IL2CPP Dynamic Symbol & Live Instance Resolver ====================
+struct Il2CppApis {
+    typedef void* (*domain_get_t)();
+    typedef void** (*domain_get_assemblies_t)(void* domain, size_t* size);
+    typedef void* (*assembly_get_image_t)(void* assembly);
+    typedef const char* (*image_get_name_t)(void* image);
+    typedef size_t (*image_get_class_count_t)(void* image);
+    typedef void* (*image_get_class_t)(void* image, size_t index);
+    typedef const char* (*class_get_name_t)(void* klass);
+    typedef const char* (*class_get_namespace_t)(void* klass);
+    typedef void* (*class_get_methods_t)(void* klass, void** iter);
+    typedef void* (*class_get_fields_t)(void* klass, void** iter);
+    typedef const char* (*method_get_name_t)(void* method);
+    typedef uint32_t (*method_get_param_count_t)(void* method);
+    typedef const char* (*field_get_name_t)(void* field);
+    typedef size_t (*field_get_offset_t)(void* field);
+    typedef void* (*field_get_type_t)(void* field);
+    typedef const char* (*type_get_name_t)(void* type);
+
+    domain_get_t domain_get = nullptr;
+    domain_get_assemblies_t domain_get_assemblies = nullptr;
+    assembly_get_image_t assembly_get_image = nullptr;
+    image_get_name_t image_get_name = nullptr;
+    image_get_class_count_t image_get_class_count = nullptr;
+    image_get_class_t image_get_class = nullptr;
+    class_get_name_t class_get_name = nullptr;
+    class_get_namespace_t class_get_namespace = nullptr;
+    class_get_methods_t class_get_methods = nullptr;
+    class_get_fields_t class_get_fields = nullptr;
+    method_get_name_t method_get_name = nullptr;
+    method_get_param_count_t method_get_param_count = nullptr;
+    field_get_name_t field_get_name = nullptr;
+    field_get_offset_t field_get_offset = nullptr;
+    field_get_type_t field_get_type = nullptr;
+    type_get_name_t type_get_name = nullptr;
+    bool inited = false;
+
+    bool init() {
+        if (inited) return true;
+        void* h = dlopen("libil2cpp.so", RTLD_LAZY);
+        auto resolve = [h](const char* sym) -> void* {
+            void* p = DobbySymbolResolver("libil2cpp.so", sym);
+            if (!p && h) p = dlsym(h, sym);
+            return p;
+        };
+
+        domain_get = (domain_get_t)resolve("il2cpp_domain_get");
+        domain_get_assemblies = (domain_get_assemblies_t)resolve("il2cpp_domain_get_assemblies");
+        assembly_get_image = (assembly_get_image_t)resolve("il2cpp_assembly_get_image");
+        image_get_name = (image_get_name_t)resolve("il2cpp_image_get_name");
+        image_get_class_count = (image_get_class_count_t)resolve("il2cpp_image_get_class_count");
+        image_get_class = (image_get_class_t)resolve("il2cpp_image_get_class");
+        class_get_name = (class_get_name_t)resolve("il2cpp_class_get_name");
+        class_get_namespace = (class_get_namespace_t)resolve("il2cpp_class_get_namespace");
+        class_get_methods = (class_get_methods_t)resolve("il2cpp_class_get_methods");
+        class_get_fields = (class_get_fields_t)resolve("il2cpp_class_get_fields");
+        method_get_name = (method_get_name_t)resolve("il2cpp_method_get_name");
+        method_get_param_count = (method_get_param_count_t)resolve("il2cpp_method_get_param_count");
+        field_get_name = (field_get_name_t)resolve("il2cpp_field_get_name");
+        field_get_offset = (field_get_offset_t)resolve("il2cpp_field_get_offset");
+        field_get_type = (field_get_type_t)resolve("il2cpp_field_get_type");
+        type_get_name = (type_get_name_t)resolve("il2cpp_type_get_name");
+
+        inited = (domain_get != nullptr && assembly_get_image != nullptr && class_get_name != nullptr);
+        return inited;
+    }
+};
+
+static Il2CppApis g_il2cpp_api;
+
 struct ObjectPathStep {
     uintptr_t fromObj;
     std::string fromClass;
@@ -3163,75 +3233,7 @@ void DrawActionLogOverlay() {
     ImGui::PopStyleVar(2);
 }
 
-// ==================== IL2CPP Dynamic Symbol & Live Instance Resolver ====================
-struct Il2CppApis {
-    typedef void* (*domain_get_t)();
-    typedef void** (*domain_get_assemblies_t)(void* domain, size_t* size);
-    typedef void* (*assembly_get_image_t)(void* assembly);
-    typedef const char* (*image_get_name_t)(void* image);
-    typedef size_t (*image_get_class_count_t)(void* image);
-    typedef void* (*image_get_class_t)(void* image, size_t index);
-    typedef const char* (*class_get_name_t)(void* klass);
-    typedef const char* (*class_get_namespace_t)(void* klass);
-    typedef void* (*class_get_methods_t)(void* klass, void** iter);
-    typedef void* (*class_get_fields_t)(void* klass, void** iter);
-    typedef const char* (*method_get_name_t)(void* method);
-    typedef uint32_t (*method_get_param_count_t)(void* method);
-    typedef const char* (*field_get_name_t)(void* field);
-    typedef size_t (*field_get_offset_t)(void* field);
-    typedef void* (*field_get_type_t)(void* field);
-    typedef const char* (*type_get_name_t)(void* type);
 
-    domain_get_t domain_get = nullptr;
-    domain_get_assemblies_t domain_get_assemblies = nullptr;
-    assembly_get_image_t assembly_get_image = nullptr;
-    image_get_name_t image_get_name = nullptr;
-    image_get_class_count_t image_get_class_count = nullptr;
-    image_get_class_t image_get_class = nullptr;
-    class_get_name_t class_get_name = nullptr;
-    class_get_namespace_t class_get_namespace = nullptr;
-    class_get_methods_t class_get_methods = nullptr;
-    class_get_fields_t class_get_fields = nullptr;
-    method_get_name_t method_get_name = nullptr;
-    method_get_param_count_t method_get_param_count = nullptr;
-    field_get_name_t field_get_name = nullptr;
-    field_get_offset_t field_get_offset = nullptr;
-    field_get_type_t field_get_type = nullptr;
-    type_get_name_t type_get_name = nullptr;
-    bool inited = false;
-
-    bool init() {
-        if (inited) return true;
-        void* h = dlopen("libil2cpp.so", RTLD_LAZY);
-        auto resolve = [h](const char* sym) -> void* {
-            void* p = DobbySymbolResolver("libil2cpp.so", sym);
-            if (!p && h) p = dlsym(h, sym);
-            return p;
-        };
-
-        domain_get = (domain_get_t)resolve("il2cpp_domain_get");
-        domain_get_assemblies = (domain_get_assemblies_t)resolve("il2cpp_domain_get_assemblies");
-        assembly_get_image = (assembly_get_image_t)resolve("il2cpp_assembly_get_image");
-        image_get_name = (image_get_name_t)resolve("il2cpp_image_get_name");
-        image_get_class_count = (image_get_class_count_t)resolve("il2cpp_image_get_class_count");
-        image_get_class = (image_get_class_t)resolve("il2cpp_image_get_class");
-        class_get_name = (class_get_name_t)resolve("il2cpp_class_get_name");
-        class_get_namespace = (class_get_namespace_t)resolve("il2cpp_class_get_namespace");
-        class_get_methods = (class_get_methods_t)resolve("il2cpp_class_get_methods");
-        class_get_fields = (class_get_fields_t)resolve("il2cpp_class_get_fields");
-        method_get_name = (method_get_name_t)resolve("il2cpp_method_get_name");
-        method_get_param_count = (method_get_param_count_t)resolve("il2cpp_method_get_param_count");
-        field_get_name = (field_get_name_t)resolve("il2cpp_field_get_name");
-        field_get_offset = (field_get_offset_t)resolve("il2cpp_field_get_offset");
-        field_get_type = (field_get_type_t)resolve("il2cpp_field_get_type");
-        type_get_name = (type_get_name_t)resolve("il2cpp_type_get_name");
-
-        inited = (domain_get != nullptr && assembly_get_image != nullptr && class_get_name != nullptr);
-        return inited;
-    }
-};
-
-static Il2CppApis g_il2cpp_api;
 
 struct LiveFieldInfo {
     std::string name;
