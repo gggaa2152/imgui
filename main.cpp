@@ -3225,7 +3225,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     visited.insert(rootObj);
 
     int nodesProcessed = 0;
-    const int maxNodes = 30000;
+    const int maxNodes = 35000;
 
     while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 150) {
         QueueItem item = queue.front();
@@ -3237,7 +3237,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         if (!IsValidPtr(item.obj)) continue;
 
         void* klass_ptr = nullptr;
-        if (!SafeReadMemory(item.obj, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) continue;
+        SafeReadMemory(item.obj, &klass_ptr, sizeof(void*));
 
         // 记录探测过的分支链条 (Explored Chain)
         if (!item.path.empty() && result.exploredChains.size() < 60) {
@@ -3259,6 +3259,8 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                 result.exploredChains.push_back(fp);
             }
         }
+
+        std::unordered_set<size_t> exploredOffsets;
 
         // ==========================================
         // 1. 数组类型全量解包 (Array / T[])
@@ -3290,7 +3292,6 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     bool intMatch = hasTargetInt && (elem_val32 == targetIntVal || (int64_t)elem_ptr == targetIntVal || elem_val32_stride4 == targetIntVal);
 
                     if (IsValidPtr(elem_ptr)) {
-                        // ★ 全量探测数组元素是否为文本字符串 (如玩家名称字符串数组)
                         std::string elem_str = ReadIl2CppString(elem_ptr);
                         bool strMatch = (!elem_str.empty() && !target_raw.empty() && SmartStringMatch(elem_str, target_raw));
 
@@ -3441,9 +3442,9 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         }
 
         // ==========================================
-        // 4. 原生反射遍历类与全部父类字段 (智能全量模糊字/词/字符串探测)
+        // 4. 原生反射遍历类与全部父类字段
         // ==========================================
-        if (g_il2cpp_api.class_get_fields) {
+        if (klass_ptr && IsValidIl2CppClass(klass_ptr) && g_il2cpp_api.class_get_fields) {
             int p_depth = 0;
             for (void* cur_klass = klass_ptr; cur_klass != nullptr && IsValidIl2CppClass(cur_klass) && p_depth < 10; p_depth++, cur_klass = (g_il2cpp_api.class_get_parent ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr)) {
                 void* iter = nullptr;
@@ -3465,6 +3466,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     std::string clean_type = CleanIl2CppTypeName(type_str);
 
                     if (field_str.empty()) continue;
+                    exploredOffsets.insert(f_offset);
 
                     uintptr_t rawVal = 0;
                     SafeReadMemory(item.obj + f_offset, &rawVal, sizeof(uintptr_t));
@@ -3477,7 +3479,6 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     std::string str_content = "";
                     bool isIntField = false;
 
-                    // ★ 核心增强：只要是有效指针，主动尝试探测是否为合法 IL2CPP 文本字符串（覆盖所有玩家名、标题、文本字段！）
                     if (IsValidPtr(rawVal)) {
                         str_content = ReadIl2CppString(rawVal);
                         if (!str_content.empty()) {
@@ -3521,7 +3522,6 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     if (target_raw.empty()) {
                         isAnyMatch = true;
                     } else {
-                        // ★ 核心智能模糊匹配 (单字、多字、子串全量匹配)
                         if (SmartStringMatch(field_str, target_raw)) fieldMatch = true;
                         if (SmartStringMatch(clean_type, target_raw)) typeMatch = true;
                         if (!str_content.empty() && SmartStringMatch(str_content, target_raw)) stringValMatch = true;
@@ -3579,7 +3579,6 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                             }
                         }
 
-                        // 如果不是纯字符串且未访问过，入队继续深钻
                         if (!childClass.empty() && str_content.empty() && visited.find(child_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
                             visited.insert(child_ptr);
                             queue.push_back({ child_ptr, childClass, nextPath, item.depth + 1 });
@@ -3620,58 +3619,94 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         }
 
         // ==========================================
-        // 5. 实例内存深度兜底扫描 (Raw Instance Memory Scan for Unmapped Strings and Ints)
+        // 5. 穿透所有未映射物理内存槽位 (+0x10 ~ +0x1E0) 全量深钻 (保证穿透 +0x10 addr2 等非反射主线指针)
         // ==========================================
-        if (result.paths.size() < 10) {
-            for (size_t raw_off = 0x10; raw_off <= 0x1A0; raw_off += sizeof(uintptr_t)) {
-                uintptr_t r_ptr = 0;
-                SafeReadMemory(item.obj + raw_off, &r_ptr, sizeof(uintptr_t));
-                int32_t r_val32 = 0;
-                SafeReadMemory(item.obj + raw_off, &r_val32, sizeof(int32_t));
+        for (size_t raw_off = 0x10; raw_off <= 0x1E0; raw_off += sizeof(uintptr_t)) {
+            if (exploredOffsets.find(raw_off) != exploredOffsets.end()) continue;
 
-                bool rawHit = false;
-                std::string hitDesc = "";
-                std::string hitVal = "";
+            uintptr_t r_ptr = 0;
+            SafeReadMemory(item.obj + raw_off, &r_ptr, sizeof(uintptr_t));
+            int32_t r_val32 = 0;
+            SafeReadMemory(item.obj + raw_off, &r_val32, sizeof(int32_t));
 
-                if (IsValidPtr(r_ptr)) {
-                    std::string raw_str = ReadIl2CppString(r_ptr);
-                    if (!raw_str.empty() && !target_raw.empty() && SmartStringMatch(raw_str, target_raw)) {
-                        rawHit = true;
-                        hitDesc = (const char*)u8"[内存物理字符串命中: \"" + raw_str + "\"]";
-                        hitVal = "\"" + raw_str + "\"";
-                    }
+            std::string slot_name = "Slot[+0x" + std::to_string(raw_off) + "]";
+            std::string raw_str = "";
+            bool strMatch = false;
+
+            if (IsValidPtr(r_ptr)) {
+                raw_str = ReadIl2CppString(r_ptr);
+                if (!raw_str.empty() && !target_raw.empty() && SmartStringMatch(raw_str, target_raw)) {
+                    strMatch = true;
                 }
+            }
 
-                if (!rawHit && hasTargetInt && r_val32 == targetIntVal) {
-                    rawHit = true;
-                    hitDesc = (const char*)u8"[内存物理数值命中: " + target_raw + "]";
-                    char buf[32]; snprintf(buf, sizeof(buf), "%d", r_val32);
-                    hitVal = buf;
-                }
+            bool intMatch = hasTargetInt && (r_val32 == targetIntVal || (int64_t)r_ptr == targetIntVal);
 
-                if (rawHit) {
-                    std::string raw_field = "MemorySlot[+0x" + std::to_string(raw_off) + "]";
-                    std::vector<ObjectPathStep> nextPath = item.path;
-                    nextPath.push_back({ item.obj, item.className, raw_field, "RawSlot", "RawSlot", raw_off, item.obj + raw_off, "RawSlot", true, (uintptr_t)r_ptr, hitVal });
+            if (IsValidPtr(r_ptr)) {
+                std::string childClass = GetObjClassName(r_ptr);
+                std::string cleanType = CleanIl2CppTypeName(childClass);
+                bool classMatch = (!target_raw.empty() && !childClass.empty() && SmartStringMatch(childClass, target_raw));
 
+                char fbuf[96];
+                if (!raw_str.empty()) snprintf(fbuf, sizeof(fbuf), "\"%s\"", raw_str.c_str());
+                else snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", r_ptr, cleanType.c_str());
+
+                std::vector<ObjectPathStep> nextPath = item.path;
+                nextPath.push_back({ item.obj, item.className, slot_name, raw_str.empty() ? childClass : "String", raw_str.empty() ? cleanType : "String", raw_off, r_ptr, raw_str.empty() ? (childClass.empty() ? cleanType : childClass) : ("\"" + raw_str + "\""), false, r_ptr, fbuf });
+
+                if (strMatch || intMatch || classMatch) {
                     std::string sig = "";
                     for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
                     if (recordedPaths.find(sig) == recordedPaths.end()) {
                         recordedPaths.insert(sig);
                         FoundPath fp;
-                        fp.matchDesc = hitDesc + " " + raw_field;
-                        fp.targetInstance = item.obj + raw_off;
+                        if (strMatch) fp.matchDesc = (const char*)u8"[内存物理文本命中: \"" + raw_str + "\"] " + slot_name;
+                        else if (intMatch) fp.matchDesc = (const char*)u8"[内存物理数值命中: " + target_raw + "] " + slot_name;
+                        else fp.matchDesc = (const char*)u8"[未反射类指针匹配] " + cleanType + " " + slot_name;
+
+                        fp.targetInstance = r_ptr;
                         fp.steps = nextPath;
-                        fp.fieldName = raw_field;
-                        fp.cleanType = "RawSlot";
+                        fp.fieldName = slot_name;
+                        fp.cleanType = raw_str.empty() ? cleanType : "String";
                         fp.offset = raw_off;
                         fp.fieldAddress = item.obj + raw_off;
-                        fp.formattedVal = hitVal;
+                        fp.formattedVal = fbuf;
                         fp.intVal = r_val32;
-                        fp.isIntField = hasTargetInt;
+                        fp.isIntField = intMatch;
+
                         result.paths.push_back(fp);
                         result.found = true;
                     }
+                }
+
+                // 将未反射的指针槽位（如 +0x10）也加入 BFS 队列深钻！
+                if (!childClass.empty() && raw_str.empty() && visited.find(r_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
+                    visited.insert(r_ptr);
+                    queue.push_back({ r_ptr, childClass, nextPath, item.depth + 1 });
+                }
+            } else if (intMatch) {
+                std::vector<ObjectPathStep> nextPath = item.path;
+                char fbuf[32]; snprintf(fbuf, sizeof(fbuf), "%d", r_val32);
+                nextPath.push_back({ item.obj, item.className, slot_name, "Int32", "Int32", raw_off, item.obj + raw_off, "Int32", true, (uintptr_t)r_val32, fbuf });
+
+                std::string sig = "";
+                for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
+                if (recordedPaths.find(sig) == recordedPaths.end()) {
+                    recordedPaths.insert(sig);
+                    FoundPath fp;
+                    fp.matchDesc = (const char*)u8"[内存物理数值命中: " + target_raw + "] " + slot_name;
+                    fp.targetInstance = item.obj + raw_off;
+                    fp.steps = nextPath;
+                    fp.fieldName = slot_name;
+                    fp.cleanType = "Int32";
+                    fp.offset = raw_off;
+                    fp.fieldAddress = item.obj + raw_off;
+                    fp.formattedVal = fbuf;
+                    fp.intVal = r_val32;
+                    fp.isIntField = true;
+
+                    result.paths.push_back(fp);
+                    result.found = true;
                 }
             }
         }
@@ -5184,10 +5219,14 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     }
 
     // ==========================================
-    // D. 实例物理内存槽位兜底 (仅当完全无法通过反射获取字段时)
+    // D. 实例物理内存槽位全量融合补充 (自动将 +0x10, +0x18, +0x28 等未被 IL2CPP 反射登记的物理槽位全部合并呈现！)
     // ==========================================
-    if (fieldRows.empty()) {
-        for (size_t slot_off = 0x10; slot_off <= 0x180; slot_off += 8) {
+    {
+        std::unordered_set<size_t> existing_offsets;
+        for (const auto& r : fieldRows) existing_offsets.insert(r.offset);
+
+        for (size_t slot_off = 0x10; slot_off <= 0x2A0; slot_off += sizeof(uintptr_t)) {
+            if (existing_offsets.find(slot_off) != existing_offsets.end()) continue;
             uintptr_t slot_ptr = 0;
             SafeReadMemory(currentObj + slot_off, &slot_ptr, sizeof(uintptr_t));
             int32_t slot_int = 0;
