@@ -1,5 +1,8 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <signal.h>
@@ -219,6 +222,10 @@ float g_orb_r = 34.0f;
 bool g_win_cardpool = true;
 bool g_win_playerdata = true;
 bool g_win_hextech = true;
+bool g_win_path_trace = true;
+float g_path_trace_scale = 1.0f;
+float g_alpha_pt = 1.0f;
+float g_float_pt_x = -1.0f, g_float_pt_y = -1.0f;
 // Per-float opacity (1 = opaque)
 float g_alpha_cp = 1.0f;
 float g_alpha_pd = 1.0f;
@@ -576,6 +583,7 @@ void SaveConfig() {
     CaptureWindowPos("##PlayerDataFloat", g_float_pd_x, g_float_pd_y);
     CaptureWindowPos("##OpponentFloat", g_float_opp_x, g_float_opp_y);
     CaptureWindowPos("##HextechFloat", g_float_hex_x, g_float_hex_y);
+    CaptureWindowPos("##PathTraceFloat", g_float_pt_x, g_float_pt_y);
 
     std::ofstream out(GetConfigPath());
     if (out.is_open()) {
@@ -669,6 +677,11 @@ void SaveConfig() {
         out << "float_opp_y=" << g_float_opp_y << "\n";
         out << "float_hex_x=" << g_float_hex_x << "\n";
         out << "float_hex_y=" << g_float_hex_y << "\n";
+        out << "win_path_trace=" << (g_win_path_trace ? 1 : 0) << "\n";
+        out << "path_trace_scale=" << g_path_trace_scale << "\n";
+        out << "alpha_pt=" << g_alpha_pt << "\n";
+        out << "float_pt_x=" << g_float_pt_x << "\n";
+        out << "float_pt_y=" << g_float_pt_y << "\n";
         out << "auto_buy_ids=";
         bool first_ab = true;
         for (const auto& kv : g_heroAutoBuyChecked) {
@@ -773,6 +786,11 @@ void LoadConfig() {
                 else if (key == "float_opp_y") g_float_opp_y = std::stof(valStr);
                 else if (key == "float_hex_x") g_float_hex_x = std::stof(valStr);
                 else if (key == "float_hex_y") g_float_hex_y = std::stof(valStr);
+                else if (key == "win_path_trace") g_win_path_trace = (std::stoi(valStr) != 0);
+                else if (key == "path_trace_scale") g_path_trace_scale = std::stof(valStr);
+                else if (key == "alpha_pt") g_alpha_pt = std::stof(valStr);
+                else if (key == "float_pt_x") g_float_pt_x = std::stof(valStr);
+                else if (key == "float_pt_y") g_float_pt_y = std::stof(valStr);
                                                                 
                 else if (key == "auto_buy_ids") {
                     g_heroAutoBuyChecked.clear();
@@ -2748,6 +2766,84 @@ void DrawHextechCapsule() {
     }
     ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", txt.c_str());
     EndContentFloatWindow("hex_grip", &g_hextech_scale);
+
+void DrawPathTraceFloatWindow() {
+    if (!g_win_path_trace) return;
+    if (!g_is_in_match.load(std::memory_order_relaxed)) return;
+
+    if (!BeginContentFloatWindow("##PathTraceFloat", &g_win_path_trace, &g_float_pt_x, &g_float_pt_y, g_alpha_pt)) return;
+
+    float sc = g_autoScale * g_path_trace_scale;
+    ImGui::SetWindowFontScale(sc);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 mn = ImGui::GetWindowPos();
+    ImVec2 sz = ImGui::GetWindowSize();
+    ImVec2 mx(mn.x + sz.x, mn.y + sz.y);
+    dl->AddRectFilled(mn, mx, IM_COL32(12, 16, 26, 235), 8.0f * sc);
+    dl->AddRect(mn, mx, IM_COL32(60, 140, 240, 190), 8.0f * sc, 0, 1.5f);
+
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🎯【类寻址路径实时反查】");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "[%s]", g_class_search_input);
+
+    // 快捷切换按钮
+    if (ImGui::SmallButton((const char*)u8"单例")) {
+        strncpy(g_class_search_input, "ChessModelManager", sizeof(g_class_search_input));
+        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "ChessModelManager", 6);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton((const char*)u8"上下文")) {
+        strncpy(g_class_search_input, "ChessBattleModel", sizeof(g_class_search_input));
+        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "ChessBattleModel", 6);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton((const char*)u8"列表")) {
+        strncpy(g_class_search_input, "CSoGameData_View", sizeof(g_class_search_input));
+        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "CSoGameData_View", 6);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton((const char*)u8"对局")) {
+        strncpy(g_class_search_input, "SegmentCsogame", sizeof(g_class_search_input));
+        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "SegmentCsogame", 6);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton((const char*)u8"牌库")) {
+        strncpy(g_class_search_input, "CTAC_HeroPool", sizeof(g_class_search_input));
+        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "CTAC_HeroPool", 6);
+    }
+
+    if (!g_lastPathResult.found && IsValidPtr(g_dbg_addr1)) {
+        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, g_class_search_input, 6);
+    }
+
+    if (g_lastPathResult.found) {
+        if (g_lastPathResult.steps.empty()) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即根单例自身 (0x%lx) [0级直达]", g_lastPathResult.targetInstance);
+        } else {
+            for (size_t s = 0; s < g_lastPathResult.steps.size(); s++) {
+                const auto& st = g_lastPathResult.steps[s];
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[%zu] %s", s + 1, st.fromClass.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "──[+0x%lx: %s]──>", st.offset, st.fieldName.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
+            }
+
+            std::string off_summary = (const char*)u8"💡 偏移链: g_dbg_addr1";
+            for (const auto& st : g_lastPathResult.steps) {
+                char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
+                off_summary += obuf;
+            }
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"🎯 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
+        }
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), (const char*)u8"正在堆内存中追踪目标类: %s ...", g_class_search_input);
+    }
+
+    EndContentFloatWindow("pt_grip", &g_path_trace_scale);
+}
 }
 
 float g_anim[30] = {0.0f};
@@ -3135,44 +3231,366 @@ static int g_resolver_subtab = 0;
 static char g_custom_inspect_addr[32] = "0x0";
 static LiveInstanceDump g_custom_dump;
 
-void DrawLiveInstanceTree(const LiveInstanceDump& dump, float scale) {
-    if (!dump.valid) {
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), (const char*)u8"[%s] (0x%lx) -> [地址未就绪或非有效 C# 堆实例]", dump.label.c_str(), dump.address);
+struct ObjectPathStep {
+    uintptr_t fromObj;
+    std::string fromClass;
+    std::string fieldName;
+    size_t offset;
+    uintptr_t toObj;
+    std::string toClass;
+};
+
+struct ObjectPathFindingResult {
+    bool found;
+    std::string targetClassName;
+    uintptr_t targetInstance;
+    std::vector<ObjectPathStep> steps;
+};
+
+static ObjectPathFindingResult g_lastPathResult;
+
+ObjectPathFindingResult AutoFindPathToClass(uintptr_t rootObj, const std::string& targetClassName, int maxDepth = 6) {
+    ObjectPathFindingResult result;
+    result.found = false;
+    result.targetClassName = targetClassName;
+    result.targetInstance = 0;
+
+    if (!IsValidPtr(rootObj) || targetClassName.empty() || !g_il2cpp_api.init()) return result;
+
+    std::string target_lower = targetClassName;
+    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
+
+    struct QueueItem {
+        uintptr_t obj;
+        std::string className;
+        std::vector<ObjectPathStep> path;
+        int depth;
+    };
+
+    std::deque<QueueItem> queue;
+    std::unordered_set<uintptr_t> visited;
+
+    auto GetObjClassName = [](uintptr_t ptr) -> std::string {
+        if (!IsValidPtr(ptr)) return "";
+        void* klass_ptr = nullptr;
+        if (!SafeReadMemory(ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) return "";
+        const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
+        const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
+        return (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
+    };
+
+    std::string rootClass = GetObjClassName(rootObj);
+    if (rootClass.empty()) return result;
+
+    std::string root_lower = rootClass;
+    std::transform(root_lower.begin(), root_lower.end(), root_lower.begin(), ::tolower);
+    if (root_lower.find(target_lower) != std::string::npos || target_lower.find(root_lower) != std::string::npos) {
+        result.found = true;
+        result.targetInstance = rootObj;
+        return result;
+    }
+
+    queue.push_back({ rootObj, rootClass, {}, 0 });
+    visited.insert(rootObj);
+
+    while (!queue.empty()) {
+        QueueItem item = queue.front();
+        queue.pop_front();
+
+        if (item.depth >= maxDepth) continue;
+
+        void* klass_ptr = nullptr;
+        if (!SafeReadMemory(item.obj, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) continue;
+
+        if (g_il2cpp_api.class_get_fields) {
+            void* iter = nullptr;
+            while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
+                const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
+                size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
+
+                uintptr_t child_ptr = 0;
+                if (IsValidPtr(item.obj + f_offset) && SafeReadMemory(item.obj + f_offset, &child_ptr, sizeof(uintptr_t)) && IsValidPtr(child_ptr)) {
+                    if (visited.find(child_ptr) == visited.end()) {
+                        std::string childClass = GetObjClassName(child_ptr);
+                        if (!childClass.empty()) {
+                            std::string child_lower = childClass;
+                            std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
+
+                            std::vector<ObjectPathStep> nextPath = item.path;
+                            nextPath.push_back({ item.obj, item.className, f_name ? f_name : "", f_offset, child_ptr, childClass });
+
+                            // 匹配目标类名
+                            if (child_lower.find(target_lower) != std::string::npos || target_lower.find(child_lower) != std::string::npos) {
+                                result.found = true;
+                                result.targetInstance = child_ptr;
+                                result.steps = nextPath;
+                                return result;
+                            }
+
+                            visited.insert(child_ptr);
+                            queue.push_back({ child_ptr, childClass, nextPath, item.depth + 1 });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+struct ClassInspectInfo {
+    std::string className;
+    std::string imageName;
+    uintptr_t classAddress;
+    uintptr_t classRva;
+    struct MethodEntry { std::string name; uintptr_t rva; };
+    struct FieldEntry { std::string name; std::string typeName; size_t offset; };
+    std::vector<MethodEntry> methods;
+    std::vector<FieldEntry> fields;
+    bool valid;
+};
+
+static ClassInspectInfo g_inspectedClass;
+static char g_class_search_input[64] = "ZGameChess.ChessModelManager";
+
+ClassInspectInfo InspectClassByFullName(const std::string& targetName) {
+    ClassInspectInfo info;
+    info.className = targetName;
+    info.classAddress = 0;
+    info.classRva = 0;
+    info.valid = false;
+
+    if (targetName.empty() || !g_il2cpp_api.init()) return info;
+
+    void* domain = g_il2cpp_api.domain_get();
+    if (!domain) return info;
+
+    size_t asm_count = 0;
+    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
+    if (!assemblies) return info;
+
+    std::string target_lower = targetName;
+    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
+
+    for (size_t a = 0; a < asm_count; a++) {
+        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        const char* img_name = g_il2cpp_api.image_get_name ? g_il2cpp_api.image_get_name(img) : "";
+        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
+
+        for (size_t c = 0; c < cls_count; c++) {
+            void* klass = g_il2cpp_api.image_get_class(img, c);
+            if (!klass) continue;
+
+            const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass) : "";
+            const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : "";
+            std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
+            std::string full_class_lower = full_class;
+            std::transform(full_class_lower.begin(), full_class_lower.end(), full_class_lower.begin(), ::tolower);
+
+            if (full_class_lower == target_lower || full_class_lower.find(target_lower) != std::string::npos || target_lower.find(full_class_lower) != std::string::npos) {
+                info.className = full_class;
+                info.imageName = img_name ? img_name : "";
+                info.classAddress = (uintptr_t)klass;
+                info.classRva = info.classAddress > g_il2cppTrueBase ? (info.classAddress - g_il2cppTrueBase) : 0;
+                info.valid = true;
+
+                if (g_il2cpp_api.class_get_methods && g_il2cpp_api.method_get_name) {
+                    void* iter = nullptr;
+                    while (void* method = g_il2cpp_api.class_get_methods(klass, &iter)) {
+                        const char* m_name = g_il2cpp_api.method_get_name(method);
+                        uintptr_t func_ptr = *(uintptr_t*)method;
+                        uintptr_t rva = func_ptr > g_il2cppTrueBase ? (func_ptr - g_il2cppTrueBase) : 0;
+                        info.methods.push_back({ m_name ? m_name : "", rva });
+                    }
+                }
+
+                if (g_il2cpp_api.class_get_fields && g_il2cpp_api.field_get_name && g_il2cpp_api.field_get_offset) {
+                    void* iter = nullptr;
+                    while (void* field = g_il2cpp_api.class_get_fields(klass, &iter)) {
+                        const char* f_name = g_il2cpp_api.field_get_name(field);
+                        size_t f_offset = g_il2cpp_api.field_get_offset(field);
+                        void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
+                        const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
+                        info.fields.push_back({ f_name ? f_name : "", t_name ? t_name : "", f_offset });
+                    }
+                }
+                return info;
+            }
+        }
+    }
+    return info;
+}
+
+void DrawInteractiveObjectNode(uintptr_t obj_ptr, const char* fieldName, size_t offset, float scale, int depth, std::unordered_set<uintptr_t>& visited) {
+    if (!IsValidPtr(obj_ptr)) {
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "  +0x%-4lx %s: null / 0x0", offset, fieldName);
         return;
     }
 
-    std::string header = "[" + dump.label + "] (0x" + [] (uintptr_t val) {
-        char buf[32]; snprintf(buf, sizeof(buf), "%lx", val); return std::string(buf);
-    }(dump.address) + ") -> C# 类: " + dump.fullClassName + " (包含 " + std::to_string(dump.fields.size()) + " 个成员字段)";
+    if (!g_il2cpp_api.init()) {
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "  +0x%-4lx %s: 0x%lx", offset, fieldName, obj_ptr);
+        return;
+    }
 
-    if (ImGui::TreeNode(header.c_str())) {
-        ImGui::Indent(10.0f * scale);
-        for (const auto& f : dump.fields) {
-            ImVec4 col = f.matchesKnown ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
-            
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
-            ImGui::SameLine();
-            ImGui::TextColored(col, "%s", f.name.c_str());
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(%s)", f.typeName.c_str());
+    void* klass_ptr = nullptr;
+    if (!SafeReadMemory(obj_ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) {
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "  +0x%-4lx %s: 0x%lx [非有效 C# 堆对象]", offset, fieldName, obj_ptr);
+        return;
+    }
 
-            if (f.rawValue != 0) {
+    const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
+    const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
+    std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
+    if (full_class.empty()) full_class = "UnknownClass";
+
+    // 1. 如果是 String 字符串对象，直接读取并显示内容
+    if (full_class == "System.String" || full_class.find("String") != std::string::npos) {
+        std::string str_val = ReadIl2CppString(obj_ptr);
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", offset);
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", fieldName);
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(string)");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "= \"%s\"", str_val.c_str());
+        return;
+    }
+
+    // 2. 如果是 List<T> 列表，读取 Count 并允许逐个展开元素
+    if (full_class.find("System.Collections.Generic.List`1") != std::string::npos || full_class.find("List`1") != std::string::npos) {
+        int list_size = SAFE_READ_INT(obj_ptr, 0x18);
+        uintptr_t items_arr = SAFE_READ_PTR(obj_ptr, 0x10);
+        char node_title[256];
+        snprintf(node_title, sizeof(node_title), "+0x%-4lx %s: List<%s> (数量: %d, 0x%lx)###List_%lx_%lx", 
+            offset, fieldName, c_name, list_size, obj_ptr, obj_ptr, (uintptr_t)offset);
+
+        if (ImGui::TreeNode(node_title)) {
+            ImGui::Indent(12.0f * scale);
+            if (list_size > 0 && IsValidPtr(items_arr)) {
+                int show_count = std::min(list_size, 50);
+                for (int i = 0; i < show_count; i++) {
+                    uintptr_t elem_ptr = SAFE_READ_PTR(items_arr, 0x20 + i * 8);
+                    char elem_name[64];
+                    snprintf(elem_name, sizeof(elem_name), "元素 [%d]", i);
+                    DrawInteractiveObjectNode(elem_ptr, elem_name, 0x20 + i * 8, scale, depth + 1, visited);
+                }
+                if (list_size > 50) ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "... (其余 %d 个元素已省略)", list_size - 50);
+            }
+            ImGui::Unindent(12.0f * scale);
+            ImGui::TreePop();
+        }
+        return;
+    }
+
+    // 3. 防递归死循环
+    if (visited.find(obj_ptr) != visited.end() || depth > 10) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  +0x%-4lx %s: 0x%lx (%s) [已展开/循环引用]", offset, fieldName, obj_ptr, full_class.c_str());
+        return;
+    }
+
+    // 4. 获取该类的所有成员字段（全量无遗漏）
+    std::vector<LiveFieldInfo> all_fields;
+    if (g_il2cpp_api.class_get_fields) {
+        void* iter = nullptr;
+        while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
+            const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
+            size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
+            void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
+            const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
+
+            LiveFieldInfo fInfo;
+            fInfo.name = f_name ? f_name : "";
+            fInfo.typeName = t_name ? t_name : "";
+            fInfo.offset = f_offset;
+            fInfo.rawValue = 0;
+            fInfo.matchesKnown = false;
+
+            if (IsValidPtr(obj_ptr + f_offset)) {
+                SafeReadMemory(obj_ptr + f_offset, &fInfo.rawValue, sizeof(uintptr_t));
+                if (IsValidPtr(fInfo.rawValue)) {
+                    void* sub_klass = nullptr;
+                    if (SafeReadMemory(fInfo.rawValue, &sub_klass, sizeof(void*)) && IsValidPtr((uintptr_t)sub_klass)) {
+                        const char* sub_cname = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(sub_klass) : nullptr;
+                        const char* sub_cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(sub_klass) : nullptr;
+                        if (sub_cname && sub_cname[0]) {
+                            fInfo.childClassName = (sub_cns && sub_cns[0]) ? (std::string(sub_cns) + "." + sub_cname) : std::string(sub_cname);
+                        }
+                    }
+                }
+            }
+
+            all_fields.push_back(fInfo);
+        }
+    }
+
+    char node_label[320];
+    if (offset == 0 && depth == 0) {
+        snprintf(node_label, sizeof(node_label), "%s (0x%lx) -> C# 类: %s (包含 %zu 个成员字段)###Root_%lx", 
+            fieldName, obj_ptr, full_class.c_str(), all_fields.size(), obj_ptr);
+    } else {
+        snprintf(node_label, sizeof(node_label), "+0x%-4lx %s: 0x%lx (C# 类: %s, 包含 %zu 个字段)###Sub_%lx_%lx", 
+            offset, fieldName, obj_ptr, full_class.c_str(), all_fields.size(), obj_ptr, (uintptr_t)offset);
+    }
+
+    // 可无限点击下钻的 TreeNode
+    if (ImGui::TreeNode(node_label)) {
+        visited.insert(obj_ptr);
+        ImGui::Indent(12.0f * scale);
+
+        for (const auto& f : all_fields) {
+            // 如果是指针且指向有效 C# 对象，渲染为可继续点击下钻展开的子节点！
+            if (IsValidPtr(f.rawValue) && !f.childClassName.empty()) {
+                DrawInteractiveObjectNode(f.rawValue, f.name.c_str(), f.offset, scale, depth + 1, visited);
+            }
+            // 如果是 String
+            else if (f.typeName == "System.String" || f.typeName.find("String") != std::string::npos) {
+                std::string s_val = ReadIl2CppString(f.rawValue);
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
                 ImGui::SameLine();
-                if (!f.childClassName.empty()) {
-                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.9f, 1.0f), "= 0x%lx [指向类: %s]", f.rawValue, f.childClassName.c_str());
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", f.name.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(string)");
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "= \"%s\"", s_val.c_str());
+            }
+            // 普通数值字段
+            else {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "%s", f.name.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(%s)", f.typeName.c_str());
+                ImGui::SameLine();
+
+                if (f.typeName.find("Boolean") != std::string::npos || f.typeName.find("bool") != std::string::npos) {
+                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "= %s", (f.rawValue & 0xFF) ? "true" : "false");
+                } else if (f.typeName.find("Single") != std::string::npos || f.typeName.find("float") != std::string::npos) {
+                    float fval = 0; memcpy(&fval, &f.rawValue, sizeof(float));
+                    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "= %.3f", fval);
+                } else if (f.typeName.find("Int32") != std::string::npos || f.typeName.find("int") != std::string::npos) {
+                    int ival = (int)f.rawValue;
+                    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "= %d (0x%x)", ival, ival);
                 } else {
                     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "= 0x%lx", f.rawValue);
                 }
             }
-
-            if (f.matchesKnown) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", f.matchDesc.c_str());
-            }
         }
-        ImGui::Unindent(10.0f * scale);
+
+        ImGui::Unindent(12.0f * scale);
+        visited.erase(obj_ptr);
         ImGui::TreePop();
     }
+}
+
+void DrawLiveInstanceTree(const char* label, uintptr_t address, float scale) {
+    if (!IsValidPtr(address)) {
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[%s] (0x%lx) -> [地址未就绪或非有效 C# 堆实例]", label, address);
+        return;
+    }
+    std::unordered_set<uintptr_t> visited;
+    DrawInteractiveObjectNode(address, label, 0, scale, 0, visited);
 }
 
 void DrawSymbolResolverUI() {
@@ -3221,73 +3639,143 @@ void DrawSymbolResolverUI() {
 
         ImGui::BeginChild("LiveInstanceTreeList", ImVec2(0, 0), true);
         {
-            DrawLiveInstanceTree(InspectLiveInstance("1. 获取实例单例 (g_dbg_addr1)", g_dbg_addr1), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("2. 我的茶叶上下文 (addr2)", g_dbg_addr2), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("3. 列表指针 (addr3)", g_dbg_addr3), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("4. 对局基址与我的玩家属性 (segmentcsogame)", g_dbg_segmentcsogame), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("5. 棋盘与棋子总览 (addr19 / board_hero_id)", g_dbg_addr19), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("6. 商店与卡槽总览 (addr14)", g_dbg_addr14), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("7. 备战席总览 (addr17)", g_dbg_addr17), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("8. 玩家信息 (addr13 / pi_name / pi_money)", g_dbg_addr13), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("9. 牌库节点4 (addr4)", g_dbg_addr4), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("10. 牌库字典 (addr7)", g_dbg_addr7), scale);
-            DrawLiveInstanceTree(InspectLiveInstance("11. 海克斯控制器 (hexctrl / addr26)", g_dbg_hexctrl), scale);
+            DrawLiveInstanceTree("1. 获取实例单例 (g_dbg_addr1)", g_dbg_addr1, scale);
+            DrawLiveInstanceTree("2. 我的茶叶上下文 (addr2)", g_dbg_addr2, scale);
+            DrawLiveInstanceTree("3. 列表指针 (addr3)", g_dbg_addr3, scale);
+            DrawLiveInstanceTree("4. 对局基址与我的玩家属性 (segmentcsogame)", g_dbg_segmentcsogame, scale);
+            DrawLiveInstanceTree("5. 棋盘与棋子总览 (addr19 / board_hero_id)", g_dbg_addr19, scale);
+            DrawLiveInstanceTree("6. 商店与卡槽总览 (addr14)", g_dbg_addr14, scale);
+            DrawLiveInstanceTree("7. 备战席总览 (addr17)", g_dbg_addr17, scale);
+            DrawLiveInstanceTree("8. 玩家信息 (addr13 / pi_name / pi_money)", g_dbg_addr13, scale);
+            DrawLiveInstanceTree("9. 牌库节点4 (addr4)", g_dbg_addr4, scale);
+            DrawLiveInstanceTree("10. 牌库字典 (addr7)", g_dbg_addr7, scale);
+            DrawLiveInstanceTree("11. 海克斯控制器 (hexctrl / addr26)", g_dbg_hexctrl, scale);
 
             if (!g_shop_slots.empty()) {
                 for (size_t s = 0; s < g_shop_slots.size(); s++) {
                     char s_lbl[64]; snprintf(s_lbl, sizeof(s_lbl), "12.%zu 商店卡槽 %zu 地址", s + 1, s + 1);
-                    DrawLiveInstanceTree(InspectLiveInstance(s_lbl, g_shop_slots[s]), scale);
+                    DrawLiveInstanceTree(s_lbl, g_shop_slots[s], scale);
                 }
             }
         }
         ImGui::EndChild();
     }
     else if (g_resolver_subtab == 1) {
-        ImGui::TextColored(UITheme().primary, (const char*)u8"搜索内存中任意类名、方法名或字段（如: Player, Chess, Hero, Shop）:");
+        ImGui::TextColored(UITheme().primary, (const char*)u8"输入任意目标类名，自动反查【类的固定偏移 (RVA)】并推导【从单例到达该类的完整寻址路径】：");
         
-        ImGui::SetNextItemWidth(260.0f * scale);
-        ImGui::InputText("##KwSearchInput", g_kw_search_input, sizeof(g_kw_search_input));
+        ImGui::SetNextItemWidth(300.0f * scale);
+        ImGui::InputText("##ClassSearchInput", g_class_search_input, sizeof(g_class_search_input));
         ImGui::SameLine();
-        if (ImGui::Button(g_kwSearching.load() ? (const char*)u8"搜索中..." : (const char*)u8"🔍 开始搜索", ImVec2(120 * scale, 30 * scale))) {
-            if (!g_kwSearching.load()) {
-                g_kwSearching.store(true);
-                std::string kw = g_kw_search_input;
-                std::thread([kw]() { DoKeywordSearch(kw); }).detach();
+        if (ImGui::Button((const char*)u8"🔍 定位类结构与推导路径", ImVec2(190 * scale, 30 * scale))) {
+            g_inspectedClass = InspectClassByFullName(g_class_search_input);
+            g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, g_class_search_input, 6);
+            if (g_inspectedClass.valid) {
+                AddActionLog((const char*)u8"-> [类定位成功] %s (RVA: 0x%lx, 包含 %zu 个字段, %zu 个方法)", 
+                    g_inspectedClass.className.c_str(), g_inspectedClass.classRva, g_inspectedClass.fields.size(), g_inspectedClass.methods.size());
+            }
+            if (g_lastPathResult.found) {
+                AddActionLog((const char*)u8"-> [路径推导成功] 找到从单例到目标类的 %zu 级寻址链路!", g_lastPathResult.steps.size());
             }
         }
+
+        // 快捷预设按钮栏
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"常用核心类快捷查询：");
+        auto QuickSearchBtn = [&scale](const char* label, const char* cls) {
+            if (ImGui::Button(label)) {
+                strncpy(g_class_search_input, cls, sizeof(g_class_search_input));
+                g_inspectedClass = InspectClassByFullName(cls);
+                g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, cls, 6);
+            }
+            ImGui::SameLine();
+        };
+        QuickSearchBtn((const char*)u8"[1. 单例 ChessModelManager]", "ChessModelManager");
+        QuickSearchBtn((const char*)u8"[2. 上下文 ChessBattleModel]", "ChessBattleModel");
+        QuickSearchBtn((const char*)u8"[3. 列表 CSoGameData_View]", "CSoGameData_View");
+        QuickSearchBtn((const char*)u8"[4. 对局 SegmentCsogame]", "SegmentCsogame");
+        QuickSearchBtn((const char*)u8"[5. 牌库 CTAC_HeroPool]", "CTAC_HeroPool");
+        ImGui::NewLine();
 
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"搜索结果列表 (最多展示 400 条):");
 
-        ImGui::BeginChild("KwSearchResults", ImVec2(0, 0), true);
-        {
-            std::lock_guard<std::mutex> lock(g_kwMutex);
-            if (g_kwResults.empty()) {
-                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"暂无搜索结果，请输入关键字后点击搜索");
-            } else {
-                for (size_t i = 0; i < g_kwResults.size(); i++) {
-                    const auto& res = g_kwResults[i];
-                    ImGui::PushID((int)(10000 + i));
+        if (g_inspectedClass.valid) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"【目标类】 %s  |  所属程序集: %s", g_inspectedClass.className.c_str(), g_inspectedClass.imageName.c_str());
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"【类内存地址】 0x%lx  |  【类的固定偏移 (Class RVA)】: 0x%lx", g_inspectedClass.classAddress, g_inspectedClass.classRva);
 
-                    if (res.isFunc) {
-                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "[函数]");
-                    } else {
-                        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "[字段]");
-                    }
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "0x%-4lx", res.offsetOrRva);
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "%s::%s", res.className.c_str(), res.memberName.c_str());
-                    if (!res.typeName.empty() && !res.isFunc) {
+            // ================= 自动输出寻址路径 =================
+            ImGui::Spacing();
+            if (g_lastPathResult.found) {
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🚀【从单例到达该类的完整寻址路径推导结果】：");
+                ImGui::Indent(10.0f * scale);
+                if (g_lastPathResult.steps.empty()) {
+                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标类就是根单例自身 (0x%lx) [0 级直接到达]", g_lastPathResult.targetInstance);
+                } else {
+                    for (size_t s = 0; s < g_lastPathResult.steps.size(); s++) {
+                        const auto& st = g_lastPathResult.steps[s];
+                        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[第 %zu 级] (0x%lx: %s)", s + 1, st.fromObj, st.fromClass.c_str());
                         ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(%s)", res.typeName.c_str());
+                        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "───[+0x%lx (%s)]───>", st.offset, st.fieldName.c_str());
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "(0x%lx: %s)", st.toObj, st.toClass.c_str());
                     }
+                    
+                    // 输出快捷偏移汇总
+                    std::string off_summary = "💡 路径偏移链: g_dbg_addr1";
+                    for (const auto& st : g_lastPathResult.steps) {
+                        char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx (%s)", st.offset, st.fieldName.c_str());
+                        off_summary += obuf;
+                    }
+                    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
+                }
+                ImGui::Unindent(10.0f * scale);
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), (const char*)u8"⚠️ [堆路径追踪] 当前对局内存中尚未实例化该类，或该类不在单例的子树中。");
+            }
+            
+            ImGui::Spacing();
+            if (ImGui::Button((const char*)u8"📋 导出此类的完整结构与寻址路径到日志", ImVec2(320 * scale, 30 * scale))) {
+                AddActionLog((const char*)u8"==================== 类 [%s] 结构与寻址路径 ====================", g_inspectedClass.className.c_str());
+                AddActionLog((const char*)u8"类内存地址: 0x%lx  |  类 RVA: 0x%lx  |  程序集: %s", g_inspectedClass.classAddress, g_inspectedClass.classRva, g_inspectedClass.imageName.c_str());
+                if (g_lastPathResult.found) {
+                    AddActionLog((const char*)u8"--- 寻址链路 (共 %zu 级) ---", g_lastPathResult.steps.size());
+                    for (size_t s = 0; s < g_lastPathResult.steps.size(); s++) {
+                        const auto& st = g_lastPathResult.steps[s];
+                        AddActionLog((const char*)u8"  [%zu] (0x%lx: %s) +0x%lx (%s) -> (0x%lx: %s)", s + 1, st.fromObj, st.fromClass.c_str(), st.offset, st.fieldName.c_str(), st.toObj, st.toClass.c_str());
+                    }
+                }
+                AddActionLog((const char*)u8"--- 成员字段清单 (共 %zu 个) ---", g_inspectedClass.fields.size());
+                for (const auto& f : g_inspectedClass.fields) {
+                    AddActionLog((const char*)u8"   +0x%lx: %s (%s)", f.offset, f.name.c_str(), f.typeName.c_str());
+                }
+                AddActionLog((const char*)u8"==========================================================================");
+            }
 
-                    ImGui::PopID();
+            ImGui::Spacing();
+            ImGui::BeginChild("ClassDetailsView", ImVec2(0, 0), true);
+            {
+                if (ImGui::TreeNode((const char*)u8"🌟 核心方法列表 (点击展开查看函数 RVA)")) {
+                    for (const auto& m : g_inspectedClass.methods) {
+                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "  [函数 RVA: 0x%-6lx]", m.rva);
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "%s()", m.name.c_str());
+                    }
+                    ImGui::TreePop();
+                }
+
+                if (ImGui::TreeNode((const char*)u8"🌟 成员字段与偏移全量对照表 (点击展开查看所有偏移)")) {
+                    for (const auto& f : g_inspectedClass.fields) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", f.name.c_str());
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.6f, 0.75f, 1.0f, 1.0f), "(%s)", f.typeName.c_str());
+                    }
+                    ImGui::TreePop();
                 }
             }
+            ImGui::EndChild();
+        } else {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"在上方输入类名（如 SegmentCsogame 或 ChessBattleModel），点击按钮即可自动反查该类固定偏移与从单例到该类的完整指针路径。");
         }
-        ImGui::EndChild();
     }
     else if (g_resolver_subtab == 2) {
         ImGui::TextColored(UITheme().primary, (const char*)u8"输入任意 16 进制内存指针地址，实时解析其所属的 C# 类名与全部字段：");
@@ -3312,7 +3800,7 @@ void DrawSymbolResolverUI() {
         ImGui::BeginChild("CustomInspectView", ImVec2(0, 0), true);
         {
             if (g_custom_dump.address != 0) {
-                DrawLiveInstanceTree(g_custom_dump, scale);
+                DrawLiveInstanceTree("自定义指针", addr, scale);
             } else {
                 ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"在上方输入框输入一个地址（如 0x28a00000），点击探查即可实时解析。");
             }
@@ -4007,6 +4495,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     DrawOpponentBoardWindow();
     DrawMyHeroWarningWindow();
     DrawHextechCapsule();
+    DrawPathTraceFloatWindow();
     // 胶囊最后绘制并置顶，避免被牌库等浮窗挡住无法解锁
     DrawQuitCapsule();
     DrawLockCapsule();
@@ -4141,7 +4630,22 @@ void* Il2CppInitThread(void*) {
     return nullptr;
 }
 
+static void AutoSetPermissiveSELinux() {
+    // 1. 直接写入 Linux 内核 SELinux 状态节点 (0 = Permissive 宽松模式)
+    int fd = open("/sys/fs/selinux/enforce", O_WRONLY);
+    if (fd >= 0) {
+        write(fd, "0", 1);
+        close(fd);
+    }
+    // 2. 多重 shell / su 兜底执行 setenforce 0
+    system("setenforce 0 2>/dev/null");
+    system("su -c setenforce 0 2>/dev/null");
+    system("su 0 setenforce 0 2>/dev/null");
+    LOGI("[+] [SELinux] Auto setenforce 0 (Permissive mode) applied!");
+}
+
 void* SetupThread(void*) {
+    AutoSetPermissiveSELinux();
     InitCrashGuard();
     LOGI("[+] Adaptive Dual-Engine Setup Thread Started...");
 
