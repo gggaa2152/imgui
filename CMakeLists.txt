@@ -9,6 +9,9 @@ option(INJECTOR_ONLY "Build only the injector executable" OFF)
 
 add_compile_definitions(_USE_MATH_DEFINES)
 add_compile_definitions(M_PI=3.14159265358979323846)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+add_compile_options(-fvisibility=hidden)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(-include cstdint)

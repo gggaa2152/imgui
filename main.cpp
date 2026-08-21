@@ -4543,8 +4543,12 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     GLboolean last_enable_scissor_test = glIsEnabled(GL_SCISSOR_TEST);
     GLint last_fbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
 
+    if (!g_ourImGuiContext) {
+        g_ourImGuiContext = ImGui::CreateContext();
+    }
+    ImGui::SetCurrentContext(g_ourImGuiContext);
+
     if (!g_isImGuiInit) {
-        ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
 
