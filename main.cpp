@@ -4459,7 +4459,7 @@ void DrawSymbolResolverUI() {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
     }
 
-    // 4. 路径输出：每一条路径下面都带有一个对应的三列表格 (字段/属性 | 值 | 类型)
+    // 4. 路径输出：每一条路径下面都完整输出包含所有层级读到的三列表格 (字段/属性 | 值 | 类型)
     if (g_lastPathResult.found) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 共扫描出 %zu 条关联路径与字段：", g_lastPathResult.paths.size());
@@ -4495,7 +4495,7 @@ void DrawSymbolResolverUI() {
             
             ImGui::Spacing();
 
-            // ★ 路径输出的每一条下面都带有一个对应的三列表格 (字段/属性 | 值 | 类型)
+            // ★ 核心展示：遍历输出该路径上【所有层级 (第1层、第2层...)】读到的所有字段表格！
             float col0_w = (avail_x - 20.0f * g_autoScale) * 0.40f;
             float col1_w = (avail_x - 20.0f * g_autoScale) * 0.38f;
             float col2_w = (avail_x - 20.0f * g_autoScale) * 0.22f;
@@ -4515,28 +4515,85 @@ void DrawSymbolResolverUI() {
             ImGui::NextColumn();
             ImGui::Separator();
 
-            // 列 1: 字段/属性
-            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%s", fp.fieldName.c_str());
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "[+0x%lx]", fp.offset);
-            ImGui::NextColumn();
+            if (fp.steps.empty()) {
+                // 0 层（起点自身）
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%s [+0x0]", fp.fieldName.c_str());
+                ImGui::NextColumn();
+                ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", fp.formattedVal.c_str());
+                ImGui::NextColumn();
+                ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", fp.cleanType.c_str());
+                ImGui::NextColumn();
+            } else {
+                // 完整输出第 1 层、第 2 层 ... 所有层级的字段行！
+                for (size_t s = 0; s < fp.steps.size(); s++) {
+                    const auto& st = fp.steps[s];
 
-            // 列 2: 值
-            ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", fp.formattedVal.c_str());
-            if (fp.isIntField) {
-                ImGui::SameLine();
-                char btn_apply_id[64]; snprintf(btn_apply_id, sizeof(btn_apply_id), (const char*)u8"★ 设为 pi_money##p%zu", p);
-                if (ImGui::Button(btn_apply_id)) {
-                    g_off.pi_money = fp.offset;
-                    SaveConfig();
-                    AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx 并保存本地!", fp.offset);
+                    // 实时从内存读取最新动态值
+                    uintptr_t cur_raw = 0;
+                    SafeReadMemory(st.fromObj + st.offset, &cur_raw, sizeof(uintptr_t));
+                    int32_t cur_val32 = 0;
+                    SafeReadMemory(st.fromObj + st.offset, &cur_val32, sizeof(int32_t));
+
+                    std::string live_val = "";
+                    bool is_int = false;
+
+                    if (st.cleanType == "String") {
+                        if (IsValidPtr(cur_raw)) {
+                            std::string s_str = ReadIl2CppString(cur_raw);
+                            live_val = s_str.empty() ? (const char*)u8"空字段" : ("\"" + s_str + "\"");
+                        } else {
+                            live_val = (const char*)u8"空字段";
+                        }
+                    } else if (st.cleanType == "Boolean") {
+                        live_val = (cur_raw & 0xFF) ? "true" : "false";
+                    } else if (st.cleanType == "Int32" || st.cleanType == "UInt32") {
+                        is_int = true;
+                        char buf[32]; snprintf(buf, sizeof(buf), "%d", cur_val32);
+                        live_val = buf;
+                    } else if (st.cleanType == "Int64" || st.cleanType == "UInt64") {
+                        is_int = true;
+                        char buf[32]; snprintf(buf, sizeof(buf), "%ld", (int64_t)cur_raw);
+                        live_val = buf;
+                    } else if (st.cleanType == "Single") {
+                        float fval = 0; memcpy(&fval, &cur_raw, sizeof(float));
+                        char buf[32]; snprintf(buf, sizeof(buf), "%.3f", fval);
+                        live_val = buf;
+                    } else {
+                        if (cur_raw == 0) {
+                            live_val = "Null";
+                        } else {
+                            char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", cur_raw, st.cleanType.c_str());
+                            live_val = buf;
+                        }
+                    }
+
+                    // 列 1: 字段/属性 (带层级标号，如 [L1] _spriteHelperModel [+0x88])
+                    char layer_prefix[32]; snprintf(layer_prefix, sizeof(layer_prefix), "[L%zu] ", s + 1);
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", layer_prefix);
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%s", st.fieldName.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "[+0x%lx]", st.offset);
+                    ImGui::NextColumn();
+
+                    // 列 2: 实时值与快捷设置按钮
+                    ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", live_val.c_str());
+                    if (is_int) {
+                        ImGui::SameLine();
+                        char btn_apply_id[64]; snprintf(btn_apply_id, sizeof(btn_apply_id), (const char*)u8"★ 设为 pi_money##p%zu_s%zu", p, s);
+                        if (ImGui::Button(btn_apply_id)) {
+                            g_off.pi_money = st.offset;
+                            SaveConfig();
+                            AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx 并保存本地!", st.offset);
+                        }
+                    }
+                    ImGui::NextColumn();
+
+                    // 列 3: 类型
+                    ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", st.cleanType.c_str());
+                    ImGui::NextColumn();
                 }
             }
-            ImGui::NextColumn();
-
-            // 列 3: 类型
-            ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", fp.cleanType.c_str());
-            ImGui::NextColumn();
 
             ImGui::Columns(1);
             ImGui::Separator();
