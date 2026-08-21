@@ -4559,7 +4559,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     ImGui::Render();
 
     // 强行刷新状态机并绑定画面最顶层
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, last_fbo);
     glViewport(0, 0, g_gl_width, g_gl_height);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -4586,16 +4586,9 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 }
 
 unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
-    static uint64_t last_frame_time = 0;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + (ts.tv_nsec / 1000000);
-
-    // Anti-Flicker: Ignore duplicate swap calls within 5ms (prevents double-swap flip-flop)
     static bool in_render = false;
-    if (!in_render && (now_ms - last_frame_time >= 4)) {
+    if (!in_render) {
         in_render = true;
-        last_frame_time = now_ms;
 
         if (!g_ourImGuiContext) {
             g_ourImGuiContext = ImGui::CreateContext();
@@ -4611,8 +4604,6 @@ unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
 
 void* hook_eglGetProcAddress(const char* procname) {
     if (!procname) return nullptr;
-    // Do NOT redirect eglGetProcAddress("eglSwapBuffers") if we already direct-hooked eglSwapBuffers
-    // to prevent dual-hook double-render loop!
     if (old_eglGetProcAddress) return old_eglGetProcAddress(procname);
     return nullptr;
 }
