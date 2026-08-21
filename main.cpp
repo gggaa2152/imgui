@@ -3780,16 +3780,22 @@ void DrawSymbolResolverUI() {
     float avail_x = ImGui::GetContentRegionAvail().x;
     float btn_w = 60.0f * g_autoScale;
 
-    // Manual font scale control
-    ImGui::TextColored(ImVec4(0.6f, 0.75f, 0.9f, 1.0f), (const char*)u8"字体大小调节:");
+    // Manual font scale stepper control with [ - ] and [ + ]
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"字体大小:");
     ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"超小(0.65x)")) g_custom_font_scale = 0.65f;
+    if (ImGui::Button((const char*)u8"  -  ", ImVec2(40.0f * g_autoScale, 0))) {
+        g_custom_font_scale = std::max(0.40f, g_custom_font_scale - 0.05f);
+    }
     ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"精细(0.8x)")) g_custom_font_scale = 0.8f;
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), " %.2fx ", g_custom_font_scale);
     ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"标准(1.0x)")) g_custom_font_scale = 1.0f;
+    if (ImGui::Button((const char*)u8"  +  ", ImVec2(40.0f * g_autoScale, 0))) {
+        g_custom_font_scale = std::min(2.00f, g_custom_font_scale + 0.05f);
+    }
     ImGui::SameLine();
-    if (ImGui::Button((const char*)u8"放大(1.2x)")) g_custom_font_scale = 1.2f;
+    if (ImGui::Button((const char*)u8"[重置 0.8x]", ImVec2(80.0f * g_autoScale, 0))) {
+        g_custom_font_scale = 0.80f;
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
