@@ -536,6 +536,24 @@ std::string ReadIl2CppString(uintptr_t strAddr) {
     return utf16_to_utf8(wstr);
 }
 
+// 兜底：将 addr 视为原生 C 字符串（null-terminated UTF-8）读取。
+// 用途：String 类型字段 Il2CppString 读取失败时（如 GVoice 等 native SDK 的 const char* 字段，
+// 指针+0x10 当 length 会读到字符串内容字节 -> 大整数 -> 长度校验失败返回空），
+// 此时回退用本函数按 C 字符串读。最多 256 字节，任意字节为 0x00 终止。
+// 返回空表示该地址不像合法字符串。
+static std::string TryReadCString(uintptr_t addr, int maxLen = 256) {
+    if (!IsValidPtr(addr)) return "";
+    std::string result;
+    for (int i = 0; i < maxLen; i++) {
+        char c = 0;
+        if (!SafeReadMemory(addr + i, &c, 1)) break;
+        if (c == 0) break;                              // null 终止
+        if (c < 0x20 || c == 0x7F) return "";           // 控制字符 -> 不像字符串
+        result += c;
+    }
+    return result;
+}
+
 std::vector<uintptr_t> GetStructArrayPointers(uintptr_t arrayAddr, int maxCount, int structSize, int ptrOffset) {
     std::vector<uintptr_t> res;
     if (!IsValidPtr(arrayAddr)) return res;
@@ -4289,12 +4307,23 @@ static bool        g_ime_pending_show = false;
 static bool        g_ime_pending_hide = false;
 static std::string g_last_ime_text;
 static char*       g_ime_focus_target = nullptr; // 点[输入法]后需重新聚焦的输入框
+static const char* g_last_focused_input = nullptr; // 记录上一帧获得焦点的输入框，用于“点框即弹键盘”
 
 // 必须在 UI 线程执行（addContentView / showSoftInput 强制主线程），由 hook_nativeInjectEvent 消费 pending 标志
 static void DoShowIME() {
-    if (g_ime_open || !g_context || !g_jvm) return;
+    if (g_ime_open) return;
     JNIEnv* e = nullptr;
+    if (!g_jvm) return;
     if (g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6) != JNI_OK || !e) return;
+
+    // g_context 可能尚未从触摸 hook 初始化；这里兜底从 g_view_obj 推导 Activity/Context
+    if (!g_context && g_view_obj) {
+        jclass vCls = e->FindClass("android/view/View");
+        jmethodID gc = e->GetMethodID(vCls, "getContext", "()Landroid/content/Context;");
+        if (gc) { jobject c = e->CallObjectMethod(g_view_obj, gc); if (c) g_context = e->NewGlobalRef(c); }
+        e->ExceptionClear();
+    }
+    if (!g_context) return;
 
     jclass ctxCls = e->FindClass("android/content/Context");
     jmethodID getSys = e->GetMethodID(ctxCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
@@ -4330,12 +4359,20 @@ static void DoShowIME() {
         e->DeleteLocalRef(wlp);
     }
 
+    // 若 addContentView/addView 抛异常（非 UI 线程调用 / 无悬浮窗权限），立即回滚，避免误判为已打开
+    if (e->ExceptionCheck()) { e->ExceptionClear(); return; }
+
+    // 让隐藏的 EditText 也能拿到焦点并唤起键盘：先设为可聚焦，再隐藏，再 requestFocus
+    e->CallVoidMethod(et, e->GetMethodID(etCls, "setFocusableInTouchMode", "(Z)V"), 1);
+    e->CallVoidMethod(et, e->GetMethodID(etCls, "setFocusable", "(Z)V"), 1);
     e->CallVoidMethod(et, e->GetMethodID(etCls, "setVisibility", "(I)V"), 4);   // INVISIBLE
     e->CallVoidMethod(et, e->GetMethodID(etCls, "requestFocus", "()Z"));
+    e->ExceptionClear();
 
     jclass immCls = e->FindClass("android/view/inputmethod/InputMethodManager");
     jmethodID show = e->GetMethodID(immCls, "showSoftInput", "(Landroid/view/View;I)Z");
-    e->CallBooleanMethod(imm, show, et, 1); // SHOW_IMPLICIT
+    e->CallBooleanMethod(imm, show, et, 2); // SHOW_FORCED，比 SHOW_IMPLICIT 更可靠
+    e->ExceptionClear();
 
     g_ime_edittext = e->NewGlobalRef(et);
     g_ime_open = true;
@@ -5261,6 +5298,20 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 bool isStringType = (clean_type == "String");
                 if (isStringType && IsValidPtr(rawVal)) {
                     str_content = ReadIl2CppString(rawVal);
+                    // 兜底: Il2CppString 读取返回空时，多半是 native 字符串字段（如 GVoice 的 const char*），
+                    // 指针+0x10 当 length 会读到字符串内容字节 -> 大整数 -> 长度校验失败返回空。
+                    // 探针读 rawVal+0x10 当 int：若 >300 或 <0 或读失败，说明该地址根本不是 Il2CppString 对象，
+                    // 回退按 C 字符串（null-terminated UTF-8）读一次。length 在 [0,300] 视为合法空串，不回退，
+                    // 避免把 Il2CppString 对象头字节（klass/monitor 指针）误判成字符串。
+                    if (str_content.empty()) {
+                        int probe_len = -999;
+                        bool probe_ok = SafeReadMemory(rawVal + 0x10, &probe_len, sizeof(int));
+                        bool definitely_not_il2cpp = (!probe_ok) || (probe_len > 300) || (probe_len < 0);
+                        if (definitely_not_il2cpp) {
+                            std::string cstr = TryReadCString(rawVal);
+                            if (!cstr.empty()) str_content = cstr;
+                        }
+                    }
                 }
 
                 if (isStringType) {
@@ -5635,6 +5686,16 @@ void DrawSymbolResolverUI() {
     ImGui::SetNextItemWidth(avail_x - 2*btn_w - 16.0f);
     ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); 
     if (g_ime_focus_target == g_root_class_input) { ImGui::SetKeyboardFocusHere(-1); g_ime_focus_target = nullptr; }
+    // 点输入框即唤起系统输入法（自然行为）：焦点刚进入且 IME 未开时自动弹出
+    if (ImGui::IsItemFocused()) {
+        if (g_last_focused_input != g_root_class_input) {
+            g_last_focused_input = g_root_class_input;
+            g_ime_focus_target = g_root_class_input;
+            if (!g_ime_open) RequestShowIME();
+        }
+    } else if (g_last_focused_input == g_root_class_input) {
+        g_last_focused_input = nullptr;
+    }
     ImGui::SameLine(); 
     if (ImGui::Button((const char*)u8"[键盘]##1", ImVec2(btn_w, 0))) { 
         g_vkbd_target = g_root_class_input; 
@@ -5658,6 +5719,15 @@ void DrawSymbolResolverUI() {
     ImGui::SetNextItemWidth(avail_x - 2*btn_w - 16.0f);
     ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
     if (g_ime_focus_target == g_class_search_input) { ImGui::SetKeyboardFocusHere(-1); g_ime_focus_target = nullptr; }
+    if (ImGui::IsItemFocused()) {
+        if (g_last_focused_input != g_class_search_input) {
+            g_last_focused_input = g_class_search_input;
+            g_ime_focus_target = g_class_search_input;
+            if (!g_ime_open) RequestShowIME();
+        }
+    } else if (g_last_focused_input == g_class_search_input) {
+        g_last_focused_input = nullptr;
+    }
     ImGui::SameLine(); 
     if (ImGui::Button((const char*)u8"[键盘]##2", ImVec2(btn_w, 0))) { 
         g_vkbd_target = g_class_search_input; 
@@ -6384,9 +6454,6 @@ void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
 
 extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) {
     if (!g_jvm) env->GetJavaVM(&g_jvm);
-    // 在 UI 线程消费系统输入法请求的 pending 标志
-    if (g_ime_pending_show) { DoShowIME(); g_ime_pending_show = false; }
-    if (g_ime_pending_hide) { DoHideIME(); g_ime_pending_hide = false; }
     if (obj) {
         if (!g_view_obj || !env->IsSameObject(g_view_obj, obj)) {
             if (g_view_obj) env->DeleteGlobalRef(g_view_obj);
@@ -6750,6 +6817,12 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
+
+    // 在渲染主循环（每帧必跑）消费 IME pending 标志，不再依赖“下一次触摸事件触发 hook”，
+    // 解决“点一下输入框/按钮键盘不弹”的时序问题（DoShowIME 内部已做 UI 线程相关兜底）
+    if (g_ime_pending_show) { DoShowIME(); g_ime_pending_show = false; }
+    if (g_ime_pending_hide) { DoHideIME(); g_ime_pending_hide = false; }
+
     PollIMEToImGui();
 
     DrawMainMenu();
