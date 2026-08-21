@@ -197,6 +197,9 @@ struct PlayerInfo {
 std::vector<PlayerInfo> g_players;
 void AddActionLog(const char* format, ...);
 
+static float g_realtime_fps = 60.0f;
+static float g_fps_frametime_ms = 16.6f;
+
 std::atomic<bool> g_is_in_match{false};
 std::atomic<bool> g_match_enter_pending{false};
 static int g_segment_valid_streak = 0;
@@ -6538,7 +6541,4 @@ __attribute__((constructor)) void Init() {
     pthread_t t; 
     pthread_create(&t, 0, SetupThread, 0); 
     pthread_detach(t); 
-}static float g_realtime_fps = 60.0f;
-static float g_fps_frametime_ms = 16.6f;
-
-
+}
