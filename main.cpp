@@ -2220,7 +2220,7 @@ inline int GetHeroStarLevel(int rawHeroId) {
 
 static void DrawStarGlyph(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
     ImVec2 tip[5];
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         float a = - (float)M_PI * 0.5f + i * (2.0f * (float)M_PI / 5.0f);
         tip[i] = ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r);
     }
@@ -4416,19 +4416,6 @@ void DoKeywordSearch(std::string kw) {
     AddActionLog((const char*)u8"-> [关键词搜索] 搜索 '%s' 找到 %zu 条匹配元数据!", kw.c_str(), g_kwResults.size());
 }
 
-// ===== 面包屑导航与对象检查器状态 =====
-struct InspectBreadcrumb {
-    std::string name;
-    uintptr_t address;
-};
-
-static std::vector<InspectBreadcrumb> g_inspect_breadcrumbs;
-static char g_inspector_filter[64] = "";
-static bool g_inspect_include_props = true;
-static int g_resolver_subtab = 0; // 0=金币定位与对象检查器, 1=单例链路寻址, 2=关键字符号搜索
-static char g_custom_inspect_addr[32] = "0x0";
-static LiveInstanceDump g_custom_dump;
-
 // ===== 金币定位数据结构与扫描引擎 =====
 struct CoinMatchResult {
     uintptr_t instancePtr;
@@ -4954,6 +4941,361 @@ void DrawObjectInspectorTable(LiveInstanceDump& dump, float scale) {
 }
 
 // ===== 符号反查总入口与子模块切换 =====
+// ==========================================
+// 商业级 IL2CPP 运行时对象检查器 (Object Inspector)
+// ==========================================
+struct InspectBreadcrumb {
+    std::string displayName;
+    std::string className;
+    uintptr_t objectAddress;
+};
+
+static std::vector<InspectBreadcrumb> g_inspect_breadcrumbs;
+static char g_inspector_filter[128] = "";
+static bool g_inspector_include_props = true;
+static bool g_inspector_hide_null = false;
+static bool g_show_standalone_inspector = false;
+static char g_manual_inspect_input[128] = "";
+
+void PushInspectObject(const std::string& name, const std::string& cls, uintptr_t addr) {
+    if (!IsValidPtr(addr)) return;
+    g_inspect_breadcrumbs.push_back({ name, cls, addr });
+}
+
+void DrawObjectInspectorContent(float avail_x, float avail_y) {
+    float btn_w = 60.0f * g_autoScale;
+
+    // 1. 起点快捷选择与手动输入
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"检查起点:");
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"ChessModelManager")) {
+        uintptr_t ptr = GetSingletonInstance("ChessModelManager");
+        if (ptr == 0) ptr = g_dbg_addr1;
+        if (IsValidPtr(ptr)) {
+            g_inspect_breadcrumbs.clear();
+            PushInspectObject("ChessModelManager", "ChessModelManager", ptr);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"CSOGame")) {
+        uintptr_t ptr = GetSingletonInstance("CSOGame");
+        if (ptr == 0) ptr = g_dbg_segmentcsogame;
+        if (IsValidPtr(ptr)) {
+            g_inspect_breadcrumbs.clear();
+            PushInspectObject("CSOGame", "CSOGame", ptr);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"我的玩家")) {
+        uintptr_t my_ptr = 0;
+        for (const auto& pi : g_players) { if (pi.id == g_my_player_id && IsValidPtr(pi.val_ptr)) { my_ptr = pi.val_ptr; break; } }
+        if (my_ptr == 0 && !g_dbg_player_addrs.empty()) my_ptr = g_dbg_player_addrs[0];
+        if (IsValidPtr(my_ptr)) {
+            g_inspect_breadcrumbs.clear();
+            PushInspectObject("MyPlayer", "PlayerInfo", my_ptr);
+        }
+    }
+
+    // 手动输入指针
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f * g_autoScale);
+    ImGui::InputText("##ManualInspectInput", g_manual_inspect_input, sizeof(g_manual_inspect_input));
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"查看指针")) {
+        if (strlen(g_manual_inspect_input) > 0) {
+            uintptr_t addr = strtoull(g_manual_inspect_input, nullptr, 16);
+            if (IsValidPtr(addr)) {
+                g_inspect_breadcrumbs.clear();
+                PushInspectObject("ManualObject", "UnknownClass", addr);
+            }
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"[键盘]##ins_man")) {
+        g_vkbd_target = g_manual_inspect_input;
+        g_vkbd_target_size = sizeof(g_manual_inspect_input);
+        g_show_vkbd = true;
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // 默认如果未选择对象，自动初始化为 ChessModelManager
+    if (g_inspect_breadcrumbs.empty()) {
+        uintptr_t ptr = GetSingletonInstance("ChessModelManager");
+        if (ptr == 0) ptr = g_dbg_addr1;
+        if (IsValidPtr(ptr)) {
+            PushInspectObject("ChessModelManager", "ChessModelManager", ptr);
+        }
+    }
+
+    if (g_inspect_breadcrumbs.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"请先在上方选择或输入一个有效的内存实例对象指针开始检查。");
+        return;
+    }
+
+    // 2. 商业级粉色高亮面包屑导航栏 (Breadcrumbs Navigation Bar)
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.15f, 0.30f, 0.8f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.40f, 0.20f, 0.50f, 1.0f));
+
+    for (size_t i = 0; i < g_inspect_breadcrumbs.size(); i++) {
+        const auto& bc = g_inspect_breadcrumbs[i];
+        bool isCurrent = (i == g_inspect_breadcrumbs.size() - 1);
+
+        if (isCurrent) {
+            // 当前选中的对象：高亮粉红背景与专属样式 (与截图完全一致)
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.15f, 0.45f, 0.95f));
+            char cur_label[128]; snprintf(cur_label, sizeof(cur_label), "Inspecting %s 0x%lx", bc.className.c_str(), bc.objectAddress);
+            ImGui::Button(cur_label);
+            ImGui::PopStyleColor();
+        } else {
+            char bc_btn[64]; snprintf(bc_btn, sizeof(bc_btn), "%s >##bc_%zu", bc.displayName.c_str(), i);
+            if (ImGui::Button(bc_btn)) {
+                // 点击面包屑退回该层
+                g_inspect_breadcrumbs.erase(g_inspect_breadcrumbs.begin() + i + 1, g_inspect_breadcrumbs.end());
+                break;
+            }
+            ImGui::SameLine();
+        }
+    }
+    ImGui::PopStyleColor(2);
+
+    ImGui::Spacing();
+
+    // 3. 过滤工具栏 (Filter & Checkboxes)
+    ImGui::SetNextItemWidth(180.0f * g_autoScale);
+    ImGui::InputText("##InspectorFilter", g_inspector_filter, sizeof(g_inspector_filter));
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Filter");
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"[键盘]##ins_flt")) {
+        g_vkbd_target = g_inspector_filter;
+        g_vkbd_target_size = sizeof(g_inspector_filter);
+        g_show_vkbd = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"清空##flt")) {
+        g_inspector_filter[0] = '\0';
+    }
+
+    ImGui::SameLine(avail_x - 220.0f * g_autoScale);
+    ImGui::Checkbox((const char*)u8"包含属性", &g_inspector_include_props);
+    ImGui::SameLine();
+    ImGui::Checkbox((const char*)u8"隐藏Null", &g_inspector_hide_null);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // 4. 当前对象全量字段表格解析 (Full Fields Dump & Live Value Inspector)
+    uintptr_t currentObj = g_inspect_breadcrumbs.back().objectAddress;
+    if (!IsValidPtr(currentObj)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[错误] 当前对象内存指针已失效: 0x%lx", currentObj);
+        return;
+    }
+
+    void* klass_ptr = nullptr;
+    if (!SafeReadMemory(currentObj, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[错误] 无法获取 0x%lx 的 Il2CppClass 类型信息", currentObj);
+        return;
+    }
+
+    const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
+    const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
+    std::string fullClassName = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
+    g_inspect_breadcrumbs.back().className = fullClassName;
+
+    // 显示当前对象字段名或类名标题
+    ImGui::TextColored(ImVec4(0.9f, 0.95f, 1.0f, 1.0f), "%s", g_inspect_breadcrumbs.back().displayName.c_str());
+
+    std::string filter_lower = g_inspector_filter;
+    std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
+
+    // 3 列表格 (字段/属性 | 值 | 类型)
+    float col0_w = avail_x * 0.40f;
+    float col1_w = avail_x * 0.38f;
+    float col2_w = avail_x * 0.22f;
+
+    ImGui::Columns(3, "ObjectInspectorColumns", true);
+    ImGui::SetColumnWidth(0, col0_w);
+    ImGui::SetColumnWidth(1, col1_w);
+    ImGui::SetColumnWidth(2, col2_w);
+
+    // 表头 (与截图严格对齐)
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"字段/属性");
+    ImGui::NextColumn();
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"值");
+    ImGui::NextColumn();
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"类型");
+    ImGui::NextColumn();
+    ImGui::Separator();
+
+    std::string dump_buffer = "=== Dump Object: " + fullClassName + " (0x" + std::to_string(currentObj) + ") ===\n";
+
+    // 遍历当前对象的所有字段
+    if (g_il2cpp_api.class_get_fields) {
+        void* iter = nullptr;
+        int field_idx = 0;
+
+        while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
+            uint32_t flags = g_il2cpp_api.field_get_flags ? g_il2cpp_api.field_get_flags(field) : 0;
+            if ((flags & 0x0010) != 0) continue; // 跳过静态字段
+
+            const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
+            size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
+            void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
+            const char* t_name = f_type && g_il2cpp_api.type_get_name ? g_il2cpp_api.type_get_name(f_type) : "";
+
+            std::string field_str = f_name ? f_name : "";
+            std::string type_str = t_name ? t_name : "";
+            std::string clean_type = CleanIl2CppTypeName(type_str);
+
+            bool isPropBacking = (field_str.find("<") != std::string::npos && field_str.find(">k__BackingField") != std::string::npos);
+            if (!g_inspector_include_props && isPropBacking) continue;
+
+            // 安全读取实时动态内存值
+            uintptr_t rawVal = 0;
+            SafeReadMemory(currentObj + f_offset, &rawVal, sizeof(uintptr_t));
+            int32_t val32 = 0;
+            SafeReadMemory(currentObj + f_offset, &val32, sizeof(int32_t));
+            int64_t val64 = 0;
+            SafeReadMemory(currentObj + f_offset, &val64, sizeof(int64_t));
+
+            std::string live_val = "";
+            bool isInt = false;
+            bool isObjectPtr = false;
+            bool isNull = false;
+            std::string childClassName = "";
+
+            if (clean_type == "String" || type_str.find("String") != std::string::npos) {
+                if (IsValidPtr(rawVal)) {
+                    std::string s_str = ReadIl2CppString(rawVal);
+                    live_val = s_str.empty() ? (const char*)u8"空字段" : ("\"" + s_str + "\"");
+                    if (s_str.empty()) isNull = true;
+                } else {
+                    live_val = (const char*)u8"空字段";
+                    isNull = true;
+                }
+            } else if (clean_type == "Boolean") {
+                live_val = (rawVal & 0xFF) ? "true" : "false";
+            } else if (clean_type == "Int32" || clean_type == "UInt32") {
+                isInt = true;
+                char buf[32]; snprintf(buf, sizeof(buf), "%d", val32);
+                live_val = buf;
+                if (val32 == 0) isNull = true;
+            } else if (clean_type == "Int64" || clean_type == "UInt64") {
+                isInt = true;
+                char buf[32]; snprintf(buf, sizeof(buf), "%ld", (int64_t)rawVal);
+                live_val = buf;
+                if (rawVal == 0) isNull = true;
+            } else if (clean_type == "Single") {
+                float fval = 0; memcpy(&fval, &rawVal, sizeof(float));
+                char buf[32]; snprintf(buf, sizeof(buf), "%.3f", fval);
+                live_val = buf;
+            } else {
+                if (rawVal == 0) {
+                    live_val = "Null";
+                    isNull = true;
+                } else {
+                    isObjectPtr = IsValidPtr(rawVal);
+                    if (isObjectPtr) {
+                        void* c_klass = nullptr;
+                        if (SafeReadMemory(rawVal, &c_klass, sizeof(void*)) && IsValidIl2CppClass(c_klass)) {
+                            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
+                            childClassName = cn ? CleanIl2CppTypeName(cn) : clean_type;
+                        }
+                    }
+                    if (childClassName.empty()) childClassName = clean_type;
+
+                    char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", rawVal, childClassName.c_str());
+                    live_val = buf;
+                }
+            }
+
+            if (g_inspector_hide_null && isNull) continue;
+
+            // 过滤匹配
+            if (!filter_lower.empty()) {
+                std::string f_low = field_str; std::transform(f_low.begin(), f_low.end(), f_low.begin(), ::tolower);
+                std::string t_low = clean_type; std::transform(t_low.begin(), t_low.end(), t_low.begin(), ::tolower);
+                std::string v_low = live_val; std::transform(v_low.begin(), v_low.end(), v_low.begin(), ::tolower);
+                if (f_low.find(filter_lower) == std::string::npos && t_low.find(filter_lower) == std::string::npos && v_low.find(filter_lower) == std::string::npos) {
+                    continue;
+                }
+            }
+
+            dump_buffer += field_str + " [+0x" + std::to_string(f_offset) + "] = " + live_val + " (" + clean_type + ")\n";
+
+            // 列 1: 字段/属性
+            if (isPropBacking) {
+                ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.4f, 1.0f), "%s", field_str.c_str());
+            } else {
+                ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.95f, 1.0f), "%s", field_str.c_str());
+            }
+            ImGui::NextColumn();
+
+            // 列 2: 值 (支持一键下钻深入 + 设为 pi_money)
+            if (isObjectPtr && IsValidPtr(rawVal)) {
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "%s", live_val.c_str());
+                ImGui::SameLine();
+                char drill_btn[64]; snprintf(drill_btn, sizeof(drill_btn), (const char*)u8"下钻 >##drill_%d", field_idx);
+                if (ImGui::Button(drill_btn)) {
+                    PushInspectObject(field_str, childClassName.empty() ? clean_type : childClassName, rawVal);
+                }
+            } else {
+                if (live_val == "Null" || live_val == (const char*)u8"空字段") {
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f), "%s", live_val.c_str());
+                } else {
+                    ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", live_val.c_str());
+                }
+
+                if (isInt) {
+                    ImGui::SameLine();
+                    char apply_btn[64]; snprintf(apply_btn, sizeof(apply_btn), (const char*)u8"★ 设为 pi_money##ins_%d", field_idx);
+                    if (ImGui::Button(apply_btn)) {
+                        g_off.pi_money = f_offset;
+                        SaveConfig();
+                        AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx 并保存!", f_offset);
+                    }
+                }
+            }
+            ImGui::NextColumn();
+
+            // 列 3: 类型
+            ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", clean_type.c_str());
+            ImGui::NextColumn();
+
+            field_idx++;
+        }
+    }
+
+    ImGui::Columns(1);
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // 5. 底部操作栏 (Dump Object 按钮)
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.15f, 0.45f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.25f, 0.55f, 1.0f));
+    if (ImGui::Button((const char*)u8"Dump Object (导出对象全量数据到剪贴板)", ImVec2(avail_x, 38.0f * g_autoScale))) {
+        ImGui::SetClipboardText(dump_buffer.c_str());
+        AddActionLog((const char*)u8"-> [Dump] 成功将对象 %s (0x%lx) 的全量字段数据复制到系统剪贴板!", fullClassName.c_str(), currentObj);
+    }
+    ImGui::PopStyleColor(2);
+}
+
+void DrawStandaloneInspectorWindow() {
+    if (!g_show_standalone_inspector) return;
+
+    ImGui::SetNextWindowSize(ImVec2(750.0f * g_autoScale, 550.0f * g_autoScale), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin((const char*)u8"[SV] IL2CPP Tool - 对象检查器", &g_show_standalone_inspector, ImGuiWindowFlags_NoSavedSettings)) {
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        float avail_y = ImGui::GetContentRegionAvail().y;
+        DrawObjectInspectorContent(avail_x, avail_y);
+    }
+    ImGui::End();
+}
+
 void DrawSymbolResolverUI() {
     float sc = 1.0f;
     ImGui::SetWindowFontScale(g_custom_font_scale);
@@ -5264,7 +5606,7 @@ void DrawMainMenu() {
             float sidebarW = 132.0f * g_autoScale * g_scale;
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
             ImGui::BeginChild("FrostSidebar", ImVec2(sidebarW, 0), true, ImGuiWindowFlags_NoScrollbar);
-                        const char* tabLabels[] = { (const char*)u8"视觉透视", (const char*)u8"自动购买", (const char*)u8"链路诊断", (const char*)u8"偏移调试", (const char*)u8"符号反查" };
+                        const char* tabLabels[] = { (const char*)u8"视觉透视", (const char*)u8"自动购买", (const char*)u8"链路诊断", (const char*)u8"偏移调试", (const char*)u8"符号反查", (const char*)u8"对象检查" };
             for (int i = 0; i < 5; i++) {
                 if (FrostSidebarBtn(tabLabels[i], current_tab == i, i)) current_tab = i;
                 ImGui::Dummy(ImVec2(0, 4.0f * g_autoScale));
@@ -5611,7 +5953,8 @@ void DrawMainMenu() {
             ImGui::EndChild();
         }
     }
-    ImGui::End();
+    DrawStandaloneInspectorWindow();
+        ImGui::End();
     DrawActionLogOverlay();
 }
 
