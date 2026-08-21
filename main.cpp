@@ -2838,6 +2838,37 @@ struct Il2CppApis {
 
 static Il2CppApis g_il2cpp_api;
 
+static std::unordered_set<void*> g_valid_classes;
+static bool g_classes_cached = false;
+
+static void CacheValidClasses() {
+    if (g_classes_cached || !g_il2cpp_api.init()) return;
+    
+    void* domain = g_il2cpp_api.domain_get();
+    if (!domain) return;
+    
+    size_t asm_count = 0;
+    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
+    if (!assemblies) return;
+    
+    for (size_t a = 0; a < asm_count; a++) {
+        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
+        for (size_t c = 0; c < cls_count; c++) {
+            void* klass = g_il2cpp_api.image_get_class(img, c);
+            if (klass) g_valid_classes.insert(klass);
+        }
+    }
+    g_classes_cached = true;
+}
+
+static bool IsValidIl2CppClass(void* klass) {
+    if (!klass) return false;
+    if (!g_classes_cached) CacheValidClasses();
+    return g_valid_classes.find(klass) != g_valid_classes.end();
+}
+
 struct ObjectPathStep {
     uintptr_t fromObj;
     std::string fromClass;
@@ -2880,7 +2911,7 @@ ObjectPathFindingResult AutoFindPathToClass(uintptr_t rootObj, const std::string
     auto GetObjClassName = [](uintptr_t ptr) -> std::string {
         if (!IsValidPtr(ptr)) return "";
         void* klass_ptr = nullptr;
-        if (!SafeReadMemory(ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) return "";
+        if (!SafeReadMemory(ptr, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) return "";
         const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
         const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
         return (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
@@ -2907,7 +2938,7 @@ ObjectPathFindingResult AutoFindPathToClass(uintptr_t rootObj, const std::string
         if (item.depth >= maxDepth) continue;
 
         void* klass_ptr = nullptr;
-        if (!SafeReadMemory(item.obj, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) continue;
+        if (!SafeReadMemory(item.obj, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) continue;
 
         if (g_il2cpp_api.class_get_fields) {
             void* iter = nullptr;
@@ -3262,7 +3293,7 @@ LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
     if (!IsValidPtr(ptr) || !g_il2cpp_api.init()) return dump;
 
     void* klass_ptr = nullptr;
-    if (!SafeReadMemory((uintptr_t)ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) {
+    if (!SafeReadMemory((uintptr_t)ptr, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) {
         return dump;
     }
 
@@ -3439,7 +3470,7 @@ void DrawInteractiveObjectNode(uintptr_t obj_ptr, const char* fieldName, size_t 
     }
 
     void* klass_ptr = nullptr;
-    if (!SafeReadMemory(obj_ptr, &klass_ptr, sizeof(void*)) || !IsValidPtr((uintptr_t)klass_ptr)) {
+    if (!SafeReadMemory(obj_ptr, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) {
         ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "  +0x%-4lx %s: 0x%lx [非有效 C# 堆对象]", offset, fieldName, obj_ptr);
         return;
     }
