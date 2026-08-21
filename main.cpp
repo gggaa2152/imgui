@@ -2883,6 +2883,14 @@ static bool StringEqualsIgnoreCase(const std::string& a, const std::string& b) {
     return true;
 }
 
+static bool StringEqualsIgnoreCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (::tolower(a[i]) != ::tolower(b[i])) return false;
+    }
+    return true;
+}
+
 static uintptr_t GetSingletonInstance(const char* className) {
     if (!g_il2cpp_api.init() || !g_il2cpp_api.field_static_get_value || !g_il2cpp_api.field_get_flags) return 0;
     
