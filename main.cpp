@@ -3136,12 +3136,19 @@ void DrawVirtualKeyboard() {
 
     ImGuiIO& io = ImGui::GetIO();
     float scale = g_autoScale * g_scale;
+    
+    // Height of keyboard is about 35% of screen height
+    float kbd_h = io.DisplaySize.y * 0.35f;
     ImGui::SetNextWindowPos(ImVec2(0, io.DisplaySize.y), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, io.DisplaySize.y * 0.45f));
+    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, kbd_h));
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.12f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.35f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.4f, 0.45f, 1.0f));
+    
     ImGui::Begin("VKBD", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::SetWindowFontScale(scale * 1.5f);
+    ImGui::SetWindowFontScale(scale * 1.1f);
 
     // Header / Target Display
     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "输入内容:");
@@ -3149,8 +3156,14 @@ void DrawVirtualKeyboard() {
     ImGui::Text("%s_", g_vkbd_target);
     ImGui::Separator();
 
+    // Responsive Button sizes
+    float avail_w = ImGui::GetContentRegionAvail().x;
+    float spacing = ImGui::GetStyle().ItemSpacing.x;
+    float base_btn_w = (avail_w - (spacing * 13.0f)) / 13.5f; // 13 keys wide approx
+    float btn_h = (ImGui::GetContentRegionAvail().y - (spacing * 4.0f)) / 4.0f; // 4 rows
+
     auto KeyBtn = [&](const char* key, float width_mult = 1.0f) {
-        if (ImGui::Button(key, ImVec2(55.0f * scale * width_mult, 60.0f * scale))) {
+        if (ImGui::Button(key, ImVec2(base_btn_w * width_mult, btn_h))) {
             size_t len = strlen(g_vkbd_target);
             if (strcmp(key, "BS") == 0) {
                 if (len > 0) g_vkbd_target[len - 1] = '\0';
@@ -3198,7 +3211,7 @@ void DrawVirtualKeyboard() {
     KeyBtn("SPACE", 1.5f);
 
     ImGui::End();
-    ImGui::PopStyleColor();
+    ImGui::PopStyleColor(4);
 }
 
 
