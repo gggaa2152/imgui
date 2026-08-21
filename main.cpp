@@ -3020,8 +3020,6 @@ static ObjectPathFindingResult g_lastPathResult;
 
 static int g_search_max_depth = 12;
 
-static int g_search_max_depth = 12;
-
 ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targetName, int maxDepth = 12) {
     ObjectPathFindingResult result;
     result.found = false;
