@@ -3288,15 +3288,17 @@ LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
             fInfo.rawValue = 0;
             fInfo.matchesKnown = false;
 
-            if (IsValidPtr(ptr + f_offset)) {
+                        if (IsValidPtr(ptr + f_offset)) {
                 SafeReadMemory((uintptr_t)(ptr + f_offset), &fInfo.rawValue, sizeof(uintptr_t));
                 if (IsValidPtr(fInfo.rawValue)) {
-                    void* sub_klass = nullptr;
-                    if (SafeReadMemory((uintptr_t)fInfo.rawValue, &sub_klass, sizeof(void*)) && IsValidPtr((uintptr_t)sub_klass)) {
-                        const char* sub_cname = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(sub_klass) : nullptr;
-                        if (sub_cname && sub_cname[0]) {
-                            fInfo.childClassName = sub_cname;
-                        }
+                    if (fInfo.typeName.find("System.String") == std::string::npos &&
+                        fInfo.typeName != "int" && fInfo.typeName != "float" && 
+                        fInfo.typeName != "bool" && fInfo.typeName != "byte" && 
+                        fInfo.typeName != "short" && fInfo.typeName != "long" && 
+                        fInfo.typeName != "double" && fInfo.typeName != "uint" && 
+                        fInfo.typeName != "ushort" && fInfo.typeName != "ulong" && 
+                        fInfo.typeName != "sbyte" && fInfo.typeName != "char") {
+                        fInfo.childClassName = fInfo.typeName;
                     }
                 }
             }
@@ -3509,16 +3511,17 @@ void DrawInteractiveObjectNode(uintptr_t obj_ptr, const char* fieldName, size_t 
             fInfo.rawValue = 0;
             fInfo.matchesKnown = false;
 
-            if (IsValidPtr(obj_ptr + f_offset)) {
+                        if (IsValidPtr(obj_ptr + f_offset)) {
                 SafeReadMemory(obj_ptr + f_offset, &fInfo.rawValue, sizeof(uintptr_t));
                 if (IsValidPtr(fInfo.rawValue)) {
-                    void* sub_klass = nullptr;
-                    if (SafeReadMemory(fInfo.rawValue, &sub_klass, sizeof(void*)) && IsValidPtr((uintptr_t)sub_klass)) {
-                        const char* sub_cname = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(sub_klass) : nullptr;
-                        const char* sub_cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(sub_klass) : nullptr;
-                        if (sub_cname && sub_cname[0]) {
-                            fInfo.childClassName = (sub_cns && sub_cns[0]) ? (std::string(sub_cns) + "." + sub_cname) : std::string(sub_cname);
-                        }
+                    if (fInfo.typeName.find("System.String") == std::string::npos &&
+                        fInfo.typeName != "int" && fInfo.typeName != "float" && 
+                        fInfo.typeName != "bool" && fInfo.typeName != "byte" && 
+                        fInfo.typeName != "short" && fInfo.typeName != "long" && 
+                        fInfo.typeName != "double" && fInfo.typeName != "uint" && 
+                        fInfo.typeName != "ushort" && fInfo.typeName != "ulong" && 
+                        fInfo.typeName != "sbyte" && fInfo.typeName != "char") {
+                        fInfo.childClassName = fInfo.typeName;
                     }
                 }
             }
