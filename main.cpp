@@ -3239,7 +3239,7 @@ void DrawPathTraceFloatWindow() {
     }
 
     if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
-        ImGui::TextColored(UITheme().warning, (const char*)u8"未在当前内存搜索深度(6)内找到类: %s", g_class_search_input);
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"未在当前内存搜索深度(6)内找到类: %s", g_class_search_input);
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
     }
 
