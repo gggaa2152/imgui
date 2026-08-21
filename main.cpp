@@ -3563,6 +3563,21 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     return result;
 }
 
+struct ClassInspectInfo {
+    std::string className;
+    std::string imageName;
+    uintptr_t classAddress;
+    uintptr_t classRva;
+    struct MethodEntry { std::string name; uintptr_t rva; };
+    struct FieldEntry { std::string name; std::string typeName; size_t offset; };
+    std::vector<MethodEntry> methods;
+    std::vector<FieldEntry> fields;
+    bool valid;
+};
+
+static ClassInspectInfo g_inspectedClass;
+static char g_class_search_input[64] = "ZGameChess.ChessModelManager";
+
 ClassInspectInfo InspectClassByFullName(const std::string& targetName) {
     ClassInspectInfo info;
     info.className = targetName;
