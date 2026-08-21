@@ -2786,6 +2786,8 @@ struct Il2CppApis {
     typedef size_t (*field_get_offset_t)(void* field);
     typedef void* (*field_get_type_t)(void* field);
     typedef const char* (*type_get_name_t)(void* type);
+    typedef void (*field_static_get_value_t)(void* field, void* value);
+    typedef uint32_t (*field_get_flags_t)(void* field);
 
     domain_get_t domain_get = nullptr;
     domain_get_assemblies_t domain_get_assemblies = nullptr;
@@ -2803,6 +2805,8 @@ struct Il2CppApis {
     field_get_offset_t field_get_offset = nullptr;
     field_get_type_t field_get_type = nullptr;
     type_get_name_t type_get_name = nullptr;
+    field_static_get_value_t field_static_get_value = nullptr;
+    field_get_flags_t field_get_flags = nullptr;
     bool inited = false;
 
     bool init() {
@@ -2830,6 +2834,8 @@ struct Il2CppApis {
         field_get_offset = (field_get_offset_t)resolve("il2cpp_field_get_offset");
         field_get_type = (field_get_type_t)resolve("il2cpp_field_get_type");
         type_get_name = (type_get_name_t)resolve("il2cpp_type_get_name");
+        field_static_get_value = (field_static_get_value_t)resolve("il2cpp_field_static_get_value");
+        field_get_flags = (field_get_flags_t)resolve("il2cpp_field_get_flags");
 
         inited = (domain_get != nullptr && assembly_get_image != nullptr && class_get_name != nullptr);
         return inited;
@@ -2867,6 +2873,56 @@ static bool IsValidIl2CppClass(void* klass) {
     if (!klass) return false;
     if (!g_classes_cached) CacheValidClasses();
     return g_valid_classes.find(klass) != g_valid_classes.end();
+}
+
+static uintptr_t GetSingletonInstance(const char* className) {
+    if (!g_il2cpp_api.init() || !g_il2cpp_api.field_static_get_value || !g_il2cpp_api.field_get_flags) return 0;
+    
+    void* domain = g_il2cpp_api.domain_get();
+    if (!domain) return 0;
+    
+    size_t asm_count = 0;
+    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
+    if (!assemblies) return 0;
+    
+    void* target_klass = nullptr;
+    for (size_t a = 0; a < asm_count; a++) {
+        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        size_t cls_count = g_il2cpp_api.image_get_class_count(img);
+        for (size_t c = 0; c < cls_count; c++) {
+            void* klass = g_il2cpp_api.image_get_class(img, c);
+            if (!klass) continue;
+            const char* c_name = g_il2cpp_api.class_get_name(klass);
+            if (c_name && strcmp(c_name, className) == 0) {
+                target_klass = klass;
+                break;
+            }
+        }
+        if (target_klass) break;
+    }
+    
+    if (!target_klass) return 0;
+    
+    void* iter = nullptr;
+    while (void* field = g_il2cpp_api.class_get_fields(target_klass, &iter)) {
+        uint32_t flags = g_il2cpp_api.field_get_flags(field);
+        if ((flags & 0x0010) != 0) { // FIELD_ATTRIBUTE_STATIC
+            const char* f_name = g_il2cpp_api.field_get_name(field);
+            void* f_type = g_il2cpp_api.field_get_type(field);
+            const char* t_name = g_il2cpp_api.type_get_name(f_type);
+            
+            // If it's a static field of its own type (or a related manager), it's likely the singleton instance!
+            if (t_name && strstr(t_name, className) != nullptr) {
+                uintptr_t instance = 0;
+                g_il2cpp_api.field_static_get_value(field, &instance);
+                if (IsValidPtr(instance)) {
+                    return instance;
+                }
+            }
+        }
+    }
+    return 0;
 }
 
 struct ObjectPathStep {
@@ -3061,6 +3117,8 @@ ClassInspectInfo InspectClassByFullName(const std::string& targetName) {
     return info;
 }
 
+static char g_root_class_input[128] = "ChessModelManager";
+
 void DrawPathTraceFloatWindow() {
     if (!g_win_path_trace) return;
     if (!g_is_in_match.load(std::memory_order_relaxed)) return;
@@ -3077,37 +3135,31 @@ void DrawPathTraceFloatWindow() {
     dl->AddRectFilled(mn, mx, IM_COL32(12, 16, 26, 235), 8.0f * sc);
     dl->AddRect(mn, mx, IM_COL32(60, 140, 240, 190), 8.0f * sc, 0, 1.5f);
 
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🎯【类寻址路径实时反查】");
-    ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "[%s]", g_class_search_input);
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🔍 寻址起点(单例类):");
+    ImGui::SetNextItemWidth(250.0f * sc);
+    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input));
 
-    // 快捷切换按钮
-    if (ImGui::SmallButton((const char*)u8"单例")) {
-        strncpy(g_class_search_input, "ChessModelManager", sizeof(g_class_search_input));
-        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "ChessModelManager", 6);
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton((const char*)u8"上下文")) {
-        strncpy(g_class_search_input, "ChessBattleModel", sizeof(g_class_search_input));
-        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "ChessBattleModel", 6);
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton((const char*)u8"列表")) {
-        strncpy(g_class_search_input, "CSoGameData_View", sizeof(g_class_search_input));
-        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "CSoGameData_View", 6);
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton((const char*)u8"对局")) {
-        strncpy(g_class_search_input, "SegmentCsogame", sizeof(g_class_search_input));
-        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "SegmentCsogame", 6);
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton((const char*)u8"牌库")) {
-        strncpy(g_class_search_input, "CTAC_HeroPool", sizeof(g_class_search_input));
-        g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, "CTAC_HeroPool", 6);
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🎯 寻址终点(目标类):");
+    ImGui::SetNextItemWidth(250.0f * sc);
+    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input));
+
+    ImGui::Spacing();
+    
+    if (ImGui::Button((const char*)u8"🚀 开始自动寻址！", ImVec2(300 * sc, 35 * sc))) {
+        uintptr_t rootObj = g_dbg_addr1; // Default to hero entity
+        if (strlen(g_root_class_input) > 0) {
+            uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
+            if (singletonObj != 0) {
+                rootObj = singletonObj;
+                AddActionLog((const char*)u8"-> [单例解析] 成功获取 %s 单例实例: 0x%lx", g_root_class_input, singletonObj);
+            } else {
+                AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例，回退到英雄实体起步。", g_root_class_input);
+            }
+        }
+        g_lastPathResult = AutoFindPathToClass(rootObj, g_class_search_input, 8); // depth 8
     }
 
-        if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
+    if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
         ImGui::TextColored(UITheme().warning, (const char*)u8"未在当前内存搜索深度(6)内找到类: %s", g_class_search_input);
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
     }
