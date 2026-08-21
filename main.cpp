@@ -2894,7 +2894,10 @@ static uintptr_t GetSingletonInstance(const char* className) {
             void* klass = g_il2cpp_api.image_get_class(img, c);
             if (!klass) continue;
             const char* c_name = g_il2cpp_api.class_get_name(klass);
-            if (c_name && strcmp(c_name, className) == 0) {
+            const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : "";
+            std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : (c_name ? std::string(c_name) : "");
+            
+            if ((c_name && strcmp(c_name, className) == 0) || (full_class == className)) {
                 target_klass = klass;
                 break;
             }
