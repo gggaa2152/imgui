@@ -4558,14 +4558,28 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
     ImGui::Render();
 
-    // 强行刷新状态机并绑定画面最顶层
-    glBindFramebuffer(GL_FRAMEBUFFER, last_fbo);
+    // 强制渲染到屏幕 FBO 0 (不是 last_fbo!)
+    // 当另一个 SO 也 Hook eglSwapBuffers 时, last_fbo 可能是对方的离屏 FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, g_gl_width, g_gl_height);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // 关键: 清除外部 SO 可能绑定的 Sampler Object, 否则会覆盖我们字体纹理的采样参数导致豆腐块
+    glActiveTexture(GL_TEXTURE0);
+    typedef void (*PFNGLBINDSAMPLERPROC)(GLuint unit, GLuint sampler);
+    static PFNGLBINDSAMPLERPROC myGlBindSampler = nullptr;
+    static bool sampler_resolved = false;
+    if (!sampler_resolved) {
+        myGlBindSampler = (PFNGLBINDSAMPLERPROC)eglGetProcAddress("glBindSampler");
+        sampler_resolved = true;
+    }
+    if (myGlBindSampler) {
+        myGlBindSampler(0, 0); // 解绑 Sampler Object, 使用纹理自身的采样参数
+    }
 
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -4586,6 +4600,11 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 }
 
 unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
+    // 帧计数器 (GLES 路径)
+    g_current_frame++;
+    if (g_active_renderer.load() == 0) g_active_renderer.store(1);
+
+    // 防重入: 如果另一个 SO 的 hook 链导致递归调用, 直接跳过
     static bool in_render = false;
     if (!in_render) {
         in_render = true;
