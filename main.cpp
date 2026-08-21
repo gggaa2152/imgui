@@ -2973,8 +2973,38 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
 
     if (!IsValidPtr(rootObj) || targetName.empty() || !g_il2cpp_api.init()) return result;
 
-    std::string target_lower = targetName;
-    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
+    // Parse search filters:
+    // 1. "data:PlayerData" -> name="data", type="PlayerData"
+    // 2. "BattleModel.data" -> parent="BattleModel", name="data"
+    // 3. "PlayerData" or "data" -> general query
+    std::string name_filter = "";
+    std::string type_filter = "";
+    std::string parent_filter = "";
+
+    size_t colon_pos = targetName.find(':');
+    if (colon_pos != std::string::npos) {
+        name_filter = targetName.substr(0, colon_pos);
+        type_filter = targetName.substr(colon_pos + 1);
+    } else {
+        size_t dot_pos = targetName.rfind('.');
+        if (dot_pos != std::string::npos && dot_pos > 0 && dot_pos < targetName.length() - 1) {
+            parent_filter = targetName.substr(0, dot_pos);
+            name_filter = targetName.substr(dot_pos + 1);
+        } else {
+            name_filter = targetName;
+        }
+    }
+
+    auto to_lower_str = [](const std::string& s) -> std::string {
+        std::string res = s;
+        std::transform(res.begin(), res.end(), res.begin(), ::tolower);
+        return res;
+    };
+
+    std::string name_filter_lower = to_lower_str(name_filter);
+    std::string type_filter_lower = to_lower_str(type_filter);
+    std::string parent_filter_lower = to_lower_str(parent_filter);
+    std::string target_lower = to_lower_str(targetName);
 
     struct QueueItem {
         uintptr_t obj;
@@ -2999,11 +3029,11 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     std::string rootClass = GetObjClassName(rootObj);
     if (rootClass.empty()) return result;
 
-    std::string root_lower = rootClass;
-    std::transform(root_lower.begin(), root_lower.end(), root_lower.begin(), ::tolower);
-    if (root_lower.find(target_lower) != std::string::npos) {
+    std::string root_lower = to_lower_str(rootClass);
+    if (root_lower.find(target_lower) != std::string::npos || 
+        (!type_filter_lower.empty() && root_lower.find(type_filter_lower) != std::string::npos)) {
         FoundPath fp;
-        fp.matchDesc = (const char*)u8"[起点类名匹配] " + rootClass;
+        fp.matchDesc = (const char*)u8"[类匹配] " + rootClass;
         fp.targetInstance = rootObj;
         result.paths.push_back(fp);
         result.found = true;
@@ -3013,7 +3043,48 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     visited.insert(rootObj);
 
     int nodesProcessed = 0;
-    const int maxNodes = 2000;
+    const int maxNodes = 2500;
+
+    auto CheckMatch = [&](const std::string& f_str, const std::string& t_str, const std::string& c_str, const std::string& parent_cls, bool& outClassMatch, bool& outFieldMatch, bool& outTypeMatch) -> bool {
+        std::string f_low = to_lower_str(f_str);
+        std::string t_low = to_lower_str(t_str);
+        std::string c_low = to_lower_str(c_str);
+        std::string p_low = to_lower_str(parent_cls);
+
+        outClassMatch = false;
+        outFieldMatch = false;
+        outTypeMatch = false;
+
+        if (!type_filter_lower.empty()) {
+            // Mode: name:type (e.g. data:PlayerData)
+            bool n_ok = name_filter_lower.empty() || (!f_low.empty() && f_low.find(name_filter_lower) != std::string::npos);
+            bool t_ok = (!t_low.empty() && t_low.find(type_filter_lower) != std::string::npos) ||
+                        (!c_low.empty() && c_low.find(type_filter_lower) != std::string::npos);
+            if (n_ok && t_ok) {
+                outFieldMatch = true;
+                outTypeMatch = true;
+                return true;
+            }
+            return false;
+        }
+
+        if (!parent_filter_lower.empty()) {
+            // Mode: Parent.field (e.g. BattleModel.data)
+            bool p_ok = (!p_low.empty() && p_low.find(parent_filter_lower) != std::string::npos);
+            bool n_ok = (!f_low.empty() && f_low.find(name_filter_lower) != std::string::npos);
+            if (p_ok && n_ok) {
+                outFieldMatch = true;
+                return true;
+            }
+            return false;
+        }
+
+        // Standard general query (matches field name, type name, or class name)
+        if (!c_low.empty() && c_low.find(target_lower) != std::string::npos) { outClassMatch = true; return true; }
+        if (!f_low.empty() && f_low.find(target_lower) != std::string::npos) { outFieldMatch = true; return true; }
+        if (!t_low.empty() && t_low.find(target_lower) != std::string::npos) { outTypeMatch = true; return true; }
+        return false;
+    };
 
     while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 30) {
         QueueItem item = queue.front();
@@ -3039,37 +3110,27 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                 std::string field_str = f_name ? f_name : "";
                 std::string type_str = t_name ? t_name : "";
 
-                std::string field_lower = field_str;
-                std::transform(field_lower.begin(), field_lower.end(), field_lower.begin(), ::tolower);
-
-                std::string type_lower = type_str;
-                std::transform(type_lower.begin(), type_lower.end(), type_lower.begin(), ::tolower);
-
-                bool fieldMatch = (!field_lower.empty() && field_lower.find(target_lower) != std::string::npos);
-                bool typeMatch = (!type_lower.empty() && type_lower.find(target_lower) != std::string::npos);
-
                 uintptr_t child_ptr = 0;
                 bool isObjectRef = (IsValidPtr(item.obj + f_offset) && SafeReadMemory(item.obj + f_offset, &child_ptr, sizeof(uintptr_t)) && IsValidPtr(child_ptr));
 
                 if (isObjectRef) {
                     std::string childClass = GetObjClassName(child_ptr);
-                    std::string child_lower = childClass;
-                    std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
-
-                    bool classMatch = (!child_lower.empty() && child_lower.find(target_lower) != std::string::npos);
+                    bool classMatch = false, fieldMatch = false, typeMatch = false;
+                    bool isMatched = CheckMatch(field_str, type_str, childClass, item.className, classMatch, fieldMatch, typeMatch);
 
                     std::vector<ObjectPathStep> nextPath = item.path;
                     nextPath.push_back({ item.obj, item.className, field_str, type_str, f_offset, child_ptr, childClass.empty() ? type_str : childClass, false });
 
-                    if (classMatch || fieldMatch || typeMatch) {
+                    if (isMatched) {
                         std::string sig = "";
                         for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
                         if (recordedPaths.find(sig) == recordedPaths.end()) {
                             recordedPaths.insert(sig);
                             FoundPath fp;
-                            if (classMatch) fp.matchDesc = (const char*)u8"[类名匹配] " + (childClass.empty() ? type_str : childClass);
-                            else if (fieldMatch) fp.matchDesc = (const char*)u8"[字段匹配] " + field_str + " (" + type_str + ")";
-                            else fp.matchDesc = (const char*)u8"[类型匹配] " + type_str;
+                            if (classMatch) fp.matchDesc = (const char*)u8"[类匹配: " + (childClass.empty() ? type_str : childClass) + "]";
+                            else if (fieldMatch && typeMatch) fp.matchDesc = (const char*)u8"[精准匹配: " + field_str + " (类型: " + type_str + ")]";
+                            else if (fieldMatch) fp.matchDesc = (const char*)u8"[字段匹配: " + field_str + " (类型: " + type_str + ")]";
+                            else fp.matchDesc = (const char*)u8"[类型匹配: " + type_str + "]";
                             fp.targetInstance = child_ptr;
                             fp.steps = nextPath;
                             result.paths.push_back(fp);
@@ -3082,16 +3143,19 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                         queue.push_back({ child_ptr, childClass, nextPath, item.depth + 1 });
                     }
                 } else {
-                    if (fieldMatch || typeMatch) {
+                    bool classMatch = false, fieldMatch = false, typeMatch = false;
+                    bool isMatched = CheckMatch(field_str, type_str, "", item.className, classMatch, fieldMatch, typeMatch);
+
+                    if (isMatched) {
                         std::vector<ObjectPathStep> nextPath = item.path;
-                        nextPath.push_back({ item.obj, item.className, field_str, type_str, f_offset, item.obj + f_offset, type_str.empty() ? "(值字段)" : type_str, true });
+                        nextPath.push_back({ item.obj, item.className, field_str, type_str, f_offset, item.obj + f_offset, type_str, true });
 
                         std::string sig = "";
                         for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
                         if (recordedPaths.find(sig) == recordedPaths.end()) {
                             recordedPaths.insert(sig);
                             FoundPath fp;
-                            fp.matchDesc = (const char*)u8"[字段属性] " + field_str + " (" + (type_str.empty() ? "value" : type_str) + ")";
+                            fp.matchDesc = (const char*)u8"[字段值匹配: " + field_str + " (类型: " + type_str + ")]";
                             fp.targetInstance = item.obj + f_offset;
                             fp.steps = nextPath;
                             result.paths.push_back(fp);
@@ -3104,673 +3168,6 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     }
 
     return result;
-}
-
-struct ClassInspectInfo {
-    std::string className;
-    std::string imageName;
-    uintptr_t classAddress;
-    uintptr_t classRva;
-    struct MethodEntry { std::string name; uintptr_t rva; };
-    struct FieldEntry { std::string name; std::string typeName; size_t offset; };
-    std::vector<MethodEntry> methods;
-    std::vector<FieldEntry> fields;
-    bool valid;
-};
-
-static ClassInspectInfo g_inspectedClass;
-static char g_class_search_input[64] = "ZGameChess.ChessModelManager";
-
-ClassInspectInfo InspectClassByFullName(const std::string& targetName) {
-    ClassInspectInfo info;
-    info.className = targetName;
-    info.classAddress = 0;
-    info.classRva = 0;
-    info.valid = false;
-
-    if (targetName.empty() || !g_il2cpp_api.init()) return info;
-
-    void* domain = g_il2cpp_api.domain_get();
-    if (!domain) return info;
-
-    size_t asm_count = 0;
-    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
-    if (!assemblies) return info;
-
-    std::string target_lower = targetName;
-    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
-
-    for (size_t a = 0; a < asm_count; a++) {
-        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
-        if (!img) continue;
-        const char* img_name = g_il2cpp_api.image_get_name ? g_il2cpp_api.image_get_name(img) : "";
-        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
-
-        for (size_t c = 0; c < cls_count; c++) {
-            void* klass = g_il2cpp_api.image_get_class(img, c);
-            if (!klass) continue;
-
-            const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass) : "";
-            const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : "";
-            std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
-            std::string full_class_lower = full_class;
-            std::transform(full_class_lower.begin(), full_class_lower.end(), full_class_lower.begin(), ::tolower);
-
-            if (full_class_lower == target_lower || full_class_lower.find(target_lower) != std::string::npos || target_lower.find(full_class_lower) != std::string::npos) {
-                info.className = full_class;
-                info.imageName = img_name ? img_name : "";
-                info.classAddress = (uintptr_t)klass;
-                info.classRva = info.classAddress > g_il2cppTrueBase ? (info.classAddress - g_il2cppTrueBase) : 0;
-                info.valid = true;
-
-                if (g_il2cpp_api.class_get_methods && g_il2cpp_api.method_get_name) {
-                    void* iter = nullptr;
-                    while (void* method = g_il2cpp_api.class_get_methods(klass, &iter)) {
-                        const char* m_name = g_il2cpp_api.method_get_name(method);
-                        uintptr_t func_ptr = *(uintptr_t*)method;
-                        uintptr_t rva = func_ptr > g_il2cppTrueBase ? (func_ptr - g_il2cppTrueBase) : 0;
-                        info.methods.push_back({ m_name ? m_name : "", rva });
-                    }
-                }
-
-                if (g_il2cpp_api.class_get_fields && g_il2cpp_api.field_get_name && g_il2cpp_api.field_get_offset) {
-                    void* iter = nullptr;
-                    while (void* field = g_il2cpp_api.class_get_fields(klass, &iter)) {
-                        const char* f_name = g_il2cpp_api.field_get_name(field);
-                        size_t f_offset = g_il2cpp_api.field_get_offset(field);
-                        void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
-                        const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
-                        info.fields.push_back({ f_name ? f_name : "", t_name ? t_name : "", f_offset });
-                    }
-                }
-                return info;
-            }
-        }
-    }
-    return info;
-}
-
-static char g_root_class_input[128] = "ChessModelManager";
-
-// ==================== ImGui Virtual Keyboard ====================
-static char* g_vkbd_target = nullptr;
-static size_t g_vkbd_target_size = 0;
-static bool g_show_vkbd = false;
-static bool g_vkbd_caps = false;
-
-void DrawVirtualKeyboard() {
-    if (!g_show_vkbd || !g_vkbd_target) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    float scale = 1.0f;
-    
-    // Height of keyboard is about 35% of screen height
-    float kbd_h = io.DisplaySize.y * 0.35f;
-    ImGui::SetNextWindowPos(ImVec2(0, io.DisplaySize.y), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, kbd_h));
-
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.35f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.4f, 0.45f, 1.0f));
-    
-    ImGui::Begin("VKBD", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::SetWindowFontScale(0.95f);
-
-    // Header / Target Display
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "输入内容:");
-    ImGui::SameLine();
-    ImGui::Text("%s_", g_vkbd_target);
-    ImGui::Separator();
-
-    // Responsive Button sizes
-    float avail_w = ImGui::GetContentRegionAvail().x;
-    float spacing = ImGui::GetStyle().ItemSpacing.x;
-    float base_btn_w = (avail_w - (spacing * 13.0f)) / 13.5f; // 13 keys wide approx
-    float btn_h = (ImGui::GetContentRegionAvail().y - (spacing * 4.0f)) / 4.0f; // 4 rows
-
-    auto KeyBtn = [&](const char* key, float width_mult = 1.0f) {
-        if (ImGui::Button(key, ImVec2(base_btn_w * width_mult, btn_h))) {
-            size_t len = strlen(g_vkbd_target);
-            if (strcmp(key, "BS") == 0) {
-                if (len > 0) g_vkbd_target[len - 1] = '\0';
-            } else if (strcmp(key, "CLR") == 0) {
-                g_vkbd_target[0] = '\0';
-            } else if (strcmp(key, "ENTER") == 0) {
-                g_show_vkbd = false;
-            } else if (strcmp(key, "SPACE") == 0) {
-                if (len < g_vkbd_target_size - 1) { g_vkbd_target[len] = ' '; g_vkbd_target[len + 1] = '\0'; }
-            } else if (strcmp(key, "CAPS") == 0) {
-                g_vkbd_caps = !g_vkbd_caps;
-            } else {
-                if (len < g_vkbd_target_size - 1) {
-                    g_vkbd_target[len] = key[0];
-                    g_vkbd_target[len + 1] = '\0';
-                }
-            }
-        }
-    };
-
-    const char* row1_low[] = {"1","2","3","4","5","6","7","8","9","0","-","="};
-    const char* row2_low[] = {"q","w","e","r","t","y","u","i","o","p","[","]"};
-    const char* row3_low[] = {"a","s","d","f","g","h","j","k","l",";","'","\\"};
-    const char* row4_low[] = {"z","x","c","v","b","n","m",",",".","/","_","@"};
-
-    const char* row2_up[] = {"Q","W","E","R","T","Y","U","I","O","P","{","}"};
-    const char* row3_up[] = {"A","S","D","F","G","H","J","K","L",":","\"","|"};
-    const char* row4_up[] = {"Z","X","C","V","B","N","M","<",">","?","_","@"};
-
-    // Row 1
-    for (int i = 0; i < 12; i++) { KeyBtn(row1_low[i]); ImGui::SameLine(); }
-    KeyBtn("BS", 1.5f);
-
-    // Row 2
-    for (int i = 0; i < 12; i++) { KeyBtn(g_vkbd_caps ? row2_up[i] : row2_low[i]); ImGui::SameLine(); }
-    KeyBtn("CLR", 1.5f);
-
-    // Row 3
-    for (int i = 0; i < 12; i++) { KeyBtn(g_vkbd_caps ? row3_up[i] : row3_low[i]); ImGui::SameLine(); }
-    KeyBtn("ENTER", 1.5f);
-
-    // Row 4
-    KeyBtn("CAPS", 1.5f); ImGui::SameLine();
-    for (int i = 0; i < 12; i++) { KeyBtn(g_vkbd_caps ? row4_up[i] : row4_low[i]); ImGui::SameLine(); }
-    KeyBtn("SPACE", 1.5f);
-
-    ImGui::End();
-    ImGui::PopStyleColor(4);
-}
-
-
-
-float g_anim[30] = {0.0f};
-
-bool ModernToggle(const char* label, bool* v, int idx) {
-    ImGuiWindow* win = ImGui::GetCurrentWindow(); const ImGuiStyle& style = ImGui::GetStyle(); ImGuiID id = win->GetID(label);
-    float h = ImGui::GetFrameHeight(); float w = h * 2.2f; const ImRect bb(win->DC.CursorPos, win->DC.CursorPos + ImVec2(w + style.ItemInnerSpacing.x + ImGui::CalcTextSize(label).x, h));
-    ImGui::ItemSize(bb, style.FramePadding.y); bool pressed = false;
-    if (ImGui::ItemAdd(bb, id)) { bool hovered, held; if ((pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held))) *v = !(*v); }
-    g_anim[idx] = ImLerp(g_anim[idx], *v ? 1.0f : 0.0f, 1.0f - expf(-20.0f * ImGui::GetIO().DeltaTime));
-    FrostTheme& th = UITheme();
-    ImVec4 offCol(0.18f, 0.20f, 0.26f, 0.95f);
-    ImVec4 onCol(th.primary.x, th.primary.y, th.primary.z, 0.95f);
-    win->DrawList->AddRectFilled(bb.Min, bb.Min + ImVec2(w, h), ImGui::GetColorU32(ImLerp(offCol, onCol, g_anim[idx])), h*0.5f);
-    win->DrawList->AddRect(bb.Min, bb.Min + ImVec2(w, h), IM_COL32(255, 255, 255, 35), h*0.5f, 0, 1.0f);
-    ImVec2 hc = bb.Min + ImVec2(h*0.5f + g_anim[idx]*(w-h), h*0.5f);
-    win->DrawList->AddCircleFilled(hc + ImVec2(0, 1.5f), h*0.5f - 2.5f, IM_COL32(0, 0, 0, 90)); win->DrawList->AddCircleFilled(hc, h*0.5f - 2.5f, IM_COL32_WHITE);
-    ImGui::RenderText(ImVec2(bb.Min.x + w + style.ItemInnerSpacing.x, bb.Min.y + (h - ImGui::GetFontSize()) * 0.5f), label);
-    return pressed;
-}
-
-bool ModernAnimatedFolder(const char* label, bool* state) {
-    ImGuiWindow* win = ImGui::GetCurrentWindow(); ImGuiID id = win->GetID(label); ImVec2 pos = win->DC.CursorPos; ImVec2 size(ImGui::GetContentRegionAvail().x, ImGui::GetFrameHeight() * 1.3f);
-    const ImRect bb(pos, pos + size); ImGui::ItemSize(bb); bool hovered = false, held = false; 
-    if (ImGui::ItemAdd(bb, id)) if (ImGui::ButtonBehavior(bb, id, &hovered, &held)) *state = !(*state); 
-    float* p_anim = win->StateStorage.GetFloatRef(id, *state ? 1.0f : 0.0f); float anim = (*p_anim = ImLerp(*p_anim, *state ? 1.0f : 0.0f, 1.0f - expf(-18.0f * ImGui::GetIO().DeltaTime)));
-    float sc = g_autoScale * g_scale;
-    FrostTheme& th = UITheme();
-    ImU32 bg = hovered ? IM_COL32(255, 255, 255, 28) : IM_COL32(255, 255, 255, 14);
-    if (*state) bg = ImGui::GetColorU32(ImVec4(th.primary.x, th.primary.y, th.primary.z, 0.22f));
-    win->DrawList->AddRectFilled(bb.Min, bb.Max, bg, 10.0f * sc);
-    win->DrawList->AddRect(bb.Min, bb.Max, IM_COL32(255, 255, 255, *state ? 45 : 22), 10.0f * sc, 0, 1.0f);
-    float cx = bb.Min.x + 15.0f * sc; float cy = bb.Min.y + size.y * 0.5f; float ang = anim * 1.5708f; float arr = 5.0f * sc;
-    win->DrawList->AddTriangleFilled(ImVec2(cx+cosf(ang)*arr, cy+sinf(ang)*arr), ImVec2(cx+cosf(ang+2.094f)*arr, cy+sinf(ang+2.094f)*arr), ImVec2(cx+cosf(ang-2.094f)*arr, cy+sinf(ang-2.094f)*arr), ImGui::GetColorU32(th.primary));
-    ImFont* font = ImGui::GetFont(); float fSz = ImGui::GetFontSize();
-    win->DrawList->AddText(ImVec2(cx + 25.0f * g_autoScale * g_scale, bb.Min.y + (size.y - fSz)*0.5f), IM_COL32_WHITE, label);
-    if (*state) { ImGui::Indent(15.0f * g_autoScale * g_scale); return true; } return false;
-}
-
-void EndModernAnimatedFolder() { ImGui::Unindent(15.0f * g_autoScale * g_scale); }
-
-void ModernTierSelector(const char* label, bool* tierArray) {
-    ImGuiWindow* win = ImGui::GetCurrentWindow(); const ImGuiStyle& style = ImGui::GetStyle();
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetFrameHeight() * 2.2f + style.ItemInnerSpacing.x); ImGui::Text("%s", label); ImGui::SameLine();
-    for (int i = 1; i <= 5; i++) {
-        if (i > 1) ImGui::SameLine(0, 5.0f * g_autoScale);
-        ImVec2 pos = win->DC.CursorPos; ImRect bb(pos, pos + ImVec2(ImGui::GetFrameHeight()*1.2f, ImGui::GetFrameHeight())); ImGui::ItemSize(bb);
-        if (ImGui::ItemAdd(bb, win->GetID(tierArray + i))) { bool h, he; if (ImGui::ButtonBehavior(bb, win->GetID(tierArray+i), &h, &he)) tierArray[i] = !tierArray[i]; }
-        static std::unordered_map<void*, float> anims_map; float& a = (anims_map[tierArray + i] = ImLerp(anims_map[tierArray + i], tierArray[i] ? 1.0f : 0.0f, 1.0f - expf(-20.0f * ImGui::GetIO().DeltaTime)));
-        win->DrawList->AddRectFilled(bb.Min, bb.Max, IM_COL32((int)(30+70*a), (int)(35+100*a), (int)(45+50*a), 255), 4.0f * g_autoScale);
-        if (a > 0.01f) win->DrawList->AddRect(bb.Min, bb.Max, ImGui::GetColorU32(ImVec4(UITheme().primary.x, UITheme().primary.y, UITheme().primary.z, 0.85f * a)), 4.0f*g_autoScale, 0, 1.5f*g_autoScale);
-        char buf[4]; snprintf(buf, sizeof(buf), "%d", i); ImVec2 t_sz = ImGui::CalcTextSize(buf);
-        win->DrawList->AddText(pos + ImVec2((bb.GetWidth() - t_sz.x)*0.5f, (bb.GetHeight() - t_sz.y)*0.5f), tierArray[i] ? IM_COL32(0,0,0,255) : IM_COL32_WHITE, buf);
-    }
-}
-
-extern void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject);
-typedef void (*func_set_IsGameEnd_t)(void* thisObj, uint8_t isEnd);
-extern func_set_IsGameEnd_t orig_set_IsGameEnd;
-typedef void* (*func_SendWillRenderCanvases_t)();
-extern func_SendWillRenderCanvases_t orig_SendWillRenderCanvases;
-
-// ===== 悬浮调用链与参数日志 =====
-struct ActionLog {
-    std::string message;
-    std::chrono::time_point<std::chrono::steady_clock> spawn_time;
-};
-std::deque<ActionLog> g_action_logs;
-std::mutex g_log_mutex;
-
-void AddActionLog(const char* format, ...) {
-    char buf[512];
-    va_list args;
-    va_start(args, format);
-    vsnprintf(buf, sizeof(buf), format, args);
-    va_end(args);
-    
-    std::lock_guard<std::mutex> lock(g_log_mutex);
-    g_action_logs.push_back({std::string(buf), std::chrono::steady_clock::now()});
-    if (g_action_logs.size() > 8) {
-        g_action_logs.pop_front();
-    }
-}
-
-void DrawActionLogOverlay() {
-    std::lock_guard<std::mutex> lock(g_log_mutex);
-    if (g_action_logs.empty()) return;
-
-    auto now = std::chrono::steady_clock::now();
-    while (!g_action_logs.empty()) {
-        float elapsed = std::chrono::duration<float>(now - g_action_logs.front().spawn_time).count();
-        if (elapsed > 6.0f) g_action_logs.pop_front();
-        else break;
-    }
-    
-    if (g_action_logs.empty()) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    float dispW = io.DisplaySize.x > 0 ? io.DisplaySize.x : (float)g_gl_width;
-    float posX = dispW * 0.5f;
-    float posY = 75.0f * g_autoScale;
-
-    ImGui::SetNextWindowPos(ImVec2(posX, posY), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
-    ImGui::SetNextWindowBgAlpha(0.92f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f * g_autoScale);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 10.0f) * g_autoScale);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.10f, 0.16f, 0.94f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.7f, 1.0f, 0.6f));
-    
-    if (ImGui::Begin("##ActionLogToastOverlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs)) {
-        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "%s", (const char*)u8"⚡ 调用链与参数实时监视");
-        DrawGlassSeparator();
-        for (const auto& log : g_action_logs) {
-            float elapsed = std::chrono::duration<float>(now - log.spawn_time).count();
-            float fade = 1.0f;
-            if (elapsed > 4.5f) fade = 1.0f - ((elapsed - 4.5f) / 1.5f);
-            if (fade < 0.1f) fade = 0.1f;
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 1.0f, 0.65f, fade));
-            ImGui::TextUnformatted(log.message.c_str());
-            ImGui::PopStyleColor();
-        }
-    }
-    ImGui::End();
-    ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar(2);
-}
-
-
-
-struct LiveFieldInfo {
-    std::string name;
-    std::string typeName;
-    size_t offset;
-    uintptr_t rawValue;
-    std::string childClassName;
-    bool matchesKnown;
-    std::string matchDesc;
-};
-
-struct LiveInstanceDump {
-    std::string label;
-    uintptr_t address;
-    std::string fullClassName;
-    std::vector<LiveFieldInfo> fields;
-    bool valid;
-};
-
-LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
-    LiveInstanceDump dump;
-    dump.label = label ? label : "Unknown";
-    dump.address = ptr;
-    dump.valid = false;
-
-    if (!IsValidPtr(ptr) || !g_il2cpp_api.init()) return dump;
-
-    void* klass_ptr = nullptr;
-    if (!SafeReadMemory((uintptr_t)ptr, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) {
-        return dump;
-    }
-
-    const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : nullptr;
-    const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : nullptr;
-    if (!c_name || !c_name[0]) return dump;
-
-    dump.fullClassName = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
-    dump.valid = true;
-
-    if (g_il2cpp_api.class_get_fields) {
-        void* iter = nullptr;
-        while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
-            const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
-            size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
-            void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
-            const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
-
-            LiveFieldInfo fInfo;
-            fInfo.name = f_name ? f_name : "";
-            fInfo.typeName = t_name ? t_name : "";
-            fInfo.offset = f_offset;
-            fInfo.rawValue = 0;
-            fInfo.matchesKnown = false;
-
-                        if (IsValidPtr(ptr + f_offset)) {
-                SafeReadMemory((uintptr_t)(ptr + f_offset), &fInfo.rawValue, sizeof(uintptr_t));
-                if (IsValidPtr(fInfo.rawValue)) {
-                    if (fInfo.typeName.find("System.String") == std::string::npos &&
-                        fInfo.typeName != "int" && fInfo.typeName != "float" && 
-                        fInfo.typeName != "bool" && fInfo.typeName != "byte" && 
-                        fInfo.typeName != "short" && fInfo.typeName != "long" && 
-                        fInfo.typeName != "double" && fInfo.typeName != "uint" && 
-                        fInfo.typeName != "ushort" && fInfo.typeName != "ulong" && 
-                        fInfo.typeName != "sbyte" && fInfo.typeName != "char") {
-                        fInfo.childClassName = fInfo.typeName;
-                    }
-                }
-            }
-
-            // 智能关联已知配置项
-            std::string lstr = dump.label;
-            if (f_offset == g_off.addr2 && lstr.find("addr1") != std::string::npos) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 addr2 下级指针】"; }
-            else if (f_offset == g_off.addr3 && lstr.find("addr2") != std::string::npos) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 addr3 下级指针】"; }
-            else if (f_offset == g_off.segmentcsogame && lstr.find("addr1") != std::string::npos) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 segmentcsogame 对局基址】"; }
-            else if (f_offset == g_off.segment_my_player_id) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 segment_my_player_id 我的ID】"; }
-            else if (f_offset == g_off.board_hero_id) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 board_hero_id 棋盘英雄ID】"; }
-            else if (f_offset == g_off.board_x) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 board_x 棋盘X坐标】"; }
-            else if (f_offset == g_off.board_y) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 board_y 棋盘Y坐标】"; }
-            else if (f_offset == g_off.pi_name) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 pi_name 玩家名字】"; }
-            else if (f_offset == g_off.pi_money) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 pi_money 玩家金币】"; }
-            else if (f_offset == g_off.pi_level) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 pi_level 玩家等级】"; }
-            else if (f_offset == g_off.shop_hero_id) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 shop_hero_id 商店卡牌ID】"; }
-            else if (f_offset == g_off.bench_hero_id) { fInfo.matchesKnown = true; fInfo.matchDesc = (const char*)u8"===> 【对应 bench_hero_id 备战席英雄ID】"; }
-
-            dump.fields.push_back(fInfo);
-        }
-    }
-
-    return dump;
-}
-
-struct KwSearchResult {
-    std::string className;
-    std::string memberName;
-    std::string typeName;
-    uintptr_t offsetOrRva;
-    bool isFunc;
-};
-
-static std::vector<KwSearchResult> g_kwResults;
-static std::mutex g_kwMutex;
-static char g_kw_search_input[64] = "Player";
-static std::atomic<bool> g_kwSearching{false};
-
-void DoKeywordSearch(std::string kw) {
-    if (kw.empty() || !g_il2cpp_api.init()) {
-        g_kwSearching.store(false);
-        return;
-    }
-
-    std::string kw_lower = kw;
-    std::transform(kw_lower.begin(), kw_lower.end(), kw_lower.begin(), ::tolower);
-
-    {
-        std::lock_guard<std::mutex> lock(g_kwMutex);
-        g_kwResults.clear();
-    }
-
-    void* domain = g_il2cpp_api.domain_get();
-    if (!domain) { g_kwSearching.store(false); return; }
-
-    size_t asm_count = 0;
-    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
-    if (!assemblies) { g_kwSearching.store(false); return; }
-
-    for (size_t a = 0; a < asm_count; a++) {
-        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
-        if (!img) continue;
-        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
-
-        for (size_t c = 0; c < cls_count; c++) {
-            void* klass = g_il2cpp_api.image_get_class(img, c);
-            if (!klass) continue;
-
-            const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass) : "";
-            const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : "";
-            std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
-            std::string full_class_lower = full_class;
-            std::transform(full_class_lower.begin(), full_class_lower.end(), full_class_lower.begin(), ::tolower);
-
-            bool class_matches = (full_class_lower.find(kw_lower) != std::string::npos);
-
-            if (g_il2cpp_api.class_get_fields && g_il2cpp_api.field_get_name && g_il2cpp_api.field_get_offset) {
-                void* iter = nullptr;
-                while (void* field = g_il2cpp_api.class_get_fields(klass, &iter)) {
-                    const char* f_name = g_il2cpp_api.field_get_name(field);
-                    std::string f_str = f_name ? f_name : "";
-                    std::string f_lower = f_str;
-                    std::transform(f_lower.begin(), f_lower.end(), f_lower.begin(), ::tolower);
-
-                    if (class_matches || f_lower.find(kw_lower) != std::string::npos) {
-                        size_t f_offset = g_il2cpp_api.field_get_offset(field);
-                        void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
-                        const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
-
-                        std::lock_guard<std::mutex> lock(g_kwMutex);
-                        if (g_kwResults.size() < 400) {
-                            g_kwResults.push_back({ full_class, f_str, t_name ? t_name : "", (uintptr_t)f_offset, false });
-                        }
-                    }
-                }
-            }
-
-            if (g_il2cpp_api.class_get_methods && g_il2cpp_api.method_get_name) {
-                void* iter = nullptr;
-                while (void* method = g_il2cpp_api.class_get_methods(klass, &iter)) {
-                    const char* m_name = g_il2cpp_api.method_get_name(method);
-                    std::string m_str = m_name ? m_name : "";
-                    std::string m_lower = m_str;
-                    std::transform(m_lower.begin(), m_lower.end(), m_lower.begin(), ::tolower);
-
-                    if (class_matches || m_lower.find(kw_lower) != std::string::npos) {
-                        uintptr_t func_ptr = *(uintptr_t*)method;
-                        uintptr_t rva = func_ptr > g_il2cppTrueBase ? (func_ptr - g_il2cppTrueBase) : 0;
-
-                        std::lock_guard<std::mutex> lock(g_kwMutex);
-                        if (g_kwResults.size() < 400) {
-                            g_kwResults.push_back({ full_class, m_str + "()", "Method", rva, true });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    g_kwSearching.store(false);
-    AddActionLog((const char*)u8"-> [关键词搜索] 搜索 '%s' 找到 %zu 条匹配元数据!", kw.c_str(), g_kwResults.size());
-}
-
-static int g_resolver_subtab = 0;
-static char g_custom_inspect_addr[32] = "0x0";
-static LiveInstanceDump g_custom_dump;
-
-void DrawInteractiveObjectNode(uintptr_t obj_ptr, const char* fieldName, size_t offset, float scale, int depth, std::unordered_set<uintptr_t>& visited) {
-    if (!IsValidPtr(obj_ptr)) {
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "  +0x%-4lx %s: null / 0x0", offset, fieldName);
-        return;
-    }
-
-    if (!g_il2cpp_api.init()) {
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "  +0x%-4lx %s: 0x%lx", offset, fieldName, obj_ptr);
-        return;
-    }
-
-    void* klass_ptr = nullptr;
-    if (!SafeReadMemory(obj_ptr, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) {
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "  +0x%-4lx %s: 0x%lx [非有效 C# 堆对象]", offset, fieldName, obj_ptr);
-        return;
-    }
-
-    const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
-    const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : "";
-    std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
-    if (full_class.empty()) full_class = "UnknownClass";
-
-    // 1. 如果是 String 字符串对象，直接读取并显示内容
-    if (full_class == "System.String" || full_class.find("String") != std::string::npos) {
-        std::string str_val = ReadIl2CppString(obj_ptr);
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", offset);
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", fieldName);
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(string)");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "= \"%s\"", str_val.c_str());
-        return;
-    }
-
-    // 2. 如果是 List<T> 列表，读取 Count 并允许逐个展开元素
-    if (full_class.find("System.Collections.Generic.List`1") != std::string::npos || full_class.find("List`1") != std::string::npos) {
-        int list_size = SAFE_READ_INT(obj_ptr, 0x18);
-        uintptr_t items_arr = SAFE_READ_PTR(obj_ptr, 0x10);
-        char node_title[256];
-        snprintf(node_title, sizeof(node_title), "+0x%-4lx %s: List<%s> (数量: %d, 0x%lx)###List_%lx_%lx", 
-            offset, fieldName, c_name, list_size, obj_ptr, obj_ptr, (uintptr_t)offset);
-
-        if (ImGui::TreeNode(node_title)) {
-            ImGui::Indent(12.0f * scale);
-            if (list_size > 0 && IsValidPtr(items_arr)) {
-                int show_count = std::min(list_size, 50);
-                for (int i = 0; i < show_count; i++) {
-                    uintptr_t elem_ptr = SAFE_READ_PTR(items_arr, 0x20 + i * 8);
-                    char elem_name[64];
-                    snprintf(elem_name, sizeof(elem_name), "元素 [%d]", i);
-                    DrawInteractiveObjectNode(elem_ptr, elem_name, 0x20 + i * 8, scale, depth + 1, visited);
-                }
-                if (list_size > 50) ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "... (其余 %d 个元素已省略)", list_size - 50);
-            }
-            ImGui::Unindent(12.0f * scale);
-            ImGui::TreePop();
-        }
-        return;
-    }
-
-    // 3. 防递归死循环
-    if (visited.find(obj_ptr) != visited.end() || depth > 10) {
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  +0x%-4lx %s: 0x%lx (%s) [已展开/循环引用]", offset, fieldName, obj_ptr, full_class.c_str());
-        return;
-    }
-
-    // 4. 获取该类的所有成员字段（全量无遗漏）
-    std::vector<LiveFieldInfo> all_fields;
-    if (g_il2cpp_api.class_get_fields) {
-        void* iter = nullptr;
-        while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
-            const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
-            size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
-            void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
-            const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
-
-            LiveFieldInfo fInfo;
-            fInfo.name = f_name ? f_name : "";
-            fInfo.typeName = t_name ? t_name : "";
-            fInfo.offset = f_offset;
-            fInfo.rawValue = 0;
-            fInfo.matchesKnown = false;
-
-                        if (IsValidPtr(obj_ptr + f_offset)) {
-                SafeReadMemory(obj_ptr + f_offset, &fInfo.rawValue, sizeof(uintptr_t));
-                if (IsValidPtr(fInfo.rawValue)) {
-                    if (fInfo.typeName.find("System.String") == std::string::npos &&
-                        fInfo.typeName != "int" && fInfo.typeName != "float" && 
-                        fInfo.typeName != "bool" && fInfo.typeName != "byte" && 
-                        fInfo.typeName != "short" && fInfo.typeName != "long" && 
-                        fInfo.typeName != "double" && fInfo.typeName != "uint" && 
-                        fInfo.typeName != "ushort" && fInfo.typeName != "ulong" && 
-                        fInfo.typeName != "sbyte" && fInfo.typeName != "char") {
-                        fInfo.childClassName = fInfo.typeName;
-                    }
-                }
-            }
-
-            all_fields.push_back(fInfo);
-        }
-    }
-
-    char node_label[320];
-    if (offset == 0 && depth == 0) {
-        snprintf(node_label, sizeof(node_label), "%s (0x%lx) -> C# 类: %s (包含 %zu 个成员字段)###Root_%lx", 
-            fieldName, obj_ptr, full_class.c_str(), all_fields.size(), obj_ptr);
-    } else {
-        snprintf(node_label, sizeof(node_label), "+0x%-4lx %s: 0x%lx (C# 类: %s, 包含 %zu 个字段)###Sub_%lx_%lx", 
-            offset, fieldName, obj_ptr, full_class.c_str(), all_fields.size(), obj_ptr, (uintptr_t)offset);
-    }
-
-    // 可无限点击下钻的 TreeNode
-    if (ImGui::TreeNode(node_label)) {
-        visited.insert(obj_ptr);
-        ImGui::Indent(12.0f * scale);
-
-        for (const auto& f : all_fields) {
-            // 如果是指针且指向有效 C# 对象，渲染为可继续点击下钻展开的子节点！
-            if (IsValidPtr(f.rawValue) && !f.childClassName.empty()) {
-                DrawInteractiveObjectNode(f.rawValue, f.name.c_str(), f.offset, scale, depth + 1, visited);
-            }
-            // 如果是 String
-            else if (f.typeName == "System.String" || f.typeName.find("String") != std::string::npos) {
-                std::string s_val = ReadIl2CppString(f.rawValue);
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", f.name.c_str());
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(string)");
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "= \"%s\"", s_val.c_str());
-            }
-            // 普通数值字段
-            else {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "%s", f.name.c_str());
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(%s)", f.typeName.c_str());
-                ImGui::SameLine();
-
-                if (f.typeName.find("Boolean") != std::string::npos || f.typeName.find("bool") != std::string::npos) {
-                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "= %s", (f.rawValue & 0xFF) ? "true" : "false");
-                } else if (f.typeName.find("Single") != std::string::npos || f.typeName.find("float") != std::string::npos) {
-                    float fval = 0; memcpy(&fval, &f.rawValue, sizeof(float));
-                    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "= %.3f", fval);
-                } else if (f.typeName.find("Int32") != std::string::npos || f.typeName.find("int") != std::string::npos) {
-                    int ival = (int)f.rawValue;
-                    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "= %d (0x%x)", ival, ival);
-                } else {
-                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "= 0x%lx", f.rawValue);
-                }
-            }
-        }
-
-        ImGui::Unindent(12.0f * scale);
-        visited.erase(obj_ptr);
-        ImGui::TreePop();
-    }
-}
-
-void DrawLiveInstanceTree(const char* label, uintptr_t address, float scale) {
-    if (!IsValidPtr(address)) {
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[%s] (0x%lx) -> [地址未就绪或非有效 C# 堆实例]", label, address);
-        return;
-    }
-    std::unordered_set<uintptr_t> visited;
-    DrawInteractiveObjectNode(address, label, 0, scale, 0, visited);
 }
 
 void DrawSymbolResolverUI() {
@@ -3801,7 +3198,7 @@ void DrawSymbolResolverUI() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类名):");
     ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
     ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); 
     ImGui::SameLine(); 
@@ -3811,7 +3208,7 @@ void DrawSymbolResolverUI() {
         g_show_vkbd = true; 
     }
 
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名或字段名):");
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(字段/类型/高级过滤):");
     ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
     ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
     ImGui::SameLine(); 
@@ -3821,48 +3218,52 @@ void DrawSymbolResolverUI() {
         g_show_vkbd = true; 
     }
 
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"💡 支持精准定位语法: 字段名:类型 (如 data:PlayerData) 或 类名.字段 (如 BattleModel.data)");
+
     ImGui::Spacing();
     
-    if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配与字段)", ImVec2(avail_x, 38 * g_autoScale))) {
+    if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配路径与类型)", ImVec2(avail_x, 38 * g_autoScale))) {
         uintptr_t rootObj = g_dbg_addr1;
         if (strlen(g_root_class_input) > 0) {
             uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
             if (singletonObj != 0) {
                 rootObj = singletonObj;
                 g_dbg_addr1 = singletonObj;
-                AddActionLog((const char*)u8"-> [单例解析] 成功获取 %s 单例实例: 0x%lx", g_root_class_input, singletonObj);
+                AddActionLog((const char*)u8"-> [成功] 获取 %s 运行时单例实例: 0x%lx", g_root_class_input, singletonObj);
             } else {
-                rootObj = 0;
-                AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例", g_root_class_input);
+                AddActionLog((const char*)u8"-> [错误] 找不到单例类: %s", g_root_class_input);
             }
         }
-        if (rootObj != 0) {
+        
+        if (rootObj != 0 && strlen(g_class_search_input) > 0) {
             g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8);
-        } else {
-            g_lastPathResult.found = false;
-            g_lastPathResult.paths.clear();
+            if (g_lastPathResult.found) {
+                AddActionLog((const char*)u8"-> [成功] 共发现 %zu 条匹配路径！", g_lastPathResult.paths.size());
+            } else {
+                AddActionLog((const char*)u8"-> [未找到] 在内存搜索深度 8 内未找到匹配对象");
+            }
         }
     }
 
     ImGui::Spacing();
     ImGui::PushTextWrapPos(0.0f);
-
+    
     if (strlen(g_root_class_input) > 0) {
-        if (g_dbg_addr1 != 0 && GetSingletonInstance(g_root_class_input) != 0) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪] %s = 0x%lx", g_root_class_input, GetSingletonInstance(g_root_class_input));
+        if (g_dbg_addr1 != 0) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪] %s 单例实例 = 0x%lx", g_root_class_input, g_dbg_addr1);
         } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[起点异常] 无法获取 %s 单例，请检查拼写或等待游戏加载完成。", g_root_class_input);
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[起点未就绪] 尚未获取到 %s 单例实例", g_root_class_input);
         }
     }
 
-    if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"未在当前内存搜索深度(8)内找到目标: %s", g_class_search_input);
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
+    if (!g_lastPathResult.targetKeyword.empty() && !g_lastPathResult.found) {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), (const char*)u8"未在当前内存搜索深度 (8) 内找到目标: %s", g_lastPathResult.targetKeyword.c_str());
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或可尝试使用「字段名:类型」精确过滤。");
     }
 
     if (g_lastPathResult.found) {
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 共扫描出 %zu 条关联路径与字段：", g_lastPathResult.paths.size());
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[寻址成功] 共扫描出 %zu 条关联路径与字段类型：", g_lastPathResult.paths.size());
         
         for (size_t p = 0; p < g_lastPathResult.paths.size(); p++) {
             const auto& fp = g_lastPathResult.paths[p];
@@ -3877,23 +3278,25 @@ void DrawSymbolResolverUI() {
             } else {
                 for (size_t s = 0; s < fp.steps.size(); s++) {
                     const auto& st = fp.steps[s];
-                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "[第 %zu 层] %s", s + 1, st.fromClass.c_str());
+                    ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), (const char*)u8"[第 %zu 层] %s", s + 1, st.fromClass.c_str());
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "-> [+0x%lx: %s] ->", st.offset, st.fieldName.c_str());
+                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), (const char*)u8"-> [+0x%lx: %s (类型: %s)] ->", st.offset, st.fieldName.c_str(), st.fieldType.c_str());
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
                 }
 
-                std::string off_summary = (const char*)u8"[提取] 偏移链: 起点单例";
+                std::string off_summary = (const char*)u8"[提取偏移链] 偏移: 起点单例";
                 for (const auto& st : fp.steps) {
-                    char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
+                    char obuf[64]; snprintf(obuf, sizeof(obuf), " -> [+0x%lx %s]", st.offset, st.fieldName.c_str());
                     off_summary += obuf;
                 }
                 ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
-                if (fp.steps.back().isValueField) {
-                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 字段内存地址: 0x%lx", fp.targetInstance);
+                
+                const auto& lastStep = fp.steps.back();
+                if (lastStep.isValueField) {
+                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.2f, 1.0f), (const char*)u8"[目标定位] 字段类型: %s | 字段内存地址: 0x%lx", lastStep.fieldType.c_str(), fp.targetInstance);
                 } else {
-                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 目标实例实时地址: 0x%lx", fp.targetInstance);
+                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.2f, 1.0f), (const char*)u8"[目标定位] 对象类型: %s | 实例实时地址: 0x%lx", lastStep.fieldType.c_str(), fp.targetInstance);
                 }
             }
             
@@ -3903,6 +3306,1137 @@ void DrawSymbolResolverUI() {
     
     ImGui::PopTextWrapPos();
 }
+
+void DrawMainMenu() {
+    ApplyFrostedTheme();
+    if (g_menu_orb) {
+        DrawMenuOrb();
+        return;
+    }
+    static int current_tab = 0;
+
+    static bool firstMenuOpen = true;
+    if (firstMenuOpen) {
+        ImGui::SetNextWindowPos(ImVec2(80.0f * g_autoScale, 80.0f * g_autoScale), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(600.0f * g_autoScale, 450.0f * g_autoScale), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
+        firstMenuOpen = false;
+    }
+
+    bool menu_visible = true;
+    if (ImGui::Begin((const char*)u8"金铲铲助手 Frosted Studio", &menu_visible, ImGuiWindowFlags_NoSavedSettings)) {
+        g_menuX = ImGui::GetWindowPos().x;
+        g_menuY = ImGui::GetWindowPos().y;
+        g_menuCollapsed = ImGui::IsWindowCollapsed();
+                if (!menu_visible || g_menuCollapsed) {
+            if (g_orb_x <= 0.0f || g_orb_y <= 0.0f) {
+                g_orb_x = g_menuX + 28.0f * g_autoScale;
+                g_orb_y = g_menuY + 28.0f * g_autoScale;
+            }
+            g_menu_orb = true;
+        }
+        if (!g_menuCollapsed) {
+            float curW = ImGui::GetWindowSize().x, curH = ImGui::GetWindowSize().y;
+            if (std::abs(curW - g_menuW) > 5.0f || std::abs(curH - g_menuH) > 5.0f) {
+                g_menuW = curW; g_menuH = curH;
+                // Disconnected font scaling from window drag resizing!
+            }
+        }
+
+        if (!g_menuCollapsed) {
+            ImGui::SetWindowFontScale(g_scale);
+            DrawStatusHeader();
+            DrawGlassSeparator();
+
+            float sidebarW = 132.0f * g_autoScale * g_scale;
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+            ImGui::BeginChild("FrostSidebar", ImVec2(sidebarW, 0), true, ImGuiWindowFlags_NoScrollbar);
+                        const char* tabLabels[] = { (const char*)u8"视觉透视", (const char*)u8"自动购买", (const char*)u8"链路诊断", (const char*)u8"偏移调试", (const char*)u8"符号反查" };
+            for (int i = 0; i < 5; i++) {
+                if (FrostSidebarBtn(tabLabels[i], current_tab == i, i)) current_tab = i;
+                ImGui::Dummy(ImVec2(0, 4.0f * g_autoScale));
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine();
+            ImGui::BeginChild("FrostContent", ImVec2(0, 0), true);
+
+            switch (current_tab) {
+            case 0:
+                DrawSectionTitle((const char*)u8"浮窗控制");
+                if (ImGui::Button((const char*)u8"保存全部配置", ImVec2(-1, 34 * g_autoScale * g_scale))) { SaveConfig(); AddActionLog((const char*)u8"-> [配置] 已成功保存所有当前改动过的偏移与设置到本地!"); }
+                ModernToggle((const char*)u8"英雄牌库悬浮窗", &g_win_cardpool, 0);
+                ModernToggle((const char*)u8"玩家数据悬浮窗", &g_win_playerdata, 1);
+                ModernToggle((const char*)u8"海克斯预测悬浮", &g_win_hextech, 3);
+                ModernToggle((const char*)u8"余量预警悬浮窗", &g_win_hero_warn, 10);
+                ModernToggle((const char*)u8"锁定全部浮窗", &g_floats_locked, 9);
+                DrawGlassSeparator();
+                if (ImGui::TreeNode((const char*)u8"悬浮透明度")) {
+                    float pct_cp = g_alpha_cp * 100.0f, pct_pd = g_alpha_pd * 100.0f;
+                    float pct_opp = g_alpha_opp * 100.0f, pct_hex = g_alpha_hex * 100.0f;
+                    SliderFloatFine((const char*)u8"牌库透明度", &pct_cp, 10.0f, 100.0f, "%.0f%%");
+                    SliderFloatFine((const char*)u8"玩家数据透明度", &pct_pd, 10.0f, 100.0f, "%.0f%%");
+                    SliderFloatFine((const char*)u8"对手透视透明度", &pct_opp, 10.0f, 100.0f, "%.0f%%");
+                    SliderFloatFine((const char*)u8"海克斯透明度", &pct_hex, 10.0f, 100.0f, "%.0f%%");
+                    float pct_hw = g_alpha_hero_warn * 100.0f;
+                    SliderFloatFine((const char*)u8"余量预警透明度", &pct_hw, 10.0f, 100.0f, "%.0f%%");
+                    g_alpha_cp = std::clamp(pct_cp / 100.0f, 0.1f, 1.0f);
+                    g_alpha_pd = std::clamp(pct_pd / 100.0f, 0.1f, 1.0f);
+                    g_alpha_opp = std::clamp(pct_opp / 100.0f, 0.1f, 1.0f);
+                    g_alpha_hex = std::clamp(pct_hex / 100.0f, 0.1f, 1.0f);
+                    g_alpha_hero_warn = std::clamp(pct_hw / 100.0f, 0.1f, 1.0f);
+                    ImGui::TreePop();
+                }
+                if (ImGui::TreeNode((const char*)u8"牌库详细设置")) {
+                    SliderIntFine((const char*)u8"排布列数", &g_cp_columns, 3, 100);
+                    {
+                        int total = 0;
+                        for (auto& ph : g_poolHeroes) if (ph.cost >= 1 && ph.cost <= 5 && g_cp_show_cost[ph.cost]) total++;
+                        int show_rows = CalcGridRows(total, g_cp_columns);
+                        ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.f, 1.f), (const char*)u8"当前布局: %d列 × %d行 (共 %d 英雄)", g_cp_columns, show_rows, total);
+                    }
+                    ImGui::Text((const char*)u8"显示费用: "); ImGui::SameLine();
+                    ModernTierSelector((const char*)u8"显示几费卡", g_cp_show_cost);
+                    ImGui::NewLine();
+                    ModernToggle((const char*)u8"开启余量预警", &g_cp_warning_enable, 4);
+                    if (g_cp_warning_enable) SliderIntFine((const char*)u8"预警阈值", &g_cp_warning_thres, 1, 10);
+                    ImGui::TreePop();
+                }
+                if (ImGui::TreeNode((const char*)u8"玩家数据设置")) {
+                    SliderFloatFine((const char*)u8"行距", &g_pd_line_spacing, 0.0f, 40.0f);
+                    SliderFloatFine((const char*)u8"竖距", &g_pd_vert_spacing, 0.0f, 40.0f);
+                    SliderFloatFine((const char*)u8"\u7bad\u5934\u95f4\u8ddd", &g_pd_arrow_spacing, 0.0f, 500.0f);
+                    ModernToggle((const char*)u8"显示英雄汇总", &g_pd_hero_summary_enable, 8);
+                    if (g_pd_hero_summary_enable) {
+                        SliderIntFine((const char*)u8"1费卡至少", &g_pd_hero_count_min[1], 1, 20);
+                        SliderIntFine((const char*)u8"2费卡至少", &g_pd_hero_count_min[2], 1, 20);
+                        SliderIntFine((const char*)u8"3费卡至少", &g_pd_hero_count_min[3], 1, 20);
+                        SliderIntFine((const char*)u8"4费卡至少", &g_pd_hero_count_min[4], 1, 20);
+                        SliderIntFine((const char*)u8"5费卡至少", &g_pd_hero_count_min[5], 1, 20);
+                    }
+                    ImGui::TreePop();
+                }
+                if (ImGui::TreeNode((const char*)u8"对手透视设置")) {
+                    ModernToggle((const char*)u8"显示敌方棋盘", &g_opp_show_board, 5);
+                    ModernToggle((const char*)u8"显示敌方商店", &g_opp_show_shop, 6);
+                    ModernToggle((const char*)u8"显示敌方备战席", &g_opp_show_bench, 7);
+                    ImGui::TreePop();
+                }
+                if (ImGui::TreeNode((const char*)u8"余量预警设置")) {
+                    SliderIntFine((const char*)u8"预警阈值(张)", &g_hero_warn_thres, 1, 15);
+                    ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.f, 1.f), (const char*)u8"当自己英雄在牌库中剩余 \u2264 %d 张时显示预警", g_hero_warn_thres);
+                    ImGui::TreePop();
+                }
+                break;
+            case 1:
+                {
+                DrawSectionTitle((const char*)u8"自动拿牌");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"商店格子捕获进度: %zu / 5", g_shop_slots.size());
+                if (g_shop_listen_done.load()) ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), (const char*)u8"已成功获取5个格子地址，就绪！");
+                else ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), (const char*)u8"请在游戏内刷新一次商店以捕获...");
+                                DrawGlassSeparator();
+                int selected_hero_count = 0;
+                for (const auto& kv : g_heroAutoBuyChecked) {
+                    if (kv.second) selected_hero_count++;
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.22f, 0.22f, 0.85f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.3f, 0.3f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.15f, 0.15f, 1.0f));
+                char clear_btn_txt[64];
+                snprintf(clear_btn_txt, sizeof(clear_btn_txt), (const char*)u8"一键清空已选英雄 (已选: %d)", selected_hero_count);
+                if (ImGui::Button(clear_btn_txt, ImVec2(-1, 32.0f * g_autoScale * g_scale))) {
+                    g_heroAutoBuyChecked.clear();
+                    AddActionLog((const char*)u8"-> [自动购买] 已一键清空所有已勾选的英雄!");
+                }
+                ImGui::PopStyleColor(3);
+                ImGui::Spacing();
+                if (g_hero_images_ready.load()) {
+                    if (g_hero_image_count > 0)
+                        ImGui::TextColored(ImVec4(0.45f, 1.0f, 0.55f, 1.0f), (const char*)u8"已加载 %d 张英雄头像 (HeroImages.h)", g_hero_image_count);
+                    else
+                        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"HeroImages.h 中未找到有效图片，请用 generate_hero_images.ps1 重新生成");
+                } else {
+                    ImGui::TextColored(ImVec4(0.65f, 0.72f, 0.82f, 1.f), (const char*)u8"正在扫描 HeroImages.h ...");
+                }
+                ImGui::Text((const char*)u8"点击图块勾选/取消 (按费用分组):");
+                {
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    float box_sz = 56.0f * g_autoScale * g_scale;
+                    float spacing = 8.0f * g_autoScale * g_scale;
+                    int cols = std::max(1, (int)(ImGui::GetContentRegionAvail().x / (box_sz + spacing)));
+                    float time = ImGui::GetTime();
+                    float flash = 0.5f + 0.5f * sinf(time * 6.0f);
+                    ImU32 rgbBorder = ImGui::GetColorU32(ImVec4(sinf(time*5)*0.5f+0.5f, sinf(time*5+2)*0.5f+0.5f, sinf(time*5+4)*0.5f+0.5f, 1.0f));
+                    float selBorder = 5.0f + 3.0f * flash;
+                    for (int cost = 1; cost <= 5; cost++) {
+                        std::vector<PoolHero> filtered;
+                        for (auto& ph : g_poolHeroes) if (ph.cost == cost) filtered.push_back(ph);
+                        if (filtered.empty()) continue;
+                        ImGui::TextColored(CostColor(cost), (const char*)u8"%d费", cost);
+                        ImVec2 cur = ImGui::GetCursorScreenPos();
+                        int rows = (int)std::ceil((float)filtered.size() / cols);
+                        ImGui::Dummy(ImVec2(cols * (box_sz + spacing), rows * (box_sz + spacing)));
+                        for (size_t i = 0; i < filtered.size(); i++) {
+                            int hid = filtered[i].heroId;
+                            int r = (int)(i / cols), c = (int)(i % cols);
+                            ImVec2 pMin(cur.x + c * (box_sz + spacing), cur.y + r * (box_sz + spacing));
+                            ImVec2 pMax(pMin.x + box_sz, pMin.y + box_sz);
+                            ImGui::SetCursorScreenPos(pMin);
+                            ImGui::PushID(hid);
+                            if (ImGui::InvisibleButton("##btn", ImVec2(box_sz, box_sz))) g_heroAutoBuyChecked[hid] = !g_heroAutoBuyChecked[hid];
+                            ImGui::PopID();
+                            dl->AddRectFilled(pMin, pMax, IM_COL32(255, 255, 255, 12), 8.0f);
+                            dl->AddRectFilled(pMin, pMax, IM_COL32(12, 16, 28, 210), 8.0f);
+                            if (g_heroAutoBuyChecked[hid]) {
+                                dl->AddRect(pMin, pMax, rgbBorder, 8.0f, 0, selBorder);
+                                dl->AddRect(
+                                    ImVec2(pMin.x - 3.0f, pMin.y - 3.0f),
+                                    ImVec2(pMax.x + 3.0f, pMax.y + 3.0f),
+                                    rgbBorder, 10.0f, 0, 2.5f + 1.5f * flash);
+                            }
+                            else dl->AddRect(pMin, pMax, ImGui::GetColorU32(CostColor(cost)), 8.0f, 0, 1.5f);
+                            DrawHeroIcon(dl, hid, pMin, pMax, 8.0f, IM_COL32(255, 255, 255, 240));
+                        }
+                        ImGui::Dummy(ImVec2(0, 6.0f * g_autoScale));
+                    }
+                    DrawGlassSeparator();
+                    ImGui::Text((const char*)u8"已选英雄:");
+                    float sel_sz = 44.0f * g_autoScale * g_scale;
+                    float sel_sp = 6.0f * g_autoScale * g_scale;
+                    for (int cost = 1; cost <= 5; cost++) {
+                        std::vector<int> selected;
+                        for (auto& ph : g_poolHeroes) {
+                            if (ph.cost == cost && g_heroAutoBuyChecked[ph.heroId])
+                                selected.push_back(ph.heroId);
+                        }
+                        if (selected.empty()) continue;
+                        ImGui::TextColored(CostColor(cost), (const char*)u8"%d费", cost); ImGui::SameLine();
+                        ImVec2 cur = ImGui::GetCursorScreenPos();
+                        ImGui::Dummy(ImVec2(selected.size() * (sel_sz + sel_sp), sel_sz));
+                        for (size_t i = 0; i < selected.size(); i++) {
+                            ImVec2 pMin(cur.x + i * (sel_sz + sel_sp), cur.y);
+                            ImVec2 pMax(pMin.x + sel_sz, pMin.y + sel_sz);
+                            dl->AddRectFilled(pMin, pMax, IM_COL32(255, 255, 255, 14), 6.0f);
+                            dl->AddRect(pMin, pMax, ImGui::GetColorU32(CostColor(cost)), 6.0f, 0, 1.5f);
+                            DrawHeroIcon(dl, selected[i], pMin, pMax, 6.0f, IM_COL32(255, 255, 255, 240));
+                        }
+                        ImGui::NewLine();
+                    }
+                }
+                }
+                break;
+            case 2:
+                {
+                    auto PrintCol = [](const char* fmt, int ok, ...) {
+                        va_list args;
+                        va_start(args, ok);
+                        ImVec4 col = ok ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                        ImGui::PushStyleColor(ImGuiCol_Text, col);
+                        ImGui::TextV(fmt, args);
+                        ImGui::PopStyleColor();
+                        va_end(args);
+                    };
+
+                    DrawSectionTitle((const char*)u8"链路诊断与状态监视");
+                    if (ImGui::Button((const char*)u8"⚡ 点击测试悬浮调用日志", ImVec2(-1, 32 * g_autoScale))) { 
+                        AddActionLog((const char*)u8"-> [测试] 悬浮调用链与参数监视正常工作!"); 
+                    }
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址链路】");
+                    PrintCol("il2cppTrueBase: 0x%lx", g_il2cppTrueBase > 0, g_il2cppTrueBase);
+                    PrintCol("addr1 (Instance): 0x%lx %s", IsValidPtr(g_dbg_addr1), g_dbg_addr1, IsValidPtr(g_dbg_addr1) ? "[OK]" : "[x]");
+                    PrintCol("addr2: 0x%lx %s", IsValidPtr(g_dbg_addr2), g_dbg_addr2, IsValidPtr(g_dbg_addr2) ? "[OK]" : "[x]");
+                    PrintCol("addr3: 0x%lx %s", IsValidPtr(g_dbg_addr3), g_dbg_addr3, IsValidPtr(g_dbg_addr3) ? "[OK]" : "[x]");
+                    PrintCol("addra: 0x%lx %s", IsValidPtr(g_dbg_addra), g_dbg_addra, IsValidPtr(g_dbg_addra) ? "[OK]" : "[x]");
+                    PrintCol("segmentCSOGame: 0x%lx %s", IsValidPtr(g_dbg_segmentcsogame), g_dbg_segmentcsogame, IsValidPtr(g_dbg_segmentcsogame) ? "[OK]" : "[x]");
+                    PrintCol("真实ID: %d | 对局状态: %s", g_is_in_match.load() || g_my_player_id >= 0, g_my_player_id, g_is_in_match.load() ? "对局中" : "未在对局");
+                    
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【核心Hook点状态】");
+                    PrintCol("1. 商店挂载 (func_shop_listen): %s", old_shop_listen != nullptr, old_shop_listen ? "已挂载 [OK]" : "未挂载/偏移需校准 [x]");
+                    PrintCol("2. 对局状态 (func_set_IsGameEnd): %s", orig_set_IsGameEnd != nullptr, orig_set_IsGameEnd ? "已挂载 [OK]" : "未挂载/偏移需校准 [x]");
+                    PrintCol("3. 线程管道 (SendWillRenderCanvases): %s", orig_SendWillRenderCanvases != nullptr, orig_SendWillRenderCanvases ? "已挂载 [OK]" : "未挂载 [x]");
+                    PrintCol("4. 触摸分发 (nativeInjectEvent): %s", old_nativeInjectEvent != nullptr, old_nativeInjectEvent ? "已挂载 [OK]" : "未挂载 [x]");
+
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库字典链】");
+                    PrintCol("addr4=0x%lx | addr7=0x%lx (大小: %zu)", IsValidPtr(g_dbg_addr4) && IsValidPtr(g_dbg_addr7), g_dbg_addr4, g_dbg_addr7, g_dbg_list7_addrs.size());
+                    ImGui::Indent();
+                    for (size_t i = 0; i < std::min((size_t)6, g_dbg_list7_addrs.size()); i++) {
+                        uintptr_t a8 = g_dbg_list7_addrs[i];
+                        PrintCol("addr7[%zu] -> addr8: 0x%lx", IsValidPtr(a8), i, a8);
+                    }
+                    if (g_dbg_list7_addrs.size() > 6) ImGui::Text("... (共 %zu 个项)", g_dbg_list7_addrs.size());
+                    ImGui::Unindent();
+
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【商店槽位地址 (5个)】");
+                    PrintCol("数量: %zu / 5", g_shop_slots.size() == 5, g_shop_slots.size());
+                    ImGui::Indent();
+                    for (size_t i = 0; i < g_shop_slots.size(); i++)
+                        PrintCol("ShopSlot[%zu]: 0x%lx", IsValidPtr(g_shop_slots[i]), i, g_shop_slots[i]);
+                    for (size_t i = g_shop_slots.size(); i < 5; i++)
+                        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "ShopSlot[%zu]: (等待刷新...)", i);
+                    ImGui::Unindent();
+
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家列表 (addr12)】");
+                    PrintCol("addr11=0x%lx | addr12=0x%lx | 数量: %zu", IsValidPtr(g_dbg_addr12) && g_players.size() > 0, g_dbg_addr11, g_dbg_addr12, g_players.size());
+                    ImGui::Indent();
+                    for (size_t i = 0; i < g_players.size(); i++) {
+                        const auto& pi = g_players[i];
+                        PrintCol("[%zu] ID=%d 昵称=%s 钱=%d 等级=%d 连胜=%d 连败=%d (addr13=0x%lx)", 
+                            IsValidPtr(pi.addr13_ptr), i+1, pi.id, pi.name.c_str(), pi.money, pi.level, pi.win_streak, pi.lose_streak, pi.addr13_ptr);
+                    }
+                    ImGui::Unindent();
+
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【下回合对手预测】");
+                    if (g_next_opponents.empty()) ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "等待对局中获取列表...");
+                    else {
+                        for (size_t i = 0; i < g_next_opponents.size(); i++) {
+                            int opp_id = g_next_opponents[i];
+                            std::string opp_name = "未知";
+                            for (const auto& p : g_players) { if (p.id == opp_id) { opp_name = p.name; break; } }
+                            PrintCol("■[%zu]: ID=%d (%s)", opp_id >= 0, i + 1, opp_id, opp_name.c_str());
+                        }
+                    }
+
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【海克斯与排位段位 (addr21~26)】");
+                    PrintCol("addr21=0x%lx | addr23=0x%lx | addr26=0x%lx | hexctrl=0x%lx", IsValidPtr(g_dbg_addr21) && IsValidPtr(g_dbg_addr26), g_dbg_addr21, g_dbg_addr23, g_dbg_addr26, g_dbg_hexctrl);
+                    PrintCol("海克斯品质: [%d, %d, %d]", IsValidPtr(g_dbg_hexctrl), g_hex_qualities[0], g_hex_qualities[1], g_hex_qualities[2]);
+                }
+                break;
+            case 3:
+                {
+                    DrawSectionTitle((const char*)u8"偏移调试与实时诊断");
+                if (ImGui::Button((const char*)u8"保存全部配置", ImVec2(-1, 34 * g_autoScale * g_scale))) { SaveConfig(); AddActionLog((const char*)u8"-> [配置] 已成功保存所有当前改动过的偏移与设置到本地!"); }
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【主线基础寻址链路】（改一个对应地址立刻显示）");
+                DrawOffsetAdjuster("func_get_Instance(获取实例) [辅助主动调用]", &g_off.func_get_Instance, g_dbg_addr1, true);
+                DrawOffsetAdjuster("addr2(我的玩家对象偏移)", &g_off.addr2, g_dbg_addr2, true);
+                DrawOffsetAdjuster("addr3(玩家列表指针)", &g_off.addr3, g_dbg_addr3, true);
+                DrawOffsetAdjuster("addra(未知预留偏移)", &g_off.addra, g_dbg_addra, true);
+                DrawOffsetAdjuster("segmentcsogame(核心游戏组件)", &g_off.segmentcsogame, g_dbg_segmentcsogame, true);
+                DrawOffsetAdjuster("segment_my_player_id(我的玩家ID组件)", &g_off.segment_my_player_id, (uintptr_t)g_my_player_id, true);
+                DrawOffsetAdjuster("func_quit(退出游戏) [辅助主动调用]", &g_off.func_quit, (uintptr_t)(g_il2cppTrueBase + g_off.func_quit), true);
+                DrawOffsetAdjuster("func_set_IsGameEnd(判断结束) [Hook游戏监听]", &g_off.func_set_IsGameEnd, (uintptr_t)(g_il2cppTrueBase + g_off.func_set_IsGameEnd), true);
+                DrawOffsetAdjuster("next_opponents_list(下一回合对手列表)", &g_off.next_opponents_list);
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家字典 (addr11~12)】");
+                DrawOffsetAdjuster("addr11(玩家字典外层)", &g_off.addr11, g_dbg_addr11, true);
+                DrawOffsetAdjuster("addr12(玩家字典对象)", &g_off.addr12, g_dbg_addr12, true);
+                DrawOffsetAdjuster(" -> dict struct_size(字典结构大小)", &g_off.addr12_struct_size);
+                DrawOffsetAdjuster(" -> dict ptr_offset(字典指针偏移)", &g_off.addr12_ptr_offset);
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【玩家基本属性 (addr13)】");
+                DrawOffsetAdjuster("addr13(单个玩家信息对象)", &g_off.addr13, g_dbg_addr13, true);
+                DrawOffsetAdjuster("pi_name(玩家名字偏移)", &g_off.pi_name);
+                DrawOffsetAdjuster("pi_id(玩家ID偏移)", &g_off.pi_id);
+                DrawOffsetAdjuster("pi_is_bot(是否机器人)", &g_off.pi_is_bot);
+                DrawOffsetAdjuster("pi_money(玩家金币)", &g_off.pi_money);
+                DrawOffsetAdjuster("pi_level(玩家等级)", &g_off.pi_level);
+                DrawOffsetAdjuster("pi_win_streak(连胜)", &g_off.pi_win_streak);
+                DrawOffsetAdjuster("pi_lose_streak(连败)", &g_off.pi_lose_streak);
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库字典链 (addr4~7)】");
+                DrawOffsetAdjuster("addr4(牌库管理节点4)", &g_off.addr4, g_dbg_addr4, true);
+                DrawOffsetAdjuster("addr5(牌库管理节点5)", &g_off.addr5, g_dbg_addr5, true);
+                DrawOffsetAdjuster("addr6(牌库管理节点6)", &g_off.addr6, g_dbg_addr6, true);
+                DrawOffsetAdjuster("addr7(牌库字典外层)", &g_off.addr7, g_dbg_addr7, true);
+                DrawOffsetAdjuster(" -> addr7 struct_size(字典结构大小)", &g_off.addr7_struct_size);
+                DrawOffsetAdjuster(" -> addr7 ptr_offset(字典指针偏移)", &g_off.addr7_ptr_offset);
+                DrawOffsetAdjuster("addr9(牌库内部数据)", &g_off.addr9, g_dbg_addr9, true);
+                DrawOffsetAdjuster(" -> addr9 struct_size(内部结构大小)", &g_off.addr9_struct_size);
+                DrawOffsetAdjuster(" -> addr9 ptr_offset(内部指针偏移)", &g_off.addr9_ptr_offset);
+                DrawOffsetAdjuster("ph_heroId(牌库英雄ID)", &g_off.ph_heroId);
+                DrawOffsetAdjuster("ph_remaining(牌库剩余数量)", &g_off.ph_remaining);
+                DrawOffsetAdjuster("ph_total(牌库总数量)", &g_off.ph_total);
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【海克斯与排位 (addr21~26)】");
+                DrawOffsetAdjuster("addr21(海克斯管理节点1)", &g_off.addr21, g_dbg_addr21, true);
+                DrawOffsetAdjuster("addr22(海克斯管理节点2)", &g_off.addr22, g_dbg_addr22, true);
+                DrawOffsetAdjuster("addr23(海克斯列表字典)", &g_off.addr23, g_dbg_addr23, true);
+                DrawOffsetAdjuster(" -> addr23 struct_size(列表结构大小)", &g_off.addr23_struct_size);
+                DrawOffsetAdjuster(" -> addr23 ptr_offset(列表指针偏移)", &g_off.addr23_ptr_offset);
+                DrawOffsetAdjuster("addr26(单个海克斯对象)", &g_off.addr26, g_dbg_addr26, true);
+                DrawOffsetAdjuster("pi_avatar_rank(海克斯品质/等级)", &g_off.pi_avatar_rank);
+                DrawOffsetAdjuster("pi_avatar_player_id(海克斯所属玩家ID)", &g_off.pi_avatar_player_id);
+                DrawOffsetAdjuster("hexctrl(海克斯控制对象)", &g_off.hexctrl, g_dbg_hexctrl, true);
+                DrawOffsetAdjuster("func_get_hex(获取海克斯) [辅助主动调用]", &g_off.func_get_hex, (uintptr_t)(g_il2cppTrueBase + g_off.func_get_hex), true);
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【商店、备战区与场上】");
+                DrawOffsetAdjuster("addr14(商店管理对象)", &g_off.addr14, g_dbg_addr14, true);
+                DrawOffsetAdjuster("addr15(商店槽位列表)", &g_off.addr15, g_dbg_addr15, true);
+                DrawOffsetAdjuster("addr16(单个商店槽位)", &g_off.addr16, g_dbg_addr16, true);
+                DrawOffsetAdjuster("shop_hero_id(商店英雄ID)", &g_off.shop_hero_id);
+                DrawOffsetAdjuster("addr17(备战席管理对象)", &g_off.addr17, g_dbg_addr17, true);
+                DrawOffsetAdjuster("addr18(备战席槽位列表)", &g_off.addr18, g_dbg_addr18, true);
+                DrawOffsetAdjuster("bench_hero_id(备战席英雄ID)", &g_off.bench_hero_id);
+                DrawOffsetAdjuster("addr19(棋盘管理对象)", &g_off.addr19, g_dbg_addr19, true);
+                DrawOffsetAdjuster("addr20(棋盘槽位列表)", &g_off.addr20, g_dbg_addr20, true);
+                DrawOffsetAdjuster("board_hero_id(棋盘英雄ID)", &g_off.board_hero_id);
+                DrawOffsetAdjuster("board_x(棋盘X坐标)", &g_off.board_x);
+                DrawOffsetAdjuster("board_y(棋盘Y坐标)", &g_off.board_y);
+                DrawGlassSeparator();
+                ImGui::TextColored(UITheme().primary, (const char*)u8"【全局Hook】");
+                DrawOffsetAdjuster("func_shop_listen(监听商店) [Hook游戏监听]", &g_off.func_shop_listen, (uintptr_t)(g_il2cppTrueBase + g_off.func_shop_listen), true);
+                DrawOffsetAdjuster("func_buy_hero_new(购买英雄) [辅助主动调用]", &g_off.func_buy_hero_new, (uintptr_t)(g_il2cppTrueBase + g_off.func_buy_hero_new), true);
+                DrawOffsetAdjuster("func_SendWillRenderCanvases(UI渲染主循环) [Hook游戏监听]", &g_off.func_SendWillRenderCanvases, (uintptr_t)(g_il2cppTrueBase + g_off.func_SendWillRenderCanvases), true);
+                break;
+            }
+            case 4:
+                {
+                    DrawSectionTitle((const char*)u8"符号反查与动态反射");
+                    DrawSymbolResolverUI();
+                    break;
+                }
+            }
+
+            ImGui::EndChild();
+        }
+    }
+    ImGui::End();
+    DrawActionLogOverlay();
+}
+
+
+
+int g_current_frame = 0;
+std::atomic<bool> g_engine_rendering{false};
+std::atomic<int> g_active_renderer{0}; // 0=未知, 1=OpenGL ES, 2=Vulkan
+
+// 1. OpenGL / EGL 原始函数指针
+unsigned int (*old_eglSwap)(EGLDisplay, EGLSurface) = nullptr;
+void* (*old_eglGetProcAddress)(const char*) = nullptr;
+
+// 2. Vulkan 原始函数指针
+VkResult (*old_vkQueuePresentKHR)(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) = nullptr;
+VkResult (*old_vkCreateInstance)(const VkInstanceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkInstance* pInstance) = nullptr;
+
+// 3. JNI 触摸原始函数指针
+JavaVM* g_jvm = nullptr;
+jobject g_view_obj = nullptr;
+jobject g_context = nullptr;
+void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
+
+extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) {
+    if (!g_jvm) env->GetJavaVM(&g_jvm);
+    if (obj) {
+        if (!g_view_obj || !env->IsSameObject(g_view_obj, obj)) {
+            if (g_view_obj) env->DeleteGlobalRef(g_view_obj);
+            g_view_obj = env->NewGlobalRef(obj);
+        }
+        if (!g_context) {
+            jclass viewClass = env->GetObjectClass(obj);
+            jmethodID getContextMid = env->GetMethodID(viewClass, "getContext", "()Landroid/content/Context;");
+            if (getContextMid) {
+                jobject ctx = env->CallObjectMethod(obj, getContextMid);
+                if (ctx) g_context = env->NewGlobalRef(ctx);
+            }
+            env->DeleteLocalRef(viewClass);
+        }
+    }
+
+    if (event) {
+        static jclass motionEventClassGlobal = nullptr;
+        if (!motionEventClassGlobal) {
+            jclass meClass = env->FindClass("android/view/MotionEvent");
+            if (meClass) {
+                motionEventClassGlobal = (jclass)env->NewGlobalRef(meClass);
+                env->DeleteLocalRef(meClass);
+            }
+        }
+
+        if (motionEventClassGlobal && env->IsInstanceOf(event, motionEventClassGlobal)) {
+            static jmethodID getWidthMid = nullptr, getHeightMid = nullptr;
+            static jmethodID getActionMid = nullptr, getXMid = nullptr, getYMid = nullptr;
+
+            if (getWidthMid == nullptr) {
+                jclass viewClass = env->GetObjectClass(obj);
+                getWidthMid = env->GetMethodID(viewClass, "getWidth", "()I");
+                getHeightMid = env->GetMethodID(viewClass, "getHeight", "()I");
+                env->DeleteLocalRef(viewClass);
+
+                getActionMid = env->GetMethodID(motionEventClassGlobal, "getAction", "()I");
+                getXMid = env->GetMethodID(motionEventClassGlobal, "getX", "()F");
+                getYMid = env->GetMethodID(motionEventClassGlobal, "getY", "()F");
+            }
+
+            if (getActionMid && getXMid && getYMid) {
+                int action = env->CallIntMethod(event, getActionMid) & 255;
+                if (g_cached_view_width <= 0 && getWidthMid && getHeightMid) {
+                    g_cached_view_width = env->CallIntMethod(obj, getWidthMid);
+                    g_cached_view_height = env->CallIntMethod(obj, getHeightMid);
+                }
+
+                float raw_x = env->CallFloatMethod(event, getXMid);
+                float raw_y = env->CallFloatMethod(event, getYMid);
+
+                float scale_x = 1.0f, scale_y = 1.0f;
+                if (g_cached_view_width > 0 && g_gl_width > 0) scale_x = (float)g_gl_width / g_cached_view_width;
+                if (g_cached_view_height > 0 && g_gl_height > 0) scale_y = (float)g_gl_height / g_cached_view_height;
+
+                ImGuiIO& io = ImGui::GetIO();
+                io.AddMousePosEvent(raw_x * scale_x, raw_y * scale_y);
+
+                if (action == 0) { // ACTION_DOWN
+                    io.AddMouseButtonEvent(0, true);
+                    
+                } else if (action == 1 || action == 3) { // ACTION_UP / ACTION_CANCEL
+                    io.AddMouseButtonEvent(0, false);
+                }
+
+                // 如果按下的地方处于 ImGui 菜单窗口内部，截断事件不透传给游戏
+                if (io.WantCaptureMouse) return;
+            }
+        }
+    }
+
+    if (old_nativeInjectEvent) old_nativeInjectEvent(env, obj, event);
+}
+
+void FindAndHookHiddenJNI() {
+    FILE* fp = fopen("/proc/self/maps", "r"); if (!fp) return;
+    char line[1024];
+    struct MemRegion { uintptr_t start, end; bool is_rw; };
+    std::vector<MemRegion> regions;
+
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "libunity.so")) {
+            bool is_r = strstr(line, "r-") != nullptr;
+            bool is_rw = strstr(line, "rw") != nullptr;
+            if (is_r || is_rw) {
+                uintptr_t start, end;
+                sscanf(line, "%lx-%lx", &start, &end);
+                regions.push_back({start, end, is_rw});
+            }
+        }
+    }
+    fclose(fp);
+
+    const char* target_string = "nativeInjectEvent";
+    std::vector<uintptr_t> string_addrs;
+    for (const auto& reg : regions) {
+        if (!reg.is_rw) {
+            for (uintptr_t p = reg.start; p < reg.end - strlen(target_string); p++) {
+                {
+                    char tmp_buf[32] = {0};
+                    size_t tlen = strlen(target_string);
+                    if (tlen <= sizeof(tmp_buf) && SafeReadMemory(p, tmp_buf, tlen) && memcmp(tmp_buf, target_string, tlen) == 0)
+                        string_addrs.push_back(p);
+                }
+            }
+        }
+    }
+
+    if (string_addrs.empty()) return;
+
+    bool found_func = false;
+    for (const auto& reg : regions) {
+        uintptr_t align_start = (reg.start + 7) & ~7;
+        for (uintptr_t p = align_start; p < reg.end - sizeof(void*)*3; p += sizeof(void*)) {
+            uintptr_t ptr_val = 0;
+                if (!SafeReadMemory(p, &ptr_val, sizeof(ptr_val))) continue;
+            for (uintptr_t str_addr : string_addrs) {
+                if (ptr_val == str_addr) {
+                    uintptr_t real_func_val = 0;
+                        if (!SafeReadMemory(p + 16, &real_func_val, sizeof(real_func_val))) continue;
+                        void* real_function_addr = (void*)real_func_val;
+                    if (real_function_addr != nullptr && (uintptr_t)real_function_addr > 0x100000) {
+                        DobbyHook(real_function_addr, (void*)hook_nativeInjectEvent, (void**)&old_nativeInjectEvent);
+                        LOGI("[+] nativeInjectEvent Hooked for Touch Input.");
+                        found_func = true; break;
+                    }
+                }
+            }
+            if (found_func) break;
+        }
+        if (found_func) break;
+    }
+}
+
+typedef void (*func_set_IsGameEnd_t)(void* thisObj, uint8_t isEnd);
+func_set_IsGameEnd_t orig_set_IsGameEnd = nullptr;
+
+void hook_set_IsGameEnd(void* thisObj, uint8_t isEnd) { g_count_set_IsGameEnd++;
+    if (orig_set_IsGameEnd) orig_set_IsGameEnd(thisObj, isEnd);
+    if (!thisObj || !IsValidPtr((uintptr_t)thisObj)) return;
+    if (isEnd == 0) {
+        AddActionLog((const char*)u8"-> [引擎状态] call func_set_IsGameEnd(isEnd=0) | 游戏开始!");
+        g_match_enter_pending.store(true, std::memory_order_release);
+    } else if (g_is_in_match.load(std::memory_order_acquire)) {
+        AddActionLog((const char*)u8"-> [引擎状态] call func_set_IsGameEnd(isEnd=%d) | 游戏结束!", isEnd);
+        g_is_in_match.store(false, std::memory_order_release);
+        g_match_enter_pending.store(false, std::memory_order_release);
+        g_need_segment_gap_before_enter = true;
+        g_Tasks.trigger_game_end.store(true, std::memory_order_release);
+    }
+}
+
+typedef void* (*func_SendWillRenderCanvases_t)();
+func_SendWillRenderCanvases_t orig_SendWillRenderCanvases = nullptr;
+void* hook_SendWillRenderCanvases() { g_count_SendWillRenderCanvases++;
+    {
+        std::lock_guard<std::mutex> lock(g_Tasks.buy_mutex);
+        if (!g_Tasks.buy_slots.empty()) {
+            typedef void (*func_buy_new_t)(void*);
+            func_buy_new_t buy_hero = (func_buy_new_t)(g_il2cppTrueBase + g_off.func_buy_hero_new);
+            if (buy_hero && IsValidExecutableAddr((void*)buy_hero)) { g_count_buy_hero_new++;
+                for (const auto& item : g_Tasks.buy_slots) {
+                    if (IsValidPtr(item.slot_addr)) {
+
+
+                        AddActionLog((const char*)u8"-> [自动购买] call buy_hero_new(slot_addr=0x%lx) | hero_id=%d", item.slot_addr, item.hero_id);
+                        SAFE_CALL_VOID(buy_hero((void*)item.slot_addr));
+                    } else {
+                        AddActionLog((const char*)u8"-> [自动购买失败] slot_addr(0x%lx) 指针无效!", item.slot_addr);
+                    }
+                }
+            } else {
+                AddActionLog((const char*)u8"-> [自动购买失败] 函数地址(0x%lx) 无效!", (uintptr_t)buy_hero);
+            }
+            g_Tasks.buy_slots.clear();
+        }
+    }
+    if (g_Tasks.trigger_quit.load()) {
+        g_Tasks.trigger_quit.store(false);
+        typedef void (*func_quit_t)(uintptr_t, int, int);
+        func_quit_t quit_func = (func_quit_t)(g_il2cppTrueBase + g_off.func_quit);
+        if (quit_func && IsValidExecutableAddr((void*)quit_func) && IsValidPtr(g_dbg_segmentcsogame)) {
+            AddActionLog((const char*)u8"-> [极速退游] call func_quit(segment=0x%lx, player_id=%d, mode=0)", g_dbg_segmentcsogame, g_my_player_id);
+            g_count_func_quit++; SAFE_CALL_VOID(quit_func(g_dbg_segmentcsogame, g_my_player_id, 0));
+        } else {
+            AddActionLog((const char*)u8"-> [退游失败] func_quit指针或segment无效!");
+        }
+        g_is_in_match.store(false, std::memory_order_release);
+        g_need_segment_gap_before_enter = true;
+        g_Tasks.trigger_game_end.store(true, std::memory_order_release);
+    }
+    if (orig_SendWillRenderCanvases) return orig_SendWillRenderCanvases();
+    return nullptr;
+}
+
+void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
+    g_current_frame++;
+    if (g_active_renderer.load() == 0) g_active_renderer.store(1);
+    if (!g_engine_rendering.load()) g_engine_rendering.store(true);
+
+    eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
+    eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
+    if (g_gl_width <= 0 || g_gl_height <= 0) { g_gl_width = 1080; g_gl_height = 2400; }
+
+    if (g_current_frame % 120 == 0) {
+        LOGI("[*] GLES Render Heartbeat | Frame: %d | Resolution: %dx%d", g_current_frame, g_gl_width, g_gl_height);
+    }
+
+    // 备份 OpenGL 状态（避免查询不支持的 GLES 枚举）
+    GLint last_active_texture = 0; glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
+    glActiveTexture(GL_TEXTURE0);
+    GLint last_program = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
+    GLint last_texture = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
+    GLint last_array_buffer = 0; glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
+    GLint last_vertex_array = 0; glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
+    GLint last_viewport[4] = {0}; glGetIntegerv(GL_VIEWPORT, last_viewport);
+    GLint last_scissor_box[4] = {0}; glGetIntegerv(GL_SCISSOR_BOX, last_scissor_box);
+    GLboolean last_enable_blend = glIsEnabled(GL_BLEND);
+    GLboolean last_enable_cull_face = glIsEnabled(GL_CULL_FACE);
+    GLboolean last_enable_depth_test = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean last_enable_scissor_test = glIsEnabled(GL_SCISSOR_TEST);
+    GLint last_fbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
+
+    if (!g_isImGuiInit) {
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+
+        const char* gl_ver = (const char*)glGetString(GL_VERSION);
+        const char* glsl_ver = "#version 300 es";
+        if (gl_ver && strstr(gl_ver, "OpenGL ES 2.")) glsl_ver = "#version 100";
+
+        ImGui_ImplOpenGL3_Init(glsl_ver);
+        io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
+        SetupImGuiStyle();
+        UpdateFontHD(true);
+        g_isImGuiInit = true;
+        LOGI("[+] GLES ImGui Initialized. Resolution: %dx%d", g_gl_width, g_gl_height);
+    }
+    if (g_needUpdateFontSafe) { UpdateFontHD(true); g_needUpdateFontSafe = false; }
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)g_gl_width, (float)g_gl_height);
+    io.DeltaTime = 1.0f / 60.0f;
+
+    // 预留前 60 帧缓冲，等待游戏引擎完全加载 il2cpp 单例后再开始读取游戏数据，防止启动加载期空指针闪退
+    if (g_current_frame > 60 && g_il2cppTrueBase != 0) {
+        ResolveDiagnosticPointers();
+        UpdateMatchState();
+
+        if (g_Tasks.trigger_game_end.exchange(false, std::memory_order_acquire))
+            ClearGameState();
+
+        if (g_is_in_match.load(std::memory_order_acquire) && (g_current_frame % 2 == 0))
+            ParseGameMemory();
+    }
+
+    ProcessTextureQueue();
+
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui::NewFrame();
+
+    DrawMainMenu();
+    DrawHexKeypadModal();
+    DrawCardPoolWindow();
+    DrawPlayerDataWindow();
+    DrawOpponentBoardWindow();
+    DrawMyHeroWarningWindow();
+    DrawHextechCapsule(); DrawVirtualKeyboard();
+    // 胶囊最后绘制并置顶，避免被牌库等浮窗挡住无法解锁
+    DrawQuitCapsule();
+    DrawLockCapsule();
+    DrawCardPoolCapsule();
+    DrawActionLogOverlay();
+    if (g_apply_saved_float_pos) g_apply_saved_float_pos = false;
+
+    ImGui::Render();
+
+    // 强行刷新状态机并绑定画面最顶层
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, g_gl_width, g_gl_height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    // 还原 Unity 原始 OpenGL 状态
+    glUseProgram(last_program);
+    glBindTexture(GL_TEXTURE_2D, last_texture);
+    glActiveTexture(last_active_texture);
+    glBindVertexArray(last_vertex_array);
+    glBindBuffer(GL_ARRAY_BUFFER, last_array_buffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, last_fbo);
+    glViewport(last_viewport[0], last_viewport[1], last_viewport[2], last_viewport[3]);
+    glScissor(last_scissor_box[0], last_scissor_box[1], last_scissor_box[2], last_scissor_box[3]);
+
+    if (last_enable_blend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    if (last_enable_cull_face) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+    if (last_enable_depth_test) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (last_enable_scissor_test) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+}
+
+unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
+    static bool in_render = false;
+    if (!in_render) {
+        in_render = true;
+        RenderImGui_Core_GLES(display, surface);
+        in_render = false;
+    }
+    if (old_eglSwap) return old_eglSwap(display, surface);
+    return 1;
+}
+
+void* hook_eglGetProcAddress(const char* procname) {
+    if (!procname) return nullptr;
+    if (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) {
+        return (void*)hook_eglSwap;
+    }
+    if (old_eglGetProcAddress) return old_eglGetProcAddress(procname);
+    return nullptr;
+}
+
+VkResult hook_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) {
+    g_current_frame++;
+    if (g_active_renderer.load() == 0) g_active_renderer.store(2);
+
+    if (g_current_frame % 180 == 0) {
+        LOGI("[*] Vulkan Present Heartbeat | Frame: %d", g_current_frame);
+    }
+
+    if (old_vkQueuePresentKHR) return old_vkQueuePresentKHR(queue, pPresentInfo);
+    return VK_SUCCESS;
+}
+
+VkResult hook_vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkInstance* pInstance) {
+    LOGI("[+] Vulkan Instance creation intercepted!");
+    VkResult res = VK_SUCCESS;
+    if (old_vkCreateInstance) {
+        res = old_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+    }
+
+    if (res == VK_SUCCESS && pInstance && *pInstance) {
+        void* present_ptr = DobbySymbolResolver("libvulkan.so", "vkQueuePresentKHR");
+        if (present_ptr && !old_vkQueuePresentKHR) {
+            DobbyHook(present_ptr, (void*)hook_vkQueuePresentKHR, (void**)&old_vkQueuePresentKHR);
+            LOGI("[+] Vulkan QueuePresent Hooked Successfully.");
+        }
+    }
+    return res;
+}
+
+void* Il2CppInitThread(void*) {
+    LOGI("[+] Background Il2Cpp Init Thread Started...");
+    while (g_il2cppTrueBase == 0) {
+        FILE *fp = fopen("/proc/self/maps", "r");
+        if (fp) {
+            char line[512];
+            while (fgets(line, sizeof(line), fp)) {
+                if (strstr(line, "libil2cpp.so")) {
+                    sscanf(line, "%lx", &g_il2cppTrueBase); break;
+                }
+            }
+            fclose(fp);
+        }
+        if (g_il2cppTrueBase == 0) sleep(1);
+    }
+    LOGI("[+] libil2cpp.so Base Found: 0x%lx", (unsigned long)g_il2cppTrueBase);
+
+    // Wait for il2cpp to fully initialize, then build executable regions cache
+    sleep(2);
+    UpdateIl2CppExecRegions();
+
+    LoadConfig();
+    // 自动挂载核心 Hook
+    if (g_off.func_shop_listen != 0 && old_shop_listen == nullptr) {
+        void* target = (void*)(g_il2cppTrueBase + g_off.func_shop_listen);
+        SafeDobbyHook(target, (void*)hook_shop_listen, (void**)&old_shop_listen);
+    }
+    if (g_off.func_set_IsGameEnd != 0 && orig_set_IsGameEnd == nullptr) {
+        void* target = (void*)(g_il2cppTrueBase + g_off.func_set_IsGameEnd);
+        SafeDobbyHook(target, (void*)hook_set_IsGameEnd, (void**)&orig_set_IsGameEnd);
+    }
+    if (g_off.func_SendWillRenderCanvases != 0 && orig_SendWillRenderCanvases == nullptr) {
+        void* target = (void*)(g_il2cppTrueBase + g_off.func_SendWillRenderCanvases);
+        SafeDobbyHook(target, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
+    }
+
+
+
+
+
+
+
+
+
+    AddActionLog((const char*)u8"-> [系统] 助手核心与调用监视系统已就绪");
+    EnsureTextureWorkerStarted();
+    return nullptr;
+}
+
+static void AutoSetPermissiveSELinux() {
+    // 1. 直接写入 Linux 内核 SELinux 状态节点 (0 = Permissive 宽松模式)
+    int fd = open("/sys/fs/selinux/enforce", O_WRONLY);
+    if (fd >= 0) {
+        write(fd, "0", 1);
+        close(fd);
+    }
+    // 2. 多重 shell / su 兜底执行 setenforce 0
+    system("setenforce 0 2>/dev/null");
+    system("su -c setenforce 0 2>/dev/null");
+    system("su 0 setenforce 0 2>/dev/null");
+    LOGI("[+] [SELinux] Auto setenforce 0 (Permissive mode) applied!");
+}
+
+void* SetupThread(void*) {
+    AutoSetPermissiveSELinux();
+    InitCrashGuard();
+    LOGI("[+] Adaptive Dual-Engine Setup Thread Started...");
+
+    // 1. 优先对 Vulkan 通道进行挂钩（无阻塞）
+    void* vk_create_ptr = DobbySymbolResolver("libvulkan.so", "vkCreateInstance");
+    if (!vk_create_ptr) { void* h = dlopen("libvulkan.so", RTLD_LAZY); if (h) vk_create_ptr = dlsym(h, "vkCreateInstance"); }
+    if (vk_create_ptr) {
+        DobbyHook(vk_create_ptr, (void*)hook_vkCreateInstance, (void**)&old_vkCreateInstance);
+        LOGI("[+] Vulkan CreateInstance Interceptor Set.");
+    }
+
+    void* vk_present_ptr = DobbySymbolResolver("libvulkan.so", "vkQueuePresentKHR");
+    if (!vk_present_ptr) { void* h = dlopen("libvulkan.so", RTLD_LAZY); if (h) vk_present_ptr = dlsym(h, "vkQueuePresentKHR"); }
+    if (vk_present_ptr) {
+        DobbyHook(vk_present_ptr, (void*)hook_vkQueuePresentKHR, (void**)&old_vkQueuePresentKHR);
+        LOGI("[+] Vulkan QueuePresent Direct Hook Set.");
+    }
+
+    // 2. 挂钩 OpenGL ES / EGL 双通道（同时支持符号 Hook 与 GetProcAddress 重定向）
+    void* egl_ptr = DobbySymbolResolver("libEGL.so", "eglSwapBuffers");
+    if (!egl_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) egl_ptr = dlsym(h, "eglSwapBuffers"); }
+    if (egl_ptr) {
+        DobbyHook(egl_ptr, (void*)hook_eglSwap, (void**)&old_eglSwap);
+        LOGI("[+] EGL SwapBuffers Direct Hook Set.");
+    }
+
+    void* getproc_ptr = DobbySymbolResolver("libEGL.so", "eglGetProcAddress");
+    if (!getproc_ptr) { void* h = dlopen("libEGL.so", RTLD_LAZY); if (h) getproc_ptr = dlsym(h, "eglGetProcAddress"); }
+    if (getproc_ptr) {
+        DobbyHook(getproc_ptr, (void*)hook_eglGetProcAddress, (void**)&old_eglGetProcAddress);
+        LOGI("[+] EGL GetProcAddress Interceptor Set.");
+    }
+
+    // 3. 后台启动 il2cpp 基址探测与配置加载线程，不阻塞主图形管道
+    pthread_t t_il2cpp;
+    pthread_create(&t_il2cpp, 0, Il2CppInitThread, 0);
+    pthread_detach(t_il2cpp);
+
+    // 4. 3 秒后寻找 libunity.so 并 Hook nativeInjectEvent，绑定触摸输入与启动连点器
+    sleep(3);
+    FindAndHookHiddenJNI();
+
+    LOGI("[+] All adaptive hooks and touch interceptors installed successfully!");
+    return nullptr;
+}
+
+__attribute__((constructor)) void Init() { 
+    pthread_t t; 
+    pthread_create(&t, 0, SetupThread, 0); 
+    pthread_detach(t); 
+}void DrawVirtualKeyboard() {
+    if (!g_show_vkbd || !g_vkbd_target) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    
+    // Height of keyboard is about 35% of screen height
+    float kbd_h = io.DisplaySize.y * 0.35f;
+    ImGui::SetNextWindowPos(ImVec2(0, io.DisplaySize.y), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, kbd_h));
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.35f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.4f, 0.45f, 1.0f));
+    
+    ImGui::Begin("VKBD", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(0.95f);
+
+    // Header / Target Display with Clear All button
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"输入内容:");
+    ImGui::SameLine();
+    ImGui::Text("%s_", g_vkbd_target);
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8" [清空全部] ", ImVec2(100.0f * g_autoScale, 0))) {
+        g_vkbd_target[0] = '\0';
+    }
+    ImGui::Separator();
+
+    // Responsive Button sizes
+    float avail_w = ImGui::GetContentRegionAvail().x;
+    float spacing = ImGui::GetStyle().ItemSpacing.x;
+    float base_btn_w = (avail_w - (spacing * 13.0f)) / 13.5f; // 13 keys wide approx
+    float btn_h = (ImGui::GetContentRegionAvail().y - (spacing * 4.0f)) / 4.0f; // 4 rows
+
+    auto KeyBtn = [&](const char* key, float width_mult = 1.0f) {
+        bool is_bs = (strcmp(key, "BS") == 0);
+        // Enable button repeat for continuous long-press backspace deletion
+        if (is_bs) ImGui::PushButtonRepeat(true);
+
+        if (ImGui::Button(key, ImVec2(base_btn_w * width_mult, btn_h))) {
+            size_t len = strlen(g_vkbd_target);
+            if (strcmp(key, "BS") == 0) {
+                if (len > 0) g_vkbd_target[len - 1] = '\0';
+            } else if (strcmp(key, "CLR") == 0) {
+                g_vkbd_target[0] = '\0';
+            } else if (strcmp(key, "ENTER") == 0) {
+                g_show_vkbd = false;
+            } else if (strcmp(key, "SPACE") == 0) {
+                if (len < g_vkbd_target_size - 1) { g_vkbd_target[len] = ' '; g_vkbd_target[len + 1] = '\0'; }
+            } else if (strcmp(key, "CAPS") == 0) {
+                g_vkbd_caps = !g_vkbd_caps;
+            } else {
+                if (len < g_vkbd_target_size - 1) {
+                    g_vkbd_target[len] = key[0];
+                    g_vkbd_target[len + 1] = '\0';
+                }
+            }
+        }
+
+        if (is_bs) ImGui::PopButtonRepeat();
+    };
+
+    const char* row1_low[] = {"1","2","3","4","5","6","7","8","9","0","-","="};
+    const char* row2_low[] = {"q","w","e","r","t","y","u","i","o","p","[","]"};
+    const char* row3_low[] = {"a","s","d","f","g","h","j","k","l",";","'","_"};
+    const char* row4_low[] = {"z","x","c","v","b","n","m",",",".","/","\"",":"};
+
+    const char* row1_cap[] = {"!","@","#","$","%","^","&","*","(",")","_","+"};
+    const char* row2_cap[] = {"Q","W","E","R","T","Y","U","I","O","P","{","}"};
+    const char* row3_cap[] = {"A","S","D","F","G","H","J","K","L",":","\"","|"};
+    const char* row4_cap[] = {"Z","X","C","V","B","N","M","<",">","?","~",":"};
+
+    const char** r1 = g_vkbd_caps ? row1_cap : row1_low;
+    const char** r2 = g_vkbd_caps ? row2_cap : row2_low;
+    const char** r3 = g_vkbd_caps ? row3_cap : row3_low;
+    const char** r4 = g_vkbd_caps ? row4_cap : row4_low;
+
+    // Row 1
+    for (int i = 0; i < 12; i++) {
+        KeyBtn(r1[i]); ImGui::SameLine();
+    }
+    KeyBtn("BS", 1.5f);
+
+    // Row 2
+    for (int i = 0; i < 12; i++) {
+        KeyBtn(r2[i]); ImGui::SameLine();
+    }
+    KeyBtn("CLR", 1.5f);
+
+    // Row 3
+    KeyBtn("CAPS", 1.5f); ImGui::SameLine();
+    for (int i = 0; i < 12; i++) {
+        KeyBtn(r3[i]); ImGui::SameLine();
+    }
+    ImGui::NewLine();
+
+    // Row 4
+    for (int i = 0; i < 12; i++) {
+        KeyBtn(r4[i]); ImGui::SameLine();
+    }
+    KeyBtn("SPACE", 2.0f); ImGui::SameLine();
+    KeyBtn("ENTER", 2.0f);
+
+    ImGui::End();
+    ImGui::PopStyleColor(4);
+}
+
+void DrawSymbolResolverUI() {
+    float sc = 1.0f;
+    ImGui::SetWindowFontScale(g_custom_font_scale);
+
+    float avail_x = ImGui::GetContentRegionAvail().x;
+    float btn_w = 60.0f * g_autoScale;
+
+    // Manual font scale stepper control with [ - ] and [ + ]
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"字体大小:");
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"  -  ", ImVec2(40.0f * g_autoScale, 0))) {
+        g_custom_font_scale = std::max(0.40f, g_custom_font_scale - 0.05f);
+    }
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), " %.2fx ", g_custom_font_scale);
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"  +  ", ImVec2(40.0f * g_autoScale, 0))) {
+        g_custom_font_scale = std::min(2.00f, g_custom_font_scale + 0.05f);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"[重置 0.8x]", ImVec2(80.0f * g_autoScale, 0))) {
+        g_custom_font_scale = 0.80f;
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类名):");
+    ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
+    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); 
+    ImGui::SameLine(); 
+    if (ImGui::Button((const char*)u8"[键盘]##1", ImVec2(btn_w, 0))) { 
+        g_vkbd_target = g_root_class_input; 
+        g_vkbd_target_size = sizeof(g_root_class_input); 
+        g_show_vkbd = true; 
+    }
+
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(字段/类型/高级过滤):");
+    ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
+    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
+    ImGui::SameLine(); 
+    if (ImGui::Button((const char*)u8"[键盘]##2", ImVec2(btn_w, 0))) { 
+        g_vkbd_target = g_class_search_input; 
+        g_vkbd_target_size = sizeof(g_class_search_input); 
+        g_show_vkbd = true; 
+    }
+
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"💡 支持精准定位语法: 字段名:类型 (如 data:PlayerData) 或 类名.字段 (如 BattleModel.data)");
+
+    ImGui::Spacing();
+    
+    if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配路径与类型)", ImVec2(avail_x, 38 * g_autoScale))) {
+        uintptr_t rootObj = g_dbg_addr1;
+        if (strlen(g_root_class_input) > 0) {
+            uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
+            if (singletonObj != 0) {
+                rootObj = singletonObj;
+                g_dbg_addr1 = singletonObj;
+                AddActionLog((const char*)u8"-> [成功] 获取 %s 运行时单例实例: 0x%lx", g_root_class_input, singletonObj);
+            } else {
+                AddActionLog((const char*)u8"-> [错误] 找不到单例类: %s", g_root_class_input);
+            }
+        }
+        
+        if (rootObj != 0 && strlen(g_class_search_input) > 0) {
+            g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8);
+            if (g_lastPathResult.found) {
+                AddActionLog((const char*)u8"-> [成功] 共发现 %zu 条匹配路径！", g_lastPathResult.paths.size());
+            } else {
+                AddActionLog((const char*)u8"-> [未找到] 在内存搜索深度 8 内未找到匹配对象");
+            }
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(0.0f);
+    
+    if (strlen(g_root_class_input) > 0) {
+        if (g_dbg_addr1 != 0) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪] %s 单例实例 = 0x%lx", g_root_class_input, g_dbg_addr1);
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[起点未就绪] 尚未获取到 %s 单例实例", g_root_class_input);
+        }
+    }
+
+    if (!g_lastPathResult.targetKeyword.empty() && !g_lastPathResult.found) {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), (const char*)u8"未在当前内存搜索深度 (8) 内找到目标: %s", g_lastPathResult.targetKeyword.c_str());
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或可尝试使用「字段名:类型」精确过滤。");
+    }
+
+    if (g_lastPathResult.found) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[寻址成功] 共扫描出 %zu 条关联路径与字段类型：", g_lastPathResult.paths.size());
+        
+        for (size_t p = 0; p < g_lastPathResult.paths.size(); p++) {
+            const auto& fp = g_lastPathResult.paths[p];
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), (const char*)u8"=== 路径 [%zu] %s ===", p + 1, fp.matchDesc.c_str());
+            
+            ImGui::Indent(8.0f * g_autoScale);
+            
+            if (fp.steps.empty()) {
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", fp.targetInstance);
+            } else {
+                for (size_t s = 0; s < fp.steps.size(); s++) {
+                    const auto& st = fp.steps[s];
+                    ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), (const char*)u8"[第 %zu 层] %s", s + 1, st.fromClass.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), (const char*)u8"-> [+0x%lx: %s (类型: %s)] ->", st.offset, st.fieldName.c_str(), st.fieldType.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
+                }
+
+                std::string off_summary = (const char*)u8"[提取偏移链] 偏移: 起点单例";
+                for (const auto& st : fp.steps) {
+                    char obuf[64]; snprintf(obuf, sizeof(obuf), " -> [+0x%lx %s]", st.offset, st.fieldName.c_str());
+                    off_summary += obuf;
+                }
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
+                
+                const auto& lastStep = fp.steps.back();
+                if (lastStep.isValueField) {
+                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.2f, 1.0f), (const char*)u8"[目标定位] 字段类型: %s | 字段内存地址: 0x%lx", lastStep.fieldType.c_str(), fp.targetInstance);
+                } else {
+                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.2f, 1.0f), (const char*)u8"[目标定位] 对象类型: %s | 实例实时地址: 0x%lx", lastStep.fieldType.c_str(), fp.targetInstance);
+                }
+            }
+            
+            ImGui::Unindent(8.0f * g_autoScale);
+        }
+    }
+    
+    ImGui::PopTextWrapPos();
+}
+
 void DrawMainMenu() {
     ApplyFrostedTheme();
     if (g_menu_orb) {
