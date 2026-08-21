@@ -212,6 +212,7 @@ float g_menuX = 100.0f, g_menuY = 100.0f;
 float g_menuW = 880.0f, g_menuH = 680.0f;
 bool g_menuCollapsed = false;
 float g_scale = 1.0f;
+static float g_custom_font_scale = 0.85f;
 int g_ui_theme = 0;
 float g_ui_anim[32] = {0};
 bool g_menu_orb = false;
@@ -3201,7 +3202,7 @@ void DrawVirtualKeyboard() {
     if (!g_show_vkbd || !g_vkbd_target) return;
 
     ImGuiIO& io = ImGui::GetIO();
-    float scale = g_autoScale * g_scale;
+    float scale = 1.0f;
     
     // Height of keyboard is about 35% of screen height
     float kbd_h = io.DisplaySize.y * 0.35f;
@@ -3214,7 +3215,7 @@ void DrawVirtualKeyboard() {
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.4f, 0.45f, 1.0f));
     
     ImGui::Begin("VKBD", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::SetWindowFontScale(scale * 1.1f);
+    ImGui::SetWindowFontScale(0.95f);
 
     // Header / Target Display
     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "输入内容:");
@@ -3773,11 +3774,26 @@ void DrawLiveInstanceTree(const char* label, uintptr_t address, float scale) {
 }
 
 void DrawSymbolResolverUI() {
-    float sc = g_autoScale * g_scale;
-    ImGui::SetWindowFontScale(sc);
+    float sc = 1.0f;
+    ImGui::SetWindowFontScale(g_custom_font_scale);
 
     float avail_x = ImGui::GetContentRegionAvail().x;
-    float btn_w = 60.0f * sc;
+    float btn_w = 60.0f * g_autoScale;
+
+    // Manual font scale control
+    ImGui::TextColored(ImVec4(0.6f, 0.75f, 0.9f, 1.0f), (const char*)u8"字体大小调节:");
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"超小(0.65x)")) g_custom_font_scale = 0.65f;
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"精细(0.8x)")) g_custom_font_scale = 0.8f;
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"标准(1.0x)")) g_custom_font_scale = 1.0f;
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"放大(1.2x)")) g_custom_font_scale = 1.2f;
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
 
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
     ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
@@ -3801,7 +3817,7 @@ void DrawSymbolResolverUI() {
 
     ImGui::Spacing();
     
-    if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配与字段)", ImVec2(avail_x, 40 * sc))) {
+    if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配与字段)", ImVec2(avail_x, 38 * g_autoScale))) {
         uintptr_t rootObj = g_dbg_addr1;
         if (strlen(g_root_class_input) > 0) {
             uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
@@ -3848,7 +3864,7 @@ void DrawSymbolResolverUI() {
             ImGui::Separator();
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), (const char*)u8"=== 路径 [%zu] %s ===", p + 1, fp.matchDesc.c_str());
             
-            ImGui::Indent(10.0f * sc);
+            ImGui::Indent(8.0f * g_autoScale);
             
             if (fp.steps.empty()) {
                 ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", fp.targetInstance);
@@ -3875,7 +3891,7 @@ void DrawSymbolResolverUI() {
                 }
             }
             
-            ImGui::Unindent(10.0f * sc);
+            ImGui::Unindent(8.0f * g_autoScale);
         }
     }
     
@@ -3913,7 +3929,7 @@ void DrawMainMenu() {
             float curW = ImGui::GetWindowSize().x, curH = ImGui::GetWindowSize().y;
             if (std::abs(curW - g_menuW) > 5.0f || std::abs(curH - g_menuH) > 5.0f) {
                 g_menuW = curW; g_menuH = curH;
-                g_scale = std::clamp(curW / (560.0f * g_autoScale), 0.5f, 2.5f);
+                // Disconnected font scaling from window drag resizing!
             }
         }
 
