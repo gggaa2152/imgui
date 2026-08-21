@@ -520,10 +520,16 @@ std::string utf16_to_utf8(const std::wstring& wstr) {
 
 std::string ReadIl2CppString(uintptr_t strAddr) {
     if (!IsValidPtr(strAddr)) return "";
-    int len = SAFE_READ_INT(strAddr, 0x10);
-    if (len <= 0 || len > 100) return "";
+    int len = 0;
+    if (!SafeReadMemory(strAddr + 0x10, &len, sizeof(int))) return "";
+    if (len <= 0 || len > 300) return "";
     std::wstring wstr;
-    for (int i = 0; i < len; i++) { wstr += (wchar_t)(SAFE_READ_INT(strAddr, 0x14 + i * 2) & 0xFFFF); }
+    wstr.reserve(len);
+    for (int i = 0; i < len; i++) {
+        uint16_t ch = 0;
+        if (!SafeReadMemory(strAddr + 0x14 + i * 2, &ch, sizeof(uint16_t))) break;
+        wstr += (wchar_t)ch;
+    }
     return utf16_to_utf8(wstr);
 }
 
@@ -3048,6 +3054,48 @@ ObjectPathFindingResult g_lastPathResult;
 
 static int g_search_max_depth = 12;
 
+static std::string SafeToLower(const std::string& str) {
+    std::string res = str;
+    for (size_t i = 0; i < res.size(); i++) {
+        unsigned char c = (unsigned char)res[i];
+        if (c >= 'A' && c <= 'Z') res[i] = (char)(c + 32);
+    }
+    return res;
+}
+
+static bool SmartStringMatch(const std::string& candidate, const std::string& target) {
+    if (target.empty()) return true;
+    if (candidate.empty()) return false;
+    
+    std::string c_low = SafeToLower(candidate);
+    std::string t_low = SafeToLower(target);
+    
+    // 1. 完全或子串包含 (如 "我是小红" 包含 "我是" 或 "红")
+    if (c_low.find(t_low) != std::string::npos) return true;
+    if (t_low.find(c_low) != std::string::npos && c_low.length() >= 2) return true;
+    
+    // 2. 任意单个字 / 中文字符模糊命中 (只要候选词包含目标词中的任何一个字)
+    size_t i = 0;
+    while (i < target.length()) {
+        unsigned char lead = (unsigned char)target[i];
+        size_t charLen = 1;
+        if (lead >= 0xF0) charLen = 4;
+        else if (lead >= 0xE0) charLen = 3;
+        else if (lead >= 0xC0) charLen = 2;
+        else charLen = 1;
+        
+        if (i + charLen <= target.length()) {
+            std::string singleChar = target.substr(i, charLen);
+            if (!singleChar.empty() && singleChar != " " && singleChar != "\t") {
+                std::string single_low = SafeToLower(singleChar);
+                if (c_low.find(single_low) != std::string::npos) return true;
+            }
+        }
+        i += charLen;
+    }
+    return false;
+}
+
 ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targetName, int maxDepth = 12) {
     ObjectPathFindingResult result;
     result.found = false;
@@ -3059,8 +3107,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     while (!target_raw.empty() && isspace((unsigned char)target_raw.front())) target_raw.erase(target_raw.begin());
     while (!target_raw.empty() && isspace((unsigned char)target_raw.back())) target_raw.pop_back();
 
-    std::string target_lower = target_raw;
-    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
+    std::string target_lower = SafeToLower(target_raw);
 
     // 数值解析 (支持 10进制、16进制)
     bool hasTargetInt = false;
@@ -3108,9 +3155,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     std::string rootClass = GetObjClassName(rootObj);
     if (rootClass.empty()) rootClass = "RootObject";
 
-    std::string root_lower = rootClass;
-    std::transform(root_lower.begin(), root_lower.end(), root_lower.begin(), ::tolower);
-    if (!target_lower.empty() && root_lower.find(target_lower) != std::string::npos) {
+    if (!target_raw.empty() && SmartStringMatch(rootClass, target_raw)) {
         FoundPath fp;
         fp.matchDesc = (const char*)u8"[起点类名匹配] " + rootClass;
         fp.targetInstance = rootObj;
@@ -3196,10 +3241,8 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     if (IsValidPtr(elem_ptr)) {
                         std::string elemClass = GetObjClassName(elem_ptr);
                         std::string elem_clean = CleanIl2CppTypeName(elemClass);
-                        std::string elem_lower = elemClass;
-                        std::transform(elem_lower.begin(), elem_lower.end(), elem_lower.begin(), ::tolower);
 
-                        bool classMatch = (!target_lower.empty() && !elem_lower.empty() && elem_lower.find(target_lower) != std::string::npos);
+                        bool classMatch = (!target_raw.empty() && SmartStringMatch(elemClass, target_raw));
 
                         char fbuf[64]; snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", elem_ptr, elem_clean.c_str());
                         std::vector<ObjectPathStep> nextPath = item.path;
@@ -3285,17 +3328,13 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                         if (!k_str.empty()) key_label = "[\"" + k_str + "\"]";
                     }
 
-                    std::string key_lower = key_label;
-                    std::transform(key_lower.begin(), key_lower.end(), key_lower.begin(), ::tolower);
-                    bool keyMatch = (!target_lower.empty() && key_lower.find(target_lower) != std::string::npos);
+                    bool keyMatch = (!target_raw.empty() && SmartStringMatch(key_label, target_raw));
                     bool valIntMatch = hasTargetInt && (val_int == targetIntVal || (int64_t)val_ptr == targetIntVal);
 
                     if (IsValidPtr(val_ptr)) {
                         std::string valClass = GetObjClassName(val_ptr);
                         std::string val_clean = CleanIl2CppTypeName(valClass);
-                        std::string val_lower = valClass;
-                        std::transform(val_lower.begin(), val_lower.end(), val_lower.begin(), ::tolower);
-                        bool classMatch = (!target_lower.empty() && !val_lower.empty() && val_lower.find(target_lower) != std::string::npos);
+                        bool classMatch = (!target_raw.empty() && SmartStringMatch(valClass, target_raw));
 
                         char fbuf[64]; snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", val_ptr, val_clean.c_str());
                         std::vector<ObjectPathStep> nextPath = item.path;
@@ -3336,7 +3375,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         }
 
         // ==========================================
-        // 4. 原生反射遍历类与全部父类字段 (带严格安全防护)
+        // 4. 原生反射遍历类与全部父类字段 (智能全量模糊字/词匹配)
         // ==========================================
         if (g_il2cpp_api.class_get_fields) {
             int p_depth = 0;
@@ -3408,22 +3447,13 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     bool classMatch = false;
                     bool isAnyMatch = false;
 
-                    if (target_lower.empty()) {
+                    if (target_raw.empty()) {
                         isAnyMatch = true;
                     } else {
-                        std::string field_lower = field_str;
-                        std::transform(field_lower.begin(), field_lower.end(), field_lower.begin(), ::tolower);
-                        if (field_lower.find(target_lower) != std::string::npos) fieldMatch = true;
-
-                        std::string type_lower = clean_type;
-                        std::transform(type_lower.begin(), type_lower.end(), type_lower.begin(), ::tolower);
-                        if (type_lower.find(target_lower) != std::string::npos) typeMatch = true;
-
-                        if (!str_content.empty()) {
-                            std::string str_lower = str_content;
-                            std::transform(str_lower.begin(), str_lower.end(), str_lower.begin(), ::tolower);
-                            if (str_lower.find(target_lower) != std::string::npos) stringValMatch = true;
-                        }
+                        // ★ 核心智能模糊匹配 (单字、多字、子串全量匹配)
+                        if (SmartStringMatch(field_str, target_raw)) fieldMatch = true;
+                        if (SmartStringMatch(clean_type, target_raw)) typeMatch = true;
+                        if (!str_content.empty() && SmartStringMatch(str_content, target_raw)) stringValMatch = true;
 
                         if (hasTargetInt) {
                             if (val32 == targetIntVal || (int64_t)rawVal == targetIntVal) intValMatch = true;
@@ -3441,10 +3471,8 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
 
                     if (isObjectRef) {
                         std::string childClass = GetObjClassName(child_ptr);
-                        std::string child_lower = childClass;
-                        std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
 
-                        if (!target_lower.empty() && !child_lower.empty() && child_lower.find(target_lower) != std::string::npos) {
+                        if (!target_raw.empty() && SmartStringMatch(childClass, target_raw)) {
                             classMatch = true;
                             isAnyMatch = true;
                         }
@@ -3458,11 +3486,11 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                             if (recordedPaths.find(sig) == recordedPaths.end()) {
                                 recordedPaths.insert(sig);
                                 FoundPath fp;
-                                if (intValMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + target_raw + "] " + field_str;
+                                if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值命中: \"" + str_content + "\"]";
+                                else if (intValMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + target_raw + "] " + field_str;
                                 else if (classMatch) fp.matchDesc = (const char*)u8"[类名匹配] " + (childClass.empty() ? clean_type : childClass);
                                 else if (fieldMatch) fp.matchDesc = (const char*)u8"[字段匹配] " + field_str + " (" + clean_type + ")";
                                 else if (typeMatch) fp.matchDesc = (const char*)u8"[类型匹配] " + clean_type;
-                                else if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值匹配: \"" + str_content + "\"]";
                                 else fp.matchDesc = (const char*)u8"[匹配成功] " + field_str;
 
                                 fp.targetInstance = child_ptr;
@@ -3494,10 +3522,10 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                             if (recordedPaths.find(sig) == recordedPaths.end()) {
                                 recordedPaths.insert(sig);
                                 FoundPath fp;
-                                if (intValMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + target_raw + "] " + field_str;
+                                if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值命中: \"" + str_content + "\"]";
+                                else if (intValMatch) fp.matchDesc = (const char*)u8"[数值/金币命中: " + target_raw + "] " + field_str;
                                 else if (fieldMatch) fp.matchDesc = (const char*)u8"[字段属性] " + field_str + " (" + (clean_type.empty() ? "value" : clean_type) + ")";
                                 else if (typeMatch) fp.matchDesc = (const char*)u8"[类型匹配] " + clean_type;
-                                else if (stringValMatch) fp.matchDesc = (const char*)u8"[文本值匹配: \"" + str_content + "\"]";
                                 else fp.matchDesc = (const char*)u8"[匹配成功] " + field_str;
 
                                 fp.targetInstance = item.obj + f_offset;
