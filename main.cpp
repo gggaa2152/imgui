@@ -3142,7 +3142,7 @@ struct ObjectPathFindingResult {
     std::vector<FoundPath> exploredChains; // 记录所有深度探索过的分支链条 (即使未搜到也全量呈现)
 };
 
-static static std::atomic<bool> g_is_searching_path{false};
+static std::atomic<bool> g_is_searching_path{false};
 static std::atomic<int> g_search_progress_nodes{0};
 ObjectPathFindingResult g_lastPathResult;
 
@@ -4300,6 +4300,7 @@ static std::vector<std::string> GetPinyinCandidates(const std::string& py) {
 // 此处提前声明以便本段 IME 代码在定义之前即可引用，避免 "undeclared identifier" 编译错误。
 extern JavaVM* g_jvm;
 extern jobject  g_context;
+extern jobject  g_view_obj;
 
 static jobject     g_ime_edittext = nullptr;
 static bool        g_ime_open = false;
