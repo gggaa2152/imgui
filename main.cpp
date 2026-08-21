@@ -2916,7 +2916,6 @@ static uintptr_t GetSingletonInstance(const char* className) {
     
     if (!target_klass) return 0;
     
-    
     void* iter = nullptr;
     while (void* field = g_il2cpp_api.class_get_fields(target_klass, &iter)) {
         uint32_t flags = g_il2cpp_api.field_get_flags(field);
@@ -2925,17 +2924,11 @@ static uintptr_t GetSingletonInstance(const char* className) {
             void* f_type = g_il2cpp_api.field_get_type(field);
             const char* t_name = g_il2cpp_api.type_get_name(f_type);
             
-            if (f_name && (strcmp(f_name, "instance") == 0 || strcmp(f_name, "Instance") == 0 || 
-                           strcmp(f_name, "Instance_") == 0 || strcmp(f_name, "_instance") == 0 || 
-                           strcmp(f_name, "m_Instance") == 0 || strcmp(f_name, "s_Instance") == 0 ||
-                           (t_name && strcmp(t_name, className) == 0))) {
-                
-                uintptr_t inst_ptr = 0;
-                g_il2cpp_api.field_static_get_value(field, &inst_ptr);
-                if (inst_ptr != 0) {
-                    return inst_ptr;
-                }
-            }
+            
+        }
+    }
+    return 0;
+}
         }
     }
     return 0;
