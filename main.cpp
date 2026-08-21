@@ -2966,10 +2966,12 @@ static bool IsValidIl2CppClass(void* klass) {
 
     // 动态验证泛型/实例化/数组类等运行时动态生成的类 (List<T>, Dictionary<K,V>, T[] 等).
     // 安全前提: 必须先确认 klass 自身内存可读, 否则 class_get_name 对野指针解引用会让游戏闪退.
+    // 关键: class_get_name 必须用 SAFE_CALL 包裹 —— 外来垃圾 klass 若落在合法内存区且对齐,
+    // 其内部解引用 name 字段会触发 SIGSEGV, 必须由崩溃守卫捕获并回退为无效类, 而非真正崩溃.
     if (g_il2cpp_api.init() && g_il2cpp_api.class_get_name) {
         uintptr_t probe = 0;
         if (!SafeReadMemory((uintptr_t)klass, &probe, sizeof(probe))) return false;
-        const char* c_name = g_il2cpp_api.class_get_name(klass);
+        const char* c_name = SAFE_CALL(g_il2cpp_api.class_get_name(klass), (const char*)nullptr);
         std::string nm = SafeReadCString(c_name, 256);
         // 类名识别启发式(放宽版): 只要串中存在 >= 4 个连续可打印 ASCII 字符的核心段即视为有效类名.
         // 这能覆盖元数据字符串堆奇数偏移导致的前导垃圾(?, ???, ??? 等)以及更长的泛型/数组类名
@@ -3043,7 +3045,7 @@ static uintptr_t GetSingletonInstance(const char* className) {
     // 遍历当前类以及父类 (支持 MonoSingleton<T>, Singleton<T> 等通用单例基类)
     for (void* cur_k = target_klass; cur_k != nullptr; cur_k = g_il2cpp_api.class_get_parent ? g_il2cpp_api.class_get_parent(cur_k) : nullptr) {
         void* iter = nullptr;
-        while (void* field = g_il2cpp_api.class_get_fields(cur_k, &iter)) {
+        while (void* field = (g_il2cpp_api.class_get_fields ? SAFE_CALL(g_il2cpp_api.class_get_fields(cur_k, &iter), (void*)nullptr) : nullptr)) {
             uint32_t flags = g_il2cpp_api.field_get_flags(field);
             if ((flags & 0x0010) != 0) { // FIELD_ATTRIBUTE_STATIC
                 const char* f_name = g_il2cpp_api.field_get_name(field);
@@ -3237,8 +3239,8 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         if (!IsValidPtr(ptr)) return "";
         void* klass_ptr = nullptr;
         if (!SafeReadMemory(ptr, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) return "";
-        const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : nullptr;
-        const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : nullptr;
+        const char* c_name = g_il2cpp_api.class_get_name ? SAFE_CALL(g_il2cpp_api.class_get_name(klass_ptr), (const char*)nullptr) : nullptr;
+        const char* c_ns = g_il2cpp_api.class_get_namespace ? SAFE_CALL(g_il2cpp_api.class_get_namespace(klass_ptr), (const char*)nullptr) : nullptr;
         std::string name_str = SafeReadCString(c_name);
         std::string ns_str = SafeReadCString(c_ns);
         return (!ns_str.empty()) ? (ns_str + "." + name_str) : name_str;
@@ -3492,7 +3494,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                 void* iter = nullptr;
                 int field_count = 0;
                 while (field_count < 8000 && (field_count++, true)) {
-                    void* field = g_il2cpp_api.class_get_fields(cur_klass, &iter);
+                    void* field = (g_il2cpp_api.class_get_fields ? SAFE_CALL(g_il2cpp_api.class_get_fields(cur_klass, &iter), (void*)nullptr) : nullptr);
                     if (!field) break;
 
                     uint32_t flags = g_il2cpp_api.field_get_flags ? g_il2cpp_api.field_get_flags(field) : 0;
@@ -3661,94 +3663,77 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         }
 
         // ==========================================
-        // 5. 穿透所有未映射物理内存槽位 (+0x10 ~ +0x1E0) 全量深钻 (保证穿透 +0x10 addr2 等非反射主线指针)
         // ==========================================
-        for (size_t raw_off = 0x00; raw_off <= 0x2E0; raw_off += sizeof(uintptr_t)) {
-            if (exploredOffsets.find(raw_off) != exploredOffsets.end()) continue;
+        // 5. 物理内存槽位安全命中检测
+        //    仅当用户输入了"寻址终点"(target_raw 非空)时扫描, 且只做字符串/数值命中记录:
+        //    不再对槽位调用任何 il2cpp API (class_get_name / class_get_fields), 也绝不再把
+        //    "看起来像指针"的槽位值当对象压入 BFS 队列深钻 —— 对象内存里绝大多数 8 字节值
+        //    并非 IL2CPP 对象, 盲目解引用会让游戏 SIGSEGV 闪退. 真实对象树深钻完全交给第 1~4
+        //    段(数组 / List / Dictionary / 原生字段反射), 它们只处理经 IsValidIl2CppClass 验证的
+        //    真实 klass. 无 target 的"全量"模式由第 1~4 段全量枚举真实字段, 同样安全.
+        // ==========================================
+        if (!target_raw.empty()) {
+            for (size_t raw_off = 0x00; raw_off <= 0x2E0; raw_off += sizeof(uintptr_t)) {
+                if (exploredOffsets.find(raw_off) != exploredOffsets.end()) continue;
 
-            uintptr_t r_ptr = 0;
-            SafeReadMemory(item.obj + raw_off, &r_ptr, sizeof(uintptr_t));
-            int32_t r_val32 = 0;
-            SafeReadMemory(item.obj + raw_off, &r_val32, sizeof(int32_t));
+                uintptr_t r_ptr = 0;
+                SafeReadMemory(item.obj + raw_off, &r_ptr, sizeof(uintptr_t));
+                int32_t r_val32 = 0;
+                SafeReadMemory(item.obj + raw_off, &r_val32, sizeof(int32_t));
 
-            std::string slot_name = "Slot[+0x" + std::to_string(raw_off) + "]";
-            std::string raw_str = "";
-            bool strMatch = false;
+                std::string slot_name = "Slot[+0x" + std::to_string(raw_off) + "]";
 
-            if (IsValidPtr(r_ptr)) {
-                raw_str = ReadIl2CppString(r_ptr);
-                if (!raw_str.empty() && !target_raw.empty() && SmartStringMatch(raw_str, target_raw)) {
-                    strMatch = true;
+                // 字符串命中: 仅读取字符串内容(ReadIl2CppString 内部 SafeReadMemory 容错), 不调用任何 il2cpp API.
+                if (IsValidPtr(r_ptr)) {
+                    std::string raw_str = ReadIl2CppString(r_ptr);
+                    if (!raw_str.empty() && SmartStringMatch(raw_str, target_raw)) {
+                        std::vector<ObjectPathStep> nextPath = item.path;
+                        char fbuf[96]; snprintf(fbuf, sizeof(fbuf), "\"%s\"", raw_str.c_str());
+                        nextPath.push_back({ item.obj, item.className, slot_name, "String", "String", raw_off, r_ptr, "\"" + raw_str + "\"", false, r_ptr, fbuf });
+                        std::string sig = "";
+                        for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
+                        if (recordedPaths.find(sig) == recordedPaths.end()) {
+                            recordedPaths.insert(sig);
+                            FoundPath fp;
+                            fp.matchDesc = (const char*)u8"[内存物理文本命中: \"" + raw_str + "\"] " + slot_name;
+                            fp.targetInstance = r_ptr;
+                            fp.steps = nextPath;
+                            fp.fieldName = slot_name;
+                            fp.cleanType = "String";
+                            fp.offset = raw_off;
+                            fp.fieldAddress = item.obj + raw_off;
+                            fp.formattedVal = fbuf;
+                            fp.isIntField = false;
+                            result.paths.push_back(fp);
+                            result.found = true;
+                        }
+                    }
                 }
-            }
 
-            bool intMatch = hasTargetInt && (r_val32 == targetIntVal || (int64_t)r_ptr == targetIntVal);
-
-            if (IsValidPtr(r_ptr)) {
-                std::string childClass = GetObjClassName(r_ptr);
-                std::string cleanType = CleanIl2CppTypeName(childClass);
-                bool classMatch = (!target_raw.empty() && !childClass.empty() && SmartStringMatch(childClass, target_raw));
-
-                char fbuf[96];
-                if (!raw_str.empty()) snprintf(fbuf, sizeof(fbuf), "\"%s\"", raw_str.c_str());
-                else snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", r_ptr, cleanType.c_str());
-
-                std::vector<ObjectPathStep> nextPath = item.path;
-                nextPath.push_back({ item.obj, item.className, slot_name, raw_str.empty() ? childClass : "String", raw_str.empty() ? cleanType : "String", raw_off, r_ptr, raw_str.empty() ? (childClass.empty() ? cleanType : childClass) : ("\"" + raw_str + "\""), false, r_ptr, fbuf });
-
-                if (strMatch || intMatch || classMatch) {
+                // 数值命中: 仅比较本地读取的 32 位值, 不调用任何 il2cpp API.
+                bool intMatch = hasTargetInt && (r_val32 == targetIntVal || (int64_t)r_ptr == targetIntVal);
+                if (intMatch) {
+                    std::vector<ObjectPathStep> nextPath = item.path;
+                    char fbuf[32]; snprintf(fbuf, sizeof(fbuf), "%d", r_val32);
+                    nextPath.push_back({ item.obj, item.className, slot_name, "Int32", "Int32", raw_off, item.obj + raw_off, "Int32", true, (uintptr_t)r_val32, fbuf });
                     std::string sig = "";
                     for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
                     if (recordedPaths.find(sig) == recordedPaths.end()) {
                         recordedPaths.insert(sig);
                         FoundPath fp;
-                        if (strMatch) fp.matchDesc = (const char*)u8"[内存物理文本命中: \"" + raw_str + "\"] " + slot_name;
-                        else if (intMatch) fp.matchDesc = (const char*)u8"[内存物理数值命中: " + target_raw + "] " + slot_name;
-                        else fp.matchDesc = (const char*)u8"[未反射类指针匹配] " + cleanType + " " + slot_name;
-
-                        fp.targetInstance = r_ptr;
+                        fp.matchDesc = (const char*)u8"[内存物理数值命中: " + target_raw + "] " + slot_name;
+                        fp.targetInstance = item.obj + raw_off;
                         fp.steps = nextPath;
                         fp.fieldName = slot_name;
-                        fp.cleanType = raw_str.empty() ? cleanType : "String";
+                        fp.cleanType = "Int32";
                         fp.offset = raw_off;
                         fp.fieldAddress = item.obj + raw_off;
                         fp.formattedVal = fbuf;
                         fp.intVal = r_val32;
-                        fp.isIntField = intMatch;
-
+                        fp.isIntField = true;
                         result.paths.push_back(fp);
                         result.found = true;
                     }
-                }
-
-                // 将未反射的指针槽位（如 +0x10）也加入 BFS 队列深钻！
-                if (!childClass.empty() && raw_str.empty() && visited.find(r_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
-                    visited.insert(r_ptr);
-                    queue.push_back({ r_ptr, childClass, nextPath, item.depth + 1 });
-                }
-            } else if (intMatch) {
-                std::vector<ObjectPathStep> nextPath = item.path;
-                char fbuf[32]; snprintf(fbuf, sizeof(fbuf), "%d", r_val32);
-                nextPath.push_back({ item.obj, item.className, slot_name, "Int32", "Int32", raw_off, item.obj + raw_off, "Int32", true, (uintptr_t)r_val32, fbuf });
-
-                std::string sig = "";
-                for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
-                if (recordedPaths.find(sig) == recordedPaths.end()) {
-                    recordedPaths.insert(sig);
-                    FoundPath fp;
-                    fp.matchDesc = (const char*)u8"[内存物理数值命中: " + target_raw + "] " + slot_name;
-                    fp.targetInstance = item.obj + raw_off;
-                    fp.steps = nextPath;
-                    fp.fieldName = slot_name;
-                    fp.cleanType = "Int32";
-                    fp.offset = raw_off;
-                    fp.fieldAddress = item.obj + raw_off;
-                    fp.formattedVal = fbuf;
-                    fp.intVal = r_val32;
-                    fp.isIntField = true;
-
-                    result.paths.push_back(fp);
-                    result.found = true;
                 }
             }
         }
@@ -3831,7 +3816,7 @@ ClassInspectInfo InspectClassByFullName(const std::string& targetName) {
 
                 if (g_il2cpp_api.class_get_fields && g_il2cpp_api.field_get_name && g_il2cpp_api.field_get_offset) {
                     void* iter = nullptr;
-                    while (void* field = g_il2cpp_api.class_get_fields(klass, &iter)) {
+                    while (void* field = (g_il2cpp_api.class_get_fields ? SAFE_CALL(g_il2cpp_api.class_get_fields(klass, &iter), (void*)nullptr) : nullptr)) {
                         const char* f_name = g_il2cpp_api.field_get_name(field);
                         size_t f_offset = g_il2cpp_api.field_get_offset(field);
                         void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
@@ -4669,7 +4654,7 @@ LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
 
     if (g_il2cpp_api.class_get_fields) {
         void* iter = nullptr;
-        while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
+        while (void* field = (g_il2cpp_api.class_get_fields ? SAFE_CALL(g_il2cpp_api.class_get_fields(klass_ptr, &iter), (void*)nullptr) : nullptr)) {
             const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
             size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
             void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
@@ -4701,7 +4686,7 @@ LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
                     fInfo.isPointer = true;
                     void* child_klass = nullptr;
                     if (SafeReadMemory(fInfo.rawValue, &child_klass, sizeof(void*)) && IsValidIl2CppClass(child_klass)) {
-                        const char* child_cname = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(child_klass) : "";
+                        const char* child_cname = g_il2cpp_api.class_get_name ? SAFE_CALL(g_il2cpp_api.class_get_name(child_klass), "") : "";
                         const char* child_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(child_klass) : "";
                         fInfo.childClassName = (child_ns && child_ns[0]) ? (std::string(child_ns) + "." + child_cname) : std::string(child_cname);
                     }
@@ -4786,7 +4771,7 @@ void DoKeywordSearch(std::string kw) {
 
             if (g_il2cpp_api.class_get_fields && g_il2cpp_api.field_get_name && g_il2cpp_api.field_get_offset) {
                 void* iter = nullptr;
-                while (void* field = g_il2cpp_api.class_get_fields(klass, &iter)) {
+                while (void* field = (g_il2cpp_api.class_get_fields ? SAFE_CALL(g_il2cpp_api.class_get_fields(klass, &iter), (void*)nullptr) : nullptr)) {
                     const char* f_name = g_il2cpp_api.field_get_name(field);
                     std::string f_str = f_name ? f_name : "";
                     std::string f_lower = f_str;
@@ -5013,8 +4998,8 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
 
     std::string fullClassName = g_inspect_breadcrumbs.back().className;
     if (klass_ptr && IsValidIl2CppClass(klass_ptr)) {
-        const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : nullptr;
-        const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : nullptr;
+        const char* c_name = g_il2cpp_api.class_get_name ? SAFE_CALL(g_il2cpp_api.class_get_name(klass_ptr), (const char*)nullptr) : nullptr;
+        const char* c_ns = g_il2cpp_api.class_get_namespace ? SAFE_CALL(g_il2cpp_api.class_get_namespace(klass_ptr), (const char*)nullptr) : nullptr;
         std::string s_name = SafeReadCString(c_name);
         std::string s_ns = SafeReadCString(c_ns);
         if (!s_name.empty()) {
@@ -5107,7 +5092,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
             void* iter = nullptr;
             int f_count = 0;
             while (f_count < 8000 && (f_count++, true)) {
-                void* field = g_il2cpp_api.class_get_fields(cur_klass, &iter);
+                void* field = (g_il2cpp_api.class_get_fields ? SAFE_CALL(g_il2cpp_api.class_get_fields(cur_klass, &iter), (void*)nullptr) : nullptr);
                 if (!field) break;
 
                 uint32_t flags = g_il2cpp_api.field_get_flags ? g_il2cpp_api.field_get_flags(field) : 0;
@@ -5326,7 +5311,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
             SafeReadMemory(currentObj + slot_off, &slot_ptr, sizeof(uintptr_t));
             std::string full_kname = fullClassName;
             if (IsValidIl2CppClass((void*)slot_ptr)) {
-                const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name((void*)slot_ptr) : nullptr;
+                const char* cn = g_il2cpp_api.class_get_name ? SAFE_CALL(g_il2cpp_api.class_get_name((void*)slot_ptr), (const char*)nullptr) : nullptr;
                 const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace((void*)slot_ptr) : nullptr;
                 std::string s_name = StripLeadingGarbage(SafeReadCString(cn));
                 std::string s_ns = StripLeadingGarbage(SafeReadCString(cns));
