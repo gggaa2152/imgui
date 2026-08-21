@@ -4458,6 +4458,24 @@ void PushInspectObject(const std::string& name, const std::string& cls, uintptr_
     g_inspect_breadcrumbs.push_back({ name, cls, addr });
 }
 
+struct InspectorFieldRow {
+    size_t offset;
+    std::string fieldName;
+    std::string typeName;
+    std::string cleanType;
+    std::string baseClassName;
+    bool isBaseClass;
+    bool isPropBacking;
+    uintptr_t rawVal;
+    int32_t val32;
+    int64_t val64;
+    std::string liveVal;
+    bool isInt;
+    bool isObjectPtr;
+    bool isNull;
+    std::string childClassName;
+};
+
 void DrawObjectInspectorContent(float avail_x, float avail_y) {
     float btn_w = 60.0f * g_autoScale;
 
@@ -4610,29 +4628,10 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     std::string filter_lower = g_inspector_filter;
     std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
 
-    // 3 列表格 (字段/属性 | 值 | 类型)
-    float col0_w = avail_x * 0.40f;
-    float col1_w = avail_x * 0.38f;
-    float col2_w = avail_x * 0.22f;
+    // 收集当前对象的所有字段数据以进行【按偏移严格升序排序】
+    std::vector<InspectorFieldRow> fieldRows;
 
-    ImGui::Columns(3, "ObjectInspectorColumns", true);
-    ImGui::SetColumnWidth(0, col0_w);
-    ImGui::SetColumnWidth(1, col1_w);
-    ImGui::SetColumnWidth(2, col2_w);
-
-    // 表头 (与截图严格对齐)
-    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"字段/属性");
-    ImGui::NextColumn();
-    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"值");
-    ImGui::NextColumn();
-    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"类型");
-    ImGui::NextColumn();
-    ImGui::Separator();
-
-    std::string dump_buffer = "=== Dump Object: " + fullClassName + " (0x" + std::to_string(currentObj) + ") ===\n";
-    int row_idx = 0;
-
-    // A. 如果当前检查的是数组 (Array / T[])，直接在表格中展开数组元素！
+    // A. 如果是数组 (Array / T[])，展开元素
     bool isArray = (fullClassName.find("[]") != std::string::npos || fullClassName.find("Array") != std::string::npos);
     if (isArray) {
         int arr_len = SAFE_READ_INT(currentObj, 0x18);
@@ -4648,12 +4647,14 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 std::string elem_type = "Object";
                 std::string live_val = "";
                 bool isObject = false;
+                std::string child_cls = "";
 
                 if (IsValidPtr(elem_ptr)) {
                     void* c_klass = nullptr;
                     if (SafeReadMemory(elem_ptr, &c_klass, sizeof(void*)) && IsValidIl2CppClass(c_klass)) {
                         const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
                         elem_type = cn ? CleanIl2CppTypeName(cn) : "Object";
+                        child_cls = elem_type;
                     }
                     char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", elem_ptr, elem_type.c_str());
                     live_val = buf;
@@ -4664,50 +4665,12 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                     elem_type = "Int32";
                 }
 
-                if (!filter_lower.empty()) {
-                    std::string f_low = idx_name; std::transform(f_low.begin(), f_low.end(), f_low.begin(), ::tolower);
-                    std::string v_low = live_val; std::transform(v_low.begin(), v_low.end(), v_low.begin(), ::tolower);
-                    if (f_low.find(filter_lower) == std::string::npos && v_low.find(filter_lower) == std::string::npos) continue;
-                }
-
-                dump_buffer += idx_name + " [+0x" + std::to_string(elem_off) + "] = " + live_val + "\n";
-
-                // 列 1: 字段/属性
-                ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), "%s", idx_name.c_str());
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "[+0x%lx]", elem_off);
-                ImGui::NextColumn();
-
-                // 列 2: 值
-                if (isObject) {
-                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "%s", live_val.c_str());
-                    ImGui::SameLine();
-                    char drill_btn[64]; snprintf(drill_btn, sizeof(drill_btn), (const char*)u8"下钻 >##arr_%d", row_idx);
-                    if (ImGui::Button(drill_btn)) {
-                        PushInspectObject(idx_name, elem_type, elem_ptr);
-                    }
-                } else {
-                    ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", live_val.c_str());
-                    ImGui::SameLine();
-                    char apply_btn[64]; snprintf(apply_btn, sizeof(apply_btn), (const char*)u8"★ 设为 pi_money##arr_%d", row_idx);
-                    if (ImGui::Button(apply_btn)) {
-                        g_off.pi_money = elem_off;
-                        SaveConfig();
-                        AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx 并保存!", elem_off);
-                    }
-                }
-                ImGui::NextColumn();
-
-                // 列 3: 类型
-                ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", elem_type.c_str());
-                ImGui::NextColumn();
-
-                row_idx++;
+                fieldRows.push_back({ elem_off, idx_name, elem_type, elem_type, "", false, false, elem_ptr, elem_val32, (int64_t)elem_val32, live_val, !isObject, isObject, false, child_cls });
             }
         }
     }
 
-    // B. 全继承链字段反射 (遍历当前类 + 所有父类 Base Classes)
+    // B. 全继承链字段收集 (包含当前类与所有父类)
     if (g_il2cpp_api.class_get_fields) {
         for (void* cur_klass = klass_ptr; cur_klass != nullptr; cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
             const char* cur_cls_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(cur_klass) : "";
@@ -4803,54 +4766,86 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                     }
                 }
 
-                dump_buffer += field_str + " [+0x" + std::to_string(f_offset) + "] = " + live_val + " (" + clean_type + ")\n";
-
-                // 列 1: 字段/属性
-                if (isBaseClass) {
-                    ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 0.8f), "[%s] ", cur_cls_name ? cur_cls_name : "Base");
-                    ImGui::SameLine();
-                }
-                if (isPropBacking) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.4f, 1.0f), "%s", field_str.c_str());
-                } else {
-                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.95f, 1.0f), "%s", field_str.c_str());
-                }
-                ImGui::NextColumn();
-
-                // 列 2: 值 (支持一键下钻深入 + 设为 pi_money)
-                if (isObjectPtr && IsValidPtr(rawVal)) {
-                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "%s", live_val.c_str());
-                    ImGui::SameLine();
-                    char drill_btn[64]; snprintf(drill_btn, sizeof(drill_btn), (const char*)u8"下钻 >##drill_%d", row_idx);
-                    if (ImGui::Button(drill_btn)) {
-                        PushInspectObject(field_str, childClassName.empty() ? clean_type : childClassName, rawVal);
-                    }
-                } else {
-                    if (live_val == "Null" || live_val == (const char*)u8"空字段") {
-                        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f), "%s", live_val.c_str());
-                    } else {
-                        ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", live_val.c_str());
-                    }
-
-                    if (isInt) {
-                        ImGui::SameLine();
-                        char apply_btn[64]; snprintf(apply_btn, sizeof(apply_btn), (const char*)u8"★ 设为 pi_money##ins_%d", row_idx);
-                        if (ImGui::Button(apply_btn)) {
-                            g_off.pi_money = f_offset;
-                            SaveConfig();
-                            AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx 并保存!", f_offset);
-                        }
-                    }
-                }
-                ImGui::NextColumn();
-
-                // 列 3: 类型
-                ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", clean_type.c_str());
-                ImGui::NextColumn();
-
-                row_idx++;
+                fieldRows.push_back({ f_offset, field_str, type_str, clean_type, cur_cls_name ? cur_cls_name : "", isBaseClass, isPropBacking, rawVal, val32, val64, live_val, isInt, isObjectPtr, isNull, childClassName });
             }
         }
+    }
+
+    // ★ 核心排序：按字段内存物理偏移从上到下严格升序排列 (+0x00, +0x08, +0x10, +0x18, +0x20...)
+    std::sort(fieldRows.begin(), fieldRows.end(), [](const InspectorFieldRow& a, const InspectorFieldRow& b) {
+        return a.offset < b.offset;
+    });
+
+    // 3 列表格 (字段/属性 | 值 | 类型)
+    float col0_w = avail_x * 0.40f;
+    float col1_w = avail_x * 0.38f;
+    float col2_w = avail_x * 0.22f;
+
+    ImGui::Columns(3, "ObjectInspectorColumns", true);
+    ImGui::SetColumnWidth(0, col0_w);
+    ImGui::SetColumnWidth(1, col1_w);
+    ImGui::SetColumnWidth(2, col2_w);
+
+    // 表头 (与截图严格对齐)
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"字段/属性");
+    ImGui::NextColumn();
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"值");
+    ImGui::NextColumn();
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"类型");
+    ImGui::NextColumn();
+    ImGui::Separator();
+
+    std::string dump_buffer = "=== Dump Object: " + fullClassName + " (0x" + std::to_string(currentObj) + ") ===\n";
+
+    for (size_t r = 0; r < fieldRows.size(); r++) {
+        const auto& row = fieldRows[r];
+
+        dump_buffer += row.fieldName + " [+0x" + std::to_string(row.offset) + "] = " + row.liveVal + " (" + row.cleanType + ")\n";
+
+        // 列 1: 字段/属性 (带偏移和父类标签)
+        if (row.isBaseClass && !row.baseClassName.empty()) {
+            ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 0.8f), "[%s] ", row.baseClassName.c_str());
+            ImGui::SameLine();
+        }
+        if (row.isPropBacking) {
+            ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.4f, 1.0f), "%s", row.fieldName.c_str());
+        } else {
+            ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.95f, 1.0f), "%s", row.fieldName.c_str());
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 0.8f), "[+0x%lx]", row.offset);
+        ImGui::NextColumn();
+
+        // 列 2: 值 (支持一键下钻深入 + 设为 pi_money)
+        if (row.isObjectPtr && IsValidPtr(row.rawVal)) {
+            ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), "%s", row.liveVal.c_str());
+            ImGui::SameLine();
+            char drill_btn[64]; snprintf(drill_btn, sizeof(drill_btn), (const char*)u8"下钻 >##drill_%zu", r);
+            if (ImGui::Button(drill_btn)) {
+                PushInspectObject(row.fieldName, row.childClassName.empty() ? row.cleanType : row.childClassName, row.rawVal);
+            }
+        } else {
+            if (row.liveVal == "Null" || row.liveVal == (const char*)u8"空字段") {
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f), "%s", row.liveVal.c_str());
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", row.liveVal.c_str());
+            }
+
+            if (row.isInt) {
+                ImGui::SameLine();
+                char apply_btn[64]; snprintf(apply_btn, sizeof(apply_btn), (const char*)u8"★ 设为 pi_money##ins_%zu", r);
+                if (ImGui::Button(apply_btn)) {
+                    g_off.pi_money = row.offset;
+                    SaveConfig();
+                    AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx 并保存!", row.offset);
+                }
+            }
+        }
+        ImGui::NextColumn();
+
+        // 列 3: 类型
+        ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", row.cleanType.c_str());
+        ImGui::NextColumn();
     }
 
     ImGui::Columns(1);
