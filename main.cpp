@@ -282,6 +282,7 @@ float g_float_pd_x = -1.0f, g_float_pd_y = -1.0f;
 float g_float_opp_x = -1.0f, g_float_opp_y = -1.0f;
 float g_float_hex_x = -1.0f, g_float_hex_y = -1.0f;
 static bool g_apply_saved_float_pos = false;
+static std::unordered_set<std::string> s_pos_initialized;
 
 std::atomic<bool> g_hero_images_ready{false};
 int g_hero_image_count = 0;
