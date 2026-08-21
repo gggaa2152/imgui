@@ -3198,76 +3198,7 @@ void DrawVirtualKeyboard() {
     ImGui::PopStyleColor();
 }
 
-void DrawPathTraceFloatWindow() {
-    if (!g_win_path_trace) return;
-    if (!g_is_in_match.load(std::memory_order_relaxed)) return;
 
-    if (!BeginContentFloatWindow("##PathTraceFloat", &g_win_path_trace, &g_float_pt_x, &g_float_pt_y, g_alpha_pt)) return;
-
-    float sc = g_autoScale * g_path_trace_scale;
-    ImGui::SetWindowFontScale(sc);
-
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 mn = ImGui::GetWindowPos();
-    ImVec2 sz = ImGui::GetWindowSize();
-    ImVec2 mx(mn.x + sz.x, mn.y + sz.y);
-    dl->AddRectFilled(mn, mx, IM_COL32(12, 16, 26, 235), 8.0f * sc);
-    dl->AddRect(mn, mx, IM_COL32(60, 140, 240, 190), 8.0f * sc, 0, 1.5f);
-
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🔍 寻址起点(单例类):");
-    ImGui::SetNextItemWidth(250.0f * sc);
-    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"⌨️ 键盘##1")) { g_vkbd_target = g_root_class_input; g_vkbd_target_size = sizeof(g_root_class_input); g_show_vkbd = true; }
-
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🎯 寻址终点(目标类):");
-    ImGui::SetNextItemWidth(250.0f * sc);
-    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"⌨️ 键盘##2")) { g_vkbd_target = g_class_search_input; g_vkbd_target_size = sizeof(g_class_search_input); g_show_vkbd = true; }
-
-    ImGui::Spacing();
-    
-    if (ImGui::Button((const char*)u8"🚀 开始自动寻址！", ImVec2(300 * sc, 35 * sc))) {
-        uintptr_t rootObj = g_dbg_addr1; // Default to hero entity
-        if (strlen(g_root_class_input) > 0) {
-            uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
-            if (singletonObj != 0) {
-                rootObj = singletonObj;
-                AddActionLog((const char*)u8"-> [单例解析] 成功获取 %s 单例实例: 0x%lx", g_root_class_input, singletonObj);
-            } else {
-                AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例，回退到英雄实体起步。", g_root_class_input);
-            }
-        }
-        g_lastPathResult = AutoFindPathToClass(rootObj, g_class_search_input, 8); // depth 8
-    }
-
-    if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"未在当前内存搜索深度(6)内找到类: %s", g_class_search_input);
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
-    }
-
-    if (g_lastPathResult.found) {
-        if (g_lastPathResult.steps.empty()) {
-            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即根单例自身 (0x%lx) [0级直达]", g_lastPathResult.targetInstance);
-        } else {
-            for (size_t s = 0; s < g_lastPathResult.steps.size(); s++) {
-                const auto& st = g_lastPathResult.steps[s];
-                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[%zu] %s", s + 1, st.fromClass.c_str());
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "──[+0x%lx: %s]──>", st.offset, st.fieldName.c_str());
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
-            }
-
-            std::string off_summary = (const char*)u8"💡 偏移链: g_dbg_addr1";
-            for (const auto& st : g_lastPathResult.steps) {
-                char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
-                off_summary += obuf;
-            }
-            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
-            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"🎯 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
-        }
-    }
-
-    EndContentFloatWindow("pt_grip", &g_path_trace_scale);
-}
 
 float g_anim[30] = {0.0f};
 
@@ -3760,222 +3691,65 @@ void DrawLiveInstanceTree(const char* label, uintptr_t address, float scale) {
 }
 
 void DrawSymbolResolverUI() {
-    float scale = g_autoScale * g_scale;
+    float sc = g_autoScale * g_scale;
+    ImGui::SetWindowFontScale(sc);
 
-    ImGui::TextColored(ImVec4(0.3f, 0.85f, 1.0f, 1.0f), (const char*)u8"IL2CPP 运行时反射与实例层级解析引擎 | 基址: 0x%lx", g_il2cppTrueBase);
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🔍 寻址起点(单例类):");
+    ImGui::SetNextItemWidth(250.0f * sc);
+    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"⌨️ 键盘##1")) { g_vkbd_target = g_root_class_input; g_vkbd_target_size = sizeof(g_root_class_input); g_show_vkbd = true; }
+
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🎯 寻址终点(类名或字段名):");
+    ImGui::SetNextItemWidth(250.0f * sc);
+    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"⌨️ 键盘##2")) { g_vkbd_target = g_class_search_input; g_vkbd_target_size = sizeof(g_class_search_input); g_show_vkbd = true; }
+
+    ImGui::Spacing();
     
-    // 子标签切换
-    if (ImGui::Button(g_resolver_subtab == 0 ? (const char*)u8"● 局内实例寻址链路深度反查" : (const char*)u8"○ 局内实例寻址链路深度反查", ImVec2(220 * scale, 30 * scale))) g_resolver_subtab = 0;
-    ImGui::SameLine();
-    if (ImGui::Button(g_resolver_subtab == 1 ? (const char*)u8"● 全局元数据关键字搜索" : (const char*)u8"○ 全局元数据关键字搜索", ImVec2(190 * scale, 30 * scale))) g_resolver_subtab = 1;
-    ImGui::SameLine();
-    if (ImGui::Button(g_resolver_subtab == 2 ? (const char*)u8"● 任意内存指针实时探查" : (const char*)u8"○ 任意内存指针实时探查", ImVec2(190 * scale, 30 * scale))) g_resolver_subtab = 2;
-
-    DrawGlassSeparator();
-
-    if (g_resolver_subtab == 0) {
-        ImGui::TextColored(UITheme().primary, (const char*)u8"当前对局所有活动实例的真实 C# 类名与成员字段结构树：");
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"（点击展开查看类的所有变量名字、数据类型与配置项关联）");
-
-        if (ImGui::Button((const char*)u8"📋 导出全部实例字段结构到操作日志", ImVec2(260 * scale, 32 * scale))) {
-            AddActionLog((const char*)u8"==================== 实时实例反射结构清单 ====================");
-            auto DumpToLog = [](const LiveInstanceDump& d) {
-                if (d.valid) {
-                    AddActionLog((const char*)u8"[%s] (0x%lx) -> Class: %s (字段数: %zu)", d.label.c_str(), d.address, d.fullClassName.c_str(), d.fields.size());
-                    for (const auto& f : d.fields) {
-                        if (f.matchesKnown) {
-                            AddActionLog((const char*)u8"   +0x%lx: %s (%s) %s", f.offset, f.name.c_str(), f.typeName.c_str(), f.matchDesc.c_str());
-                        }
-                    }
-                }
-            };
-            DumpToLog(InspectLiveInstance("1. 单例实例 (g_dbg_addr1)", g_dbg_addr1));
-            DumpToLog(InspectLiveInstance("2. 上下文指针 (addr2)", g_dbg_addr2));
-            DumpToLog(InspectLiveInstance("3. 列表指针 (addr3)", g_dbg_addr3));
-            DumpToLog(InspectLiveInstance("4. 对局基址 (segmentcsogame)", g_dbg_segmentcsogame));
-            DumpToLog(InspectLiveInstance("5. 棋盘总览 (addr19)", g_dbg_addr19));
-            DumpToLog(InspectLiveInstance("6. 商店总览 (addr14)", g_dbg_addr14));
-            DumpToLog(InspectLiveInstance("7. 备战席总览 (addr17)", g_dbg_addr17));
-            DumpToLog(InspectLiveInstance("8. 玩家信息 (addr13)", g_dbg_addr13));
-            DumpToLog(InspectLiveInstance("9. 海克斯控制器 (hexctrl)", g_dbg_hexctrl));
-            AddActionLog((const char*)u8"===============================================================");
-        }
-
-        ImGui::Spacing();
-
-        ImGui::BeginChild("LiveInstanceTreeList", ImVec2(0, 0), true);
-        {
-            DrawLiveInstanceTree("1. 获取实例单例 (g_dbg_addr1)", g_dbg_addr1, scale);
-            DrawLiveInstanceTree("2. 我的茶叶上下文 (addr2)", g_dbg_addr2, scale);
-            DrawLiveInstanceTree("3. 列表指针 (addr3)", g_dbg_addr3, scale);
-            DrawLiveInstanceTree("4. 对局基址与我的玩家属性 (segmentcsogame)", g_dbg_segmentcsogame, scale);
-            DrawLiveInstanceTree("5. 棋盘与棋子总览 (addr19 / board_hero_id)", g_dbg_addr19, scale);
-            DrawLiveInstanceTree("6. 商店与卡槽总览 (addr14)", g_dbg_addr14, scale);
-            DrawLiveInstanceTree("7. 备战席总览 (addr17)", g_dbg_addr17, scale);
-            DrawLiveInstanceTree("8. 玩家信息 (addr13 / pi_name / pi_money)", g_dbg_addr13, scale);
-            DrawLiveInstanceTree("9. 牌库节点4 (addr4)", g_dbg_addr4, scale);
-            DrawLiveInstanceTree("10. 牌库字典 (addr7)", g_dbg_addr7, scale);
-            DrawLiveInstanceTree("11. 海克斯控制器 (hexctrl / addr26)", g_dbg_hexctrl, scale);
-
-            if (!g_shop_slots.empty()) {
-                for (size_t s = 0; s < g_shop_slots.size(); s++) {
-                    char s_lbl[64]; snprintf(s_lbl, sizeof(s_lbl), "12.%zu 商店卡槽 %zu 地址", s + 1, s + 1);
-                    DrawLiveInstanceTree(s_lbl, g_shop_slots[s], scale);
-                }
-            }
-        }
-        ImGui::EndChild();
-    }
-    else if (g_resolver_subtab == 1) {
-        ImGui::TextColored(UITheme().primary, (const char*)u8"输入任意目标类名，自动反查【类的固定偏移 (RVA)】并推导【从单例到达该类的完整寻址路径】：");
-        
-        ImGui::SetNextItemWidth(300.0f * scale);
-        ImGui::InputText("##ClassSearchInput", g_class_search_input, sizeof(g_class_search_input));
-        ImGui::SameLine();
-        if (ImGui::Button((const char*)u8"🔍 定位类结构与推导路径", ImVec2(190 * scale, 30 * scale))) {
-            g_inspectedClass = InspectClassByFullName(g_class_search_input);
-            g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, g_class_search_input, 6);
-            if (g_inspectedClass.valid) {
-                AddActionLog((const char*)u8"-> [类定位成功] %s (RVA: 0x%lx, 包含 %zu 个字段, %zu 个方法)", 
-                    g_inspectedClass.className.c_str(), g_inspectedClass.classRva, g_inspectedClass.fields.size(), g_inspectedClass.methods.size());
-            }
-            if (g_lastPathResult.found) {
-                AddActionLog((const char*)u8"-> [路径推导成功] 找到从单例到目标类的 %zu 级寻址链路!", g_lastPathResult.steps.size());
-            }
-        }
-
-        // 快捷预设按钮栏
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), (const char*)u8"常用核心类快捷查询：");
-        auto QuickSearchBtn = [&scale](const char* label, const char* cls) {
-            if (ImGui::Button(label)) {
-                strncpy(g_class_search_input, cls, sizeof(g_class_search_input));
-                g_inspectedClass = InspectClassByFullName(cls);
-                g_lastPathResult = AutoFindPathToClass(g_dbg_addr1, cls, 6);
-            }
-            ImGui::SameLine();
-        };
-        QuickSearchBtn((const char*)u8"[1. 单例 ChessModelManager]", "ChessModelManager");
-        QuickSearchBtn((const char*)u8"[2. 上下文 ChessBattleModel]", "ChessBattleModel");
-        QuickSearchBtn((const char*)u8"[3. 列表 CSoGameData_View]", "CSoGameData_View");
-        QuickSearchBtn((const char*)u8"[4. 对局 SegmentCsogame]", "SegmentCsogame");
-        QuickSearchBtn((const char*)u8"[5. 牌库 CTAC_HeroPool]", "CTAC_HeroPool");
-        ImGui::NewLine();
-
-        ImGui::Spacing();
-
-        if (g_inspectedClass.valid) {
-            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"【目标类】 %s  |  所属程序集: %s", g_inspectedClass.className.c_str(), g_inspectedClass.imageName.c_str());
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"【类内存地址】 0x%lx  |  【类的固定偏移 (Class RVA)】: 0x%lx", g_inspectedClass.classAddress, g_inspectedClass.classRva);
-
-            // ================= 自动输出寻址路径 =================
-            ImGui::Spacing();
-            if (g_lastPathResult.found) {
-                ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"🚀【从单例到达该类的完整寻址路径推导结果】：");
-                ImGui::Indent(10.0f * scale);
-                if (g_lastPathResult.steps.empty()) {
-                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标类就是根单例自身 (0x%lx) [0 级直接到达]", g_lastPathResult.targetInstance);
-                } else {
-                    for (size_t s = 0; s < g_lastPathResult.steps.size(); s++) {
-                        const auto& st = g_lastPathResult.steps[s];
-                        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[第 %zu 级] (0x%lx: %s)", s + 1, st.fromObj, st.fromClass.c_str());
-                        ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "───[+0x%lx (%s)]───>", st.offset, st.fieldName.c_str());
-                        ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "(0x%lx: %s)", st.toObj, st.toClass.c_str());
-                    }
-                    
-                    // 输出快捷偏移汇总
-                    std::string off_summary = "💡 路径偏移链: g_dbg_addr1";
-                    for (const auto& st : g_lastPathResult.steps) {
-                        char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx (%s)", st.offset, st.fieldName.c_str());
-                        off_summary += obuf;
-                    }
-                    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
-                }
-                ImGui::Unindent(10.0f * scale);
+    if (ImGui::Button((const char*)u8"🚀 开始自动寻址！", ImVec2(300 * sc, 35 * sc))) {
+        uintptr_t rootObj = g_dbg_addr1; // Default to hero entity
+        if (strlen(g_root_class_input) > 0) {
+            uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
+            if (singletonObj != 0) {
+                rootObj = singletonObj;
+                AddActionLog((const char*)u8"-> [单例解析] 成功获取 %s 单例实例: 0x%lx", g_root_class_input, singletonObj);
             } else {
-                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), (const char*)u8"⚠️ [堆路径追踪] 当前对局内存中尚未实例化该类，或该类不在单例的子树中。");
+                AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例，回退到英雄实体起步。", g_root_class_input);
             }
-            
-            ImGui::Spacing();
-            if (ImGui::Button((const char*)u8"📋 导出此类的完整结构与寻址路径到日志", ImVec2(320 * scale, 30 * scale))) {
-                AddActionLog((const char*)u8"==================== 类 [%s] 结构与寻址路径 ====================", g_inspectedClass.className.c_str());
-                AddActionLog((const char*)u8"类内存地址: 0x%lx  |  类 RVA: 0x%lx  |  程序集: %s", g_inspectedClass.classAddress, g_inspectedClass.classRva, g_inspectedClass.imageName.c_str());
-                if (g_lastPathResult.found) {
-                    AddActionLog((const char*)u8"--- 寻址链路 (共 %zu 级) ---", g_lastPathResult.steps.size());
-                    for (size_t s = 0; s < g_lastPathResult.steps.size(); s++) {
-                        const auto& st = g_lastPathResult.steps[s];
-                        AddActionLog((const char*)u8"  [%zu] (0x%lx: %s) +0x%lx (%s) -> (0x%lx: %s)", s + 1, st.fromObj, st.fromClass.c_str(), st.offset, st.fieldName.c_str(), st.toObj, st.toClass.c_str());
-                    }
-                }
-                AddActionLog((const char*)u8"--- 成员字段清单 (共 %zu 个) ---", g_inspectedClass.fields.size());
-                for (const auto& f : g_inspectedClass.fields) {
-                    AddActionLog((const char*)u8"   +0x%lx: %s (%s)", f.offset, f.name.c_str(), f.typeName.c_str());
-                }
-                AddActionLog((const char*)u8"==========================================================================");
-            }
+        }
+        g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8); // depth 8
+    }
 
-            ImGui::Spacing();
-            ImGui::BeginChild("ClassDetailsView", ImVec2(0, 0), true);
-            {
-                if (ImGui::TreeNode((const char*)u8"🌟 核心方法列表 (点击展开查看函数 RVA)")) {
-                    for (const auto& m : g_inspectedClass.methods) {
-                        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "  [函数 RVA: 0x%-6lx]", m.rva);
-                        ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "%s()", m.name.c_str());
-                    }
-                    ImGui::TreePop();
-                }
+    if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"未在当前内存搜索深度(8)内找到目标: %s", g_class_search_input);
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
+    }
 
-                if (ImGui::TreeNode((const char*)u8"🌟 成员字段与偏移全量对照表 (点击展开查看所有偏移)")) {
-                    for (const auto& f : g_inspectedClass.fields) {
-                        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
-                        ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", f.name.c_str());
-                        ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(0.6f, 0.75f, 1.0f, 1.0f), "(%s)", f.typeName.c_str());
-                    }
-                    ImGui::TreePop();
-                }
-            }
-            ImGui::EndChild();
+    if (g_lastPathResult.found) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"✅ 找到一条最短寻址路径：");
+        ImGui::Indent(10.0f * sc);
+        if (g_lastPathResult.steps.empty()) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", g_lastPathResult.targetInstance);
         } else {
-            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"在上方输入类名（如 SegmentCsogame 或 ChessBattleModel），点击按钮即可自动反查该类固定偏移与从单例到该类的完整指针路径。");
-        }
-    }
-    else if (g_resolver_subtab == 2) {
-        ImGui::TextColored(UITheme().primary, (const char*)u8"输入任意 16 进制内存指针地址，实时解析其所属的 C# 类名与全部字段：");
-        
-        ImGui::SetNextItemWidth(240.0f * scale);
-        ImGui::InputText("##CustomInspectInput", g_custom_inspect_addr, sizeof(g_custom_inspect_addr));
-        ImGui::SameLine();
-        if (ImGui::Button((const char*)u8"🔬 立即探查指针", ImVec2(140 * scale, 30 * scale))) {
-            uintptr_t addr = 0;
-            if (sscanf(g_custom_inspect_addr, "%lx", &addr) == 1 || sscanf(g_custom_inspect_addr, "0x%lx", &addr) == 1) {
-                g_custom_dump = InspectLiveInstance("自定义指针", addr);
-                if (g_custom_dump.valid) {
-                    AddActionLog((const char*)u8"-> [探查成功] 0x%lx 对应类名: %s (字段数: %zu)", addr, g_custom_dump.fullClassName.c_str(), g_custom_dump.fields.size());
-                } else {
-                    AddActionLog((const char*)u8"-> [探查失败] 0x%lx 不是有效的 C# 堆对象指针", addr);
-                }
+            for (size_t s = 0; s < g_lastPathResult.steps.size(); s++) {
+                const auto& st = g_lastPathResult.steps[s];
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[第 %zu 层] %s", s + 1, st.fromClass.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "➔ [+0x%lx: %s] ➔", st.offset, st.fieldName.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
             }
-        }
 
-        ImGui::Spacing();
-
-        ImGui::BeginChild("CustomInspectView", ImVec2(0, 0), true);
-        {
-            if (g_custom_dump.address != 0) {
-                DrawLiveInstanceTree("自定义指针", g_custom_dump.address, scale);
-            } else {
-                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"在上方输入框输入一个地址（如 0x28a00000），点击探查即可实时解析。");
+            std::string off_summary = (const char*)u8"⚡ 偏移链提取: 起点单例";
+            for (const auto& st : g_lastPathResult.steps) {
+                char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
+                off_summary += obuf;
             }
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"🎯 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
         }
-        ImGui::EndChild();
+        ImGui::Unindent(10.0f * sc);
     }
-}
-
-void DrawMainMenu() {
+}void DrawMainMenu() {
     ApplyFrostedTheme();
     if (g_menu_orb) {
         DrawMenuOrb();
@@ -4660,8 +4434,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     DrawPlayerDataWindow();
     DrawOpponentBoardWindow();
     DrawMyHeroWarningWindow();
-    DrawHextechCapsule();
-    DrawPathTraceFloatWindow(); DrawVirtualKeyboard();
+    DrawHextechCapsule(); DrawVirtualKeyboard();
     // 胶囊最后绘制并置顶，避免被牌库等浮窗挡住无法解锁
     DrawQuitCapsule();
     DrawLockCapsule();
