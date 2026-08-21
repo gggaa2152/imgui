@@ -4613,6 +4613,8 @@ void DoKeywordSearch(std::string kw) {
     AddActionLog((const char*)u8"-> [关键词搜索] 搜索 '%s' 找到 %zu 条匹配元数据!", kw.c_str(), g_kwResults.size());
 }
 
+static int g_menu_current_tab = 0;
+
 // ==========================================
 // 商业级 IL2CPP 运行时对象检查器 (Object Inspector)
 // ==========================================
@@ -4800,7 +4802,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     g_inspect_breadcrumbs.back().className = fullClassName;
 
     // 显示当前对象字段名或类名标题
-    ImGui::TextColored(ImVec4(0.9f, 0.95f, 1.0f, 1.0f), "%s", g_inspect_breadcrumbs.back().displayName.c_str());
+    ImGui::TextColored(ImVec4(0.9f, 0.95f, 1.0f, 1.0f), "%s (0x%lx)", g_inspect_breadcrumbs.back().displayName.c_str(), currentObj);
 
     std::string filter_lower = g_inspector_filter;
     std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
@@ -4808,13 +4810,23 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     // 收集当前对象的所有字段数据以进行【按偏移严格升序排序】
     std::vector<InspectorFieldRow> fieldRows;
 
-    // A. 如果是数组 (Array / T[])，展开元素
-    bool isArray = (fullClassName.find("[]") != std::string::npos || fullClassName.find("Array") != std::string::npos);
+    // ==========================================
+    // A. 数组类型直解 (Array / T[])
+    // ==========================================
+    bool isArray = (fullClassName.find("[]") != std::string::npos || fullClassName.find("Array") != std::string::npos || fullClassName == "System.Array");
     if (isArray) {
-        int arr_len = SAFE_READ_INT(currentObj, 0x18);
-        if (arr_len > 0 && arr_len <= 1000) {
-            for (int i = 0; i < arr_len && i < 100; i++) {
-                size_t elem_off = 0x20 + i * sizeof(uintptr_t);
+        uint32_t len_18 = 0, len_10 = 0;
+        SafeReadMemory(currentObj + 0x18, &len_18, sizeof(uint32_t));
+        SafeReadMemory(currentObj + 0x10, &len_10, sizeof(uint32_t));
+        
+        uint32_t arr_len = 0;
+        size_t elem_start_off = 0x20;
+        if (len_18 > 0 && len_18 <= 5000) { arr_len = len_18; elem_start_off = 0x20; }
+        else if (len_10 > 0 && len_10 <= 5000) { arr_len = len_10; elem_start_off = 0x18; }
+
+        if (arr_len > 0) {
+            for (uint32_t i = 0; i < arr_len && i < 100; i++) {
+                size_t elem_off = elem_start_off + i * sizeof(uintptr_t);
                 uintptr_t elem_ptr = 0;
                 SafeReadMemory(currentObj + elem_off, &elem_ptr, sizeof(uintptr_t));
                 int32_t elem_val32 = 0;
@@ -4847,11 +4859,116 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
         }
     }
 
-    // B. 全继承链字段收集 (包含当前类与所有父类)
+    // ==========================================
+    // B. 列表 List<T> 直解
+    // ==========================================
+    if (fullClassName.find("List") != std::string::npos) {
+        uintptr_t items_arr = 0;
+        int32_t list_size = 0;
+        SafeReadMemory(currentObj + 0x10, &items_arr, sizeof(uintptr_t));
+        SafeReadMemory(currentObj + 0x18, &list_size, sizeof(int32_t));
+        if (!IsValidPtr(items_arr)) {
+            SafeReadMemory(currentObj + 0x18, &items_arr, sizeof(uintptr_t));
+            SafeReadMemory(currentObj + 0x10, &list_size, sizeof(int32_t));
+        }
+
+        if (IsValidPtr(items_arr) && list_size > 0 && list_size <= 2000) {
+            for (int i = 0; i < list_size && i < 100; i++) {
+                size_t elem_off = 0x20 + i * sizeof(uintptr_t);
+                uintptr_t elem_ptr = 0;
+                SafeReadMemory(items_arr + elem_off, &elem_ptr, sizeof(uintptr_t));
+                int32_t elem_val32 = 0;
+                SafeReadMemory(items_arr + elem_off, &elem_val32, sizeof(int32_t));
+
+                std::string item_name = "Item[" + std::to_string(i) + "]";
+                std::string elem_type = "Object";
+                std::string live_val = "";
+                bool isObject = false;
+                std::string child_cls = "";
+
+                if (IsValidPtr(elem_ptr)) {
+                    void* c_klass = nullptr;
+                    if (SafeReadMemory(elem_ptr, &c_klass, sizeof(void*)) && IsValidIl2CppClass(c_klass)) {
+                        const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
+                        elem_type = cn ? CleanIl2CppTypeName(cn) : "Object";
+                        child_cls = elem_type;
+                    }
+                    char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", elem_ptr, elem_type.c_str());
+                    live_val = buf;
+                    isObject = true;
+                } else {
+                    char buf[32]; snprintf(buf, sizeof(buf), "%d", elem_val32);
+                    live_val = buf;
+                    elem_type = "Int32";
+                }
+
+                fieldRows.push_back({ (size_t)i, item_name, elem_type, elem_type, "", false, false, elem_ptr, elem_val32, (int64_t)elem_val32, live_val, !isObject, isObject, false, child_cls });
+            }
+        }
+    }
+
+    // ==========================================
+    // C. 字典 Dictionary<TKey, TValue> 直解
+    // ==========================================
+    if (fullClassName.find("Dictionary") != std::string::npos) {
+        uintptr_t entries_arr = 0;
+        int32_t dict_count = 0;
+        SafeReadMemory(currentObj + 0x18, &entries_arr, sizeof(uintptr_t));
+        SafeReadMemory(currentObj + 0x20, &dict_count, sizeof(int32_t));
+        if (!IsValidPtr(entries_arr)) {
+            SafeReadMemory(currentObj + 0x10, &entries_arr, sizeof(uintptr_t));
+            SafeReadMemory(currentObj + 0x18, &dict_count, sizeof(int32_t));
+        }
+
+        if (IsValidPtr(entries_arr) && dict_count > 0 && dict_count <= 2000) {
+            size_t entry_stride = 24;
+            for (int i = 0; i < dict_count && i < 100; i++) {
+                uintptr_t entry_addr = entries_arr + 0x20 + i * entry_stride;
+                uintptr_t key_ptr = 0;
+                SafeReadMemory(entry_addr + 0x08, &key_ptr, sizeof(uintptr_t));
+                uintptr_t val_ptr = 0;
+                SafeReadMemory(entry_addr + 0x10, &val_ptr, sizeof(uintptr_t));
+                int32_t val_int = 0;
+                SafeReadMemory(entry_addr + 0x10, &val_int, sizeof(int32_t));
+
+                std::string key_label = "Entry[" + std::to_string(i) + "]";
+                if (IsValidPtr(key_ptr)) {
+                    std::string k_str = ReadIl2CppString(key_ptr);
+                    if (!k_str.empty()) key_label = "[\"" + k_str + "\"]";
+                }
+
+                std::string elem_type = "Object";
+                std::string live_val = "";
+                bool isObject = false;
+                std::string child_cls = "";
+
+                if (IsValidPtr(val_ptr)) {
+                    void* c_klass = nullptr;
+                    if (SafeReadMemory(val_ptr, &c_klass, sizeof(void*)) && IsValidIl2CppClass(c_klass)) {
+                        const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : "";
+                        elem_type = cn ? CleanIl2CppTypeName(cn) : "Object";
+                        child_cls = elem_type;
+                    }
+                    char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", val_ptr, elem_type.c_str());
+                    live_val = buf;
+                    isObject = true;
+                } else {
+                    char buf[32]; snprintf(buf, sizeof(buf), "%d", val_int);
+                    live_val = buf;
+                    elem_type = "Int32";
+                }
+
+                fieldRows.push_back({ (size_t)i, key_label, elem_type, elem_type, "", false, false, val_ptr, val_int, (int64_t)val_int, live_val, !isObject, isObject, false, child_cls });
+            }
+        }
+    }
+
+    // ==========================================
+    // D. 全继承链字段反射 (包含当前类与所有父类)
+    // ==========================================
     if (g_il2cpp_api.class_get_fields) {
         for (void* cur_klass = klass_ptr; cur_klass != nullptr; cur_klass = (g_inspector_include_base && g_il2cpp_api.class_get_parent) ? g_il2cpp_api.class_get_parent(cur_klass) : nullptr) {
             const char* cur_cls_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(cur_klass) : "";
-            if (cur_cls_name && (strcmp(cur_cls_name, "Object") == 0 || strcmp(cur_cls_name, "Il2CppObject") == 0)) break;
 
             bool isBaseClass = (cur_klass != klass_ptr);
 
@@ -4926,8 +5043,16 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                         }
                         if (childClassName.empty()) childClassName = clean_type;
 
-                        char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", rawVal, childClassName.c_str());
-                        live_val = buf;
+                        // 识别 List 数量
+                        if (childClassName.find("List") != std::string::npos && isObjectPtr) {
+                            int32_t l_sz = 0;
+                            SafeReadMemory(rawVal + 0x18, &l_sz, sizeof(int32_t));
+                            char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s, Count: %d)", rawVal, childClassName.c_str(), l_sz);
+                            live_val = buf;
+                        } else {
+                            char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", rawVal, childClassName.c_str());
+                            live_val = buf;
+                        }
                     }
                 }
 
@@ -5115,6 +5240,24 @@ void DrawSymbolResolverUI() {
     ImGui::Spacing();
     
     // 3. 开始全量自动寻址按钮
+    if (ImGui::Button((const char*)u8"🔍 在对象检查器中全量浏览此单例 (逐层展开全部字段并下钻 >)", ImVec2(avail_x, 36 * g_autoScale))) {
+        uintptr_t rootObj = g_dbg_addr1;
+        if (strlen(g_root_class_input) > 0) {
+            if (strncmp(g_root_class_input, "0x", 2) == 0 || strncmp(g_root_class_input, "0X", 2) == 0) {
+                rootObj = strtoull(g_root_class_input, nullptr, 16);
+            } else {
+                rootObj = GetSingletonInstance(g_root_class_input);
+                if (rootObj == 0 && strcmp(g_root_class_input, "CSOGame") == 0) rootObj = g_dbg_segmentcsogame;
+                if (rootObj == 0 && strcmp(g_root_class_input, "ChessModelManager") == 0) rootObj = g_dbg_addr1;
+            }
+        }
+        if (IsValidPtr(rootObj)) {
+            g_inspect_breadcrumbs.clear();
+            PushInspectObject(strlen(g_root_class_input) > 0 ? g_root_class_input : "RootSingleton", "Singleton", rootObj);
+            g_menu_current_tab = 5;
+        }
+    }
+    ImGui::Spacing();
     if (ImGui::Button((const char*)u8"> 开始全量深度寻址！(穿透列表/字典/数组输出全字段)", ImVec2(avail_x, 38 * g_autoScale))) {
         uintptr_t rootObj = g_dbg_addr1;
         if (strlen(g_root_class_input) > 0) {
@@ -5340,7 +5483,7 @@ void DrawMainMenu() {
         DrawMenuOrb();
         return;
     }
-    static int current_tab = 0;
+    int& current_tab = g_menu_current_tab;
 
     static bool firstMenuOpen = true;
     if (firstMenuOpen) {
