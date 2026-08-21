@@ -785,7 +785,7 @@ void LoadConfig() {
         }
     }
     in.close();
-    g_apply_saved_float_pos = true;
+    g_apply_saved_float_pos = true; s_pos_initialized.clear();
     if (!has_full) SaveConfig();
 }
 
@@ -1654,11 +1654,15 @@ void DrawCardPoolCapsule() {
     ImGui::PopStyleVar();
 }
 
+static std::unordered_set<std::string> s_pos_initialized;
+
 static bool BeginContentFloatWindow(const char* id, bool* open, float* pos_x = nullptr, float* pos_y = nullptr, float alpha = 1.0f) {
     if (open && !*open) return false;
     if (pos_x && pos_y && *pos_x >= 0.0f && *pos_y >= 0.0f) {
-        ImGuiCond cond = g_apply_saved_float_pos ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
-        ImGui::SetNextWindowPos(ImVec2(*pos_x, *pos_y), cond);
+        if (s_pos_initialized.find(id) == s_pos_initialized.end()) {
+            ImGui::SetNextWindowPos(ImVec2(*pos_x, *pos_y), ImGuiCond_Always);
+            s_pos_initialized.insert(id);
+        }
     }
     ImGui::SetNextWindowBgAlpha(0.0f);
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
@@ -3351,9 +3355,11 @@ void DrawMainMenu() {
         g_menuX = ImGui::GetWindowPos().x;
         g_menuY = ImGui::GetWindowPos().y;
         g_menuCollapsed = ImGui::IsWindowCollapsed();
-        if (!menu_visible || g_menuCollapsed) {
-            g_orb_x = g_menuX + 28.0f * g_autoScale;
-            g_orb_y = g_menuY + 28.0f * g_autoScale;
+                if (!menu_visible || g_menuCollapsed) {
+            if (g_orb_x <= 0.0f || g_orb_y <= 0.0f) {
+                g_orb_x = g_menuX + 28.0f * g_autoScale;
+                g_orb_y = g_menuY + 28.0f * g_autoScale;
+            }
             g_menu_orb = true;
         }
         if (!g_menuCollapsed) {
