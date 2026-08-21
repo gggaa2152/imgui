@@ -2875,6 +2875,14 @@ static bool IsValidIl2CppClass(void* klass) {
     return g_valid_classes.find(klass) != g_valid_classes.end();
 }
 
+static bool StringEqualsIgnoreCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (::tolower(a[i]) != ::tolower(b[i])) return false;
+    }
+    return true;
+}
+
 static uintptr_t GetSingletonInstance(const char* className) {
     if (!g_il2cpp_api.init() || !g_il2cpp_api.field_static_get_value || !g_il2cpp_api.field_get_flags) return 0;
     
@@ -2885,6 +2893,7 @@ static uintptr_t GetSingletonInstance(const char* className) {
     void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
     if (!assemblies) return 0;
     
+    std::string searchName = className;
     void* target_klass = nullptr;
     for (size_t a = 0; a < asm_count; a++) {
         void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
@@ -2897,7 +2906,7 @@ static uintptr_t GetSingletonInstance(const char* className) {
             const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : "";
             std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : (c_name ? std::string(c_name) : "");
             
-            if ((c_name && strcmp(c_name, className) == 0) || (full_class == className)) {
+            if ((c_name && StringEqualsIgnoreCase(c_name, searchName)) || StringEqualsIgnoreCase(full_class, searchName)) {
                 target_klass = klass;
                 break;
             }
