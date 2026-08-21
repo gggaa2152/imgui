@@ -2944,25 +2944,31 @@ struct ObjectPathStep {
     uintptr_t fromObj;
     std::string fromClass;
     std::string fieldName;
+    std::string fieldType;
     size_t offset;
     uintptr_t toObj;
     std::string toClass;
+    bool isValueField;
 };
 
-struct ObjectPathFindingResult {
-    bool found;
-    std::string targetClassName;
+struct FoundPath {
+    std::string matchDesc;
     uintptr_t targetInstance;
     std::vector<ObjectPathStep> steps;
 };
 
+struct ObjectPathFindingResult {
+    bool found;
+    std::string targetKeyword;
+    std::vector<FoundPath> paths;
+};
+
 static ObjectPathFindingResult g_lastPathResult;
 
-ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targetName, int maxDepth = 6) {
+ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targetName, int maxDepth = 8) {
     ObjectPathFindingResult result;
     result.found = false;
-    result.targetClassName = targetName;
-    result.targetInstance = 0;
+    result.targetKeyword = targetName;
 
     if (!IsValidPtr(rootObj) || targetName.empty() || !g_il2cpp_api.init()) return result;
 
@@ -2978,6 +2984,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
 
     std::deque<QueueItem> queue;
     std::unordered_set<uintptr_t> visited;
+    std::unordered_set<std::string> recordedPaths;
 
     auto GetObjClassName = [](uintptr_t ptr) -> std::string {
         if (!IsValidPtr(ptr)) return "";
@@ -2994,17 +3001,23 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     std::string root_lower = rootClass;
     std::transform(root_lower.begin(), root_lower.end(), root_lower.begin(), ::tolower);
     if (root_lower.find(target_lower) != std::string::npos) {
+        FoundPath fp;
+        fp.matchDesc = (const char*)u8"[起点类名匹配] " + rootClass;
+        fp.targetInstance = rootObj;
+        result.paths.push_back(fp);
         result.found = true;
-        result.targetInstance = rootObj;
-        return result;
     }
 
     queue.push_back({ rootObj, rootClass, {}, 0 });
     visited.insert(rootObj);
 
-    while (!queue.empty()) {
+    int nodesProcessed = 0;
+    const int maxNodes = 2000;
+
+    while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 30) {
         QueueItem item = queue.front();
         queue.pop_front();
+        nodesProcessed++;
 
         if (item.depth >= maxDepth) continue;
 
@@ -3014,33 +3027,74 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         if (g_il2cpp_api.class_get_fields) {
             void* iter = nullptr;
             while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
+                uint32_t flags = g_il2cpp_api.field_get_flags ? g_il2cpp_api.field_get_flags(field) : 0;
+                if ((flags & 0x0010) != 0) continue; // Skip static fields
+
                 const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
                 size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
+                void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
+                const char* t_name = f_type && g_il2cpp_api.type_get_name ? g_il2cpp_api.type_get_name(f_type) : "";
+
+                std::string field_str = f_name ? f_name : "";
+                std::string type_str = t_name ? t_name : "";
+
+                std::string field_lower = field_str;
+                std::transform(field_lower.begin(), field_lower.end(), field_lower.begin(), ::tolower);
+
+                std::string type_lower = type_str;
+                std::transform(type_lower.begin(), type_lower.end(), type_lower.begin(), ::tolower);
+
+                bool fieldMatch = (!field_lower.empty() && field_lower.find(target_lower) != std::string::npos);
+                bool typeMatch = (!type_lower.empty() && type_lower.find(target_lower) != std::string::npos);
 
                 uintptr_t child_ptr = 0;
-                if (IsValidPtr(item.obj + f_offset) && SafeReadMemory(item.obj + f_offset, &child_ptr, sizeof(uintptr_t)) && IsValidPtr(child_ptr)) {
-                    if (visited.find(child_ptr) == visited.end()) {
-                        std::string childClass = GetObjClassName(child_ptr);
-                        if (!childClass.empty()) {
-                            std::string child_lower = childClass;
-                            std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
-                            
-                            std::string field_lower = f_name ? f_name : "";
-                            std::transform(field_lower.begin(), field_lower.end(), field_lower.begin(), ::tolower);
+                bool isObjectRef = (IsValidPtr(item.obj + f_offset) && SafeReadMemory(item.obj + f_offset, &child_ptr, sizeof(uintptr_t)) && IsValidPtr(child_ptr));
 
-                            std::vector<ObjectPathStep> nextPath = item.path;
-                            nextPath.push_back({ item.obj, item.className, f_name ? f_name : "", f_offset, child_ptr, childClass });
+                if (isObjectRef) {
+                    std::string childClass = GetObjClassName(child_ptr);
+                    std::string child_lower = childClass;
+                    std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
 
-                            // 匹配目标类名或字段名
-                            if (child_lower.find(target_lower) != std::string::npos || (!field_lower.empty() && field_lower.find(target_lower) != std::string::npos)) {
-                                result.found = true;
-                                result.targetInstance = child_ptr;
-                                result.steps = nextPath;
-                                return result;
-                            }
+                    bool classMatch = (!child_lower.empty() && child_lower.find(target_lower) != std::string::npos);
 
-                            visited.insert(child_ptr);
-                            queue.push_back({ child_ptr, childClass, nextPath, item.depth + 1 });
+                    std::vector<ObjectPathStep> nextPath = item.path;
+                    nextPath.push_back({ item.obj, item.className, field_str, type_str, f_offset, child_ptr, childClass.empty() ? type_str : childClass, false });
+
+                    if (classMatch || fieldMatch || typeMatch) {
+                        std::string sig = "";
+                        for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
+                        if (recordedPaths.find(sig) == recordedPaths.end()) {
+                            recordedPaths.insert(sig);
+                            FoundPath fp;
+                            if (classMatch) fp.matchDesc = (const char*)u8"[类名匹配] " + (childClass.empty() ? type_str : childClass);
+                            else if (fieldMatch) fp.matchDesc = (const char*)u8"[字段匹配] " + field_str + " (" + type_str + ")";
+                            else fp.matchDesc = (const char*)u8"[类型匹配] " + type_str;
+                            fp.targetInstance = child_ptr;
+                            fp.steps = nextPath;
+                            result.paths.push_back(fp);
+                            result.found = true;
+                        }
+                    }
+
+                    if (!childClass.empty() && visited.find(child_ptr) == visited.end() && (item.depth + 1 < maxDepth)) {
+                        visited.insert(child_ptr);
+                        queue.push_back({ child_ptr, childClass, nextPath, item.depth + 1 });
+                    }
+                } else {
+                    if (fieldMatch || typeMatch) {
+                        std::vector<ObjectPathStep> nextPath = item.path;
+                        nextPath.push_back({ item.obj, item.className, field_str, type_str, f_offset, item.obj + f_offset, type_str.empty() ? "(值字段)" : type_str, true });
+
+                        std::string sig = "";
+                        for (const auto& s : nextPath) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
+                        if (recordedPaths.find(sig) == recordedPaths.end()) {
+                            recordedPaths.insert(sig);
+                            FoundPath fp;
+                            fp.matchDesc = (const char*)u8"[字段属性] " + field_str + " (" + (type_str.empty() ? "value" : type_str) + ")";
+                            fp.targetInstance = item.obj + f_offset;
+                            fp.steps = nextPath;
+                            result.paths.push_back(fp);
+                            result.found = true;
                         }
                     }
                 }
@@ -3727,36 +3781,49 @@ void DrawSymbolResolverUI() {
 
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
     ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
-    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"[键盘]##1", ImVec2(btn_w, 0))) { g_vkbd_target = g_root_class_input; g_vkbd_target_size = sizeof(g_root_class_input); g_show_vkbd = true; }
+    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); 
+    ImGui::SameLine(); 
+    if (ImGui::Button((const char*)u8"[键盘]##1", ImVec2(btn_w, 0))) { 
+        g_vkbd_target = g_root_class_input; 
+        g_vkbd_target_size = sizeof(g_root_class_input); 
+        g_show_vkbd = true; 
+    }
 
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名或字段名):");
     ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
-    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); ImGui::SameLine(); if (ImGui::Button((const char*)u8"[键盘]##2", ImVec2(btn_w, 0))) { g_vkbd_target = g_class_search_input; g_vkbd_target_size = sizeof(g_class_search_input); g_show_vkbd = true; }
+    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
+    ImGui::SameLine(); 
+    if (ImGui::Button((const char*)u8"[键盘]##2", ImVec2(btn_w, 0))) { 
+        g_vkbd_target = g_class_search_input; 
+        g_vkbd_target_size = sizeof(g_class_search_input); 
+        g_show_vkbd = true; 
+    }
 
     ImGui::Spacing();
     
-    if (ImGui::Button((const char*)u8"> 开始自动寻址！", ImVec2(avail_x, 40 * sc))) {
-        uintptr_t rootObj = g_dbg_addr1; // Default to hero entity
+    if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配与字段)", ImVec2(avail_x, 40 * sc))) {
+        uintptr_t rootObj = g_dbg_addr1;
         if (strlen(g_root_class_input) > 0) {
             uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
             if (singletonObj != 0) {
                 rootObj = singletonObj;
-                g_dbg_addr1 = singletonObj; // Cache it
+                g_dbg_addr1 = singletonObj;
                 AddActionLog((const char*)u8"-> [单例解析] 成功获取 %s 单例实例: 0x%lx", g_root_class_input, singletonObj);
             } else {
-                rootObj = 0; // Force to 0 so we know it failed
+                rootObj = 0;
                 AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例", g_root_class_input);
             }
         }
         if (rootObj != 0) {
-            g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8); // depth 8
+            g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8);
         } else {
             g_lastPathResult.found = false;
+            g_lastPathResult.paths.clear();
         }
     }
 
     ImGui::Spacing();
-    ImGui::PushTextWrapPos(0.0f); // Enable text wrapping globally for results
+    ImGui::PushTextWrapPos(0.0f);
 
     if (strlen(g_root_class_input) > 0) {
         if (g_dbg_addr1 != 0 && GetSingletonInstance(g_root_class_input) != 0) {
@@ -3773,35 +3840,48 @@ void DrawSymbolResolverUI() {
 
     if (g_lastPathResult.found) {
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 找到一条最短寻址路径：");
-        ImGui::Indent(10.0f * sc);
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 共扫描出 %zu 条关联路径与字段：", g_lastPathResult.paths.size());
         
-        if (g_lastPathResult.steps.empty()) {
-            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", g_lastPathResult.targetInstance);
-        } else {
-            for (size_t s = 0; s < g_lastPathResult.steps.size(); s++) {
-                const auto& st = g_lastPathResult.steps[s];
-                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[第 %zu 层] %s", s + 1, st.fromClass.c_str());
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "-> [+0x%lx: %s] ->", st.offset, st.fieldName.c_str());
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
-            }
+        for (size_t p = 0; p < g_lastPathResult.paths.size(); p++) {
+            const auto& fp = g_lastPathResult.paths[p];
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), (const char*)u8"=== 路径 [%zu] %s ===", p + 1, fp.matchDesc.c_str());
+            
+            ImGui::Indent(10.0f * sc);
+            
+            if (fp.steps.empty()) {
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", fp.targetInstance);
+            } else {
+                for (size_t s = 0; s < fp.steps.size(); s++) {
+                    const auto& st = fp.steps[s];
+                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "[第 %zu 层] %s", s + 1, st.fromClass.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "-> [+0x%lx: %s] ->", st.offset, st.fieldName.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
+                }
 
-            std::string off_summary = (const char*)u8"[提取] 偏移链: 起点单例";
-            for (const auto& st : g_lastPathResult.steps) {
-                char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
-                off_summary += obuf;
+                std::string off_summary = (const char*)u8"[提取] 偏移链: 起点单例";
+                for (const auto& st : fp.steps) {
+                    char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
+                    off_summary += obuf;
+                }
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
+                if (fp.steps.back().isValueField) {
+                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 字段内存地址: 0x%lx", fp.targetInstance);
+                } else {
+                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 目标实例实时地址: 0x%lx", fp.targetInstance);
+                }
             }
-            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
-            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 目标实例实时地址: 0x%lx", g_lastPathResult.targetInstance);
+            
+            ImGui::Unindent(10.0f * sc);
         }
-        
-        ImGui::Unindent(10.0f * sc);
     }
     
-    ImGui::PopTextWrapPos(); // Disable text wrapping
-}void DrawMainMenu() {
+    ImGui::PopTextWrapPos();
+}
+void DrawMainMenu() {
     ApplyFrostedTheme();
     if (g_menu_orb) {
         DrawMenuOrb();
