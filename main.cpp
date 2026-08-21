@@ -4831,7 +4831,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::SameLine();
     if (ImGui::Button((const char*)u8"我的玩家")) {
         uintptr_t my_ptr = 0;
-        for (const auto& pi : g_players) { if (pi.id == g_my_player_id && pi.addr != 0) { my_ptr = pi.addr; break; } }
+        for (const auto& pi : g_players) { if (pi.id == g_my_player_id && pi.val_ptr != 0) { my_ptr = pi.val_ptr; break; } }
         if (IsValidPtr(my_ptr)) {
             g_inspect_breadcrumbs.clear();
             PushInspectObject("MyPlayer", "TPlayerInfo", my_ptr);
@@ -4886,9 +4886,9 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
             ImGui::SameLine();
         }
         char b_label[128];
-        snprintf(b_label, sizeof(b_label), "%s##crumb_%zu", g_inspect_breadcrumbs[b].name.c_str(), b);
+        snprintf(b_label, sizeof(b_label), "%s##crumb_%zu", g_inspect_breadcrumbs[b].displayName.c_str(), b);
         if (b == g_inspect_breadcrumbs.size() - 1) {
-            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.6f, 1.0f), "%s (0x%lx)", g_inspect_breadcrumbs[b].name.c_str(), g_inspect_breadcrumbs[b].objectAddress);
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.6f, 1.0f), "%s (0x%lx)", g_inspect_breadcrumbs[b].displayName.c_str(), g_inspect_breadcrumbs[b].objectAddress);
         } else {
             if (ImGui::SmallButton(b_label)) {
                 g_inspect_breadcrumbs.erase(g_inspect_breadcrumbs.begin() + b + 1, g_inspect_breadcrumbs.end());
