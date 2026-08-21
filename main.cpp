@@ -5235,40 +5235,70 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
             if (slot_ptr == 0 && slot_int == 0 && g_inspector_hide_null && slot_off > 0x08) continue;
 
             char slot_name[64];
-            if (slot_off == 0x00) snprintf(slot_name, sizeof(slot_name), (const char*)u8"[对象头] _klass");
-            else if (slot_off == 0x08) snprintf(slot_name, sizeof(slot_name), (const char*)u8"[同步锁] _monitor");
-            else snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
             std::string live_val = "";
             bool isObject = false;
             std::string slot_type = "Value";
             std::string child_cls = "";
 
-            if (IsValidPtr(slot_ptr)) {
-                std::string s_val = ReadIl2CppString(slot_ptr);
-                if (!s_val.empty()) {
-                    slot_type = "String";
-                    live_val = "\"" + s_val + "\"";
-                    isObject = false;
-                } else {
-                    void* c_klass = nullptr;
-                    SafeReadMemory(slot_ptr, &c_klass, sizeof(void*));
-                    if (c_klass && IsValidIl2CppClass(c_klass)) {
-                        const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : nullptr;
-                        std::string scn = SafeReadCString(cn);
-                        slot_type = scn.empty() ? "Object" : CleanIl2CppTypeName(scn);
-                        child_cls = slot_type;
-                    }
-                    char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", slot_ptr, slot_type.c_str());
-                    live_val = buf;
-                    isObject = true;
+            if (slot_off == 0x00) {
+                snprintf(slot_name, sizeof(slot_name), (const char*)u8"[对象头] _klass");
+                std::string full_kname = fullClassName;
+                if (IsValidIl2CppClass((void*)slot_ptr)) {
+                    const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name((void*)slot_ptr) : nullptr;
+                    const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace((void*)slot_ptr) : nullptr;
+                    std::string s_name = SafeReadCString(cn);
+                    std::string s_ns = SafeReadCString(cns);
+                    if (!s_name.empty()) full_kname = (!s_ns.empty()) ? (s_ns + "." + s_name) : s_name;
                 }
-            } else {
-                char buf[32]; snprintf(buf, sizeof(buf), "%d (0x%x)", slot_int, slot_int);
+                slot_type = "Il2CppClass*";
+                child_cls = full_kname;
+                char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", slot_ptr, full_kname.c_str());
                 live_val = buf;
-                slot_type = "Int32";
+                isObject = true;
+            } else if (slot_off == 0x08) {
+                snprintf(slot_name, sizeof(slot_name), (const char*)u8"[同步锁] _monitor");
+                slot_type = "MonitorData*";
+                char buf[64];
+                if (slot_ptr == 0) snprintf(buf, sizeof(buf), "0 (0x0)");
+                else snprintf(buf, sizeof(buf), "0x%lx", slot_ptr);
+                live_val = buf;
+                isObject = IsValidPtr(slot_ptr);
+            } else {
+                snprintf(slot_name, sizeof(slot_name), "Slot_+0x%lx", slot_off);
+
+                if (IsValidPtr(slot_ptr)) {
+                    std::string s_val = ReadIl2CppString(slot_ptr);
+                    if (!s_val.empty()) {
+                        slot_type = "String";
+                        live_val = "\"" + s_val + "\"";
+                        isObject = false;
+                    } else {
+                        void* c_klass = nullptr;
+                        SafeReadMemory(slot_ptr, &c_klass, sizeof(void*));
+                        if (c_klass && IsValidIl2CppClass(c_klass)) {
+                            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(c_klass) : nullptr;
+                            const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(c_klass) : nullptr;
+                            std::string scn = SafeReadCString(cn);
+                            std::string scns = SafeReadCString(cns);
+                            std::string full_cname = (!scns.empty()) ? (scns + "." + scn) : scn;
+                            slot_type = full_cname.empty() ? "Object" : full_cname;
+                            child_cls = slot_type;
+                        } else {
+                            slot_type = "NativePtr";
+                            child_cls = "NativePtr";
+                        }
+                        char buf[96]; snprintf(buf, sizeof(buf), "0x%lx (%s)", slot_ptr, CleanIl2CppTypeName(slot_type).c_str());
+                        live_val = buf;
+                        isObject = true;
+                    }
+                } else {
+                    char buf[32]; snprintf(buf, sizeof(buf), "%d (0x%x)", slot_int, slot_int);
+                    live_val = buf;
+                    slot_type = "Int32";
+                }
             }
 
-            fieldRows.push_back({ slot_off, slot_name, slot_type, slot_type, "", false, false, slot_ptr, slot_int, (int64_t)slot_int, live_val, !isObject, isObject, (slot_ptr == 0), child_cls });
+            fieldRows.push_back({ slot_off, slot_name, slot_type, CleanIl2CppTypeName(slot_type), "", false, false, slot_ptr, slot_int, (int64_t)slot_int, live_val, !isObject, isObject, (slot_ptr == 0), child_cls });
         }
     }
 
