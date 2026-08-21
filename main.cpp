@@ -1816,7 +1816,16 @@ void SetupImGuiStyle() { ApplyFrostedTheme(); }
 // 暴力扫描 /system/fonts/ 目录，尝试所有字体文件直到找到能加载中文的
 // 原因: MuMu 12 (Android 12+) 的中文字体都是 CFF/OTF 格式，stb_truetype 只支持 TrueType 轮廓
 // 所以需要暴力尝试所有 .ttf 文件，找到真正的 TrueType 格式字体
+static bool FontHasChineseGlyphs(ImFont* font) {
+    if (!font) return false;
+    // Check basic Chinese test characters: "中"(0x4E2D), "文"(0x6587), "金"(0x91D1), "查"(0x67E5)
+    return (font->FindGlyph((ImWchar)0x4E2D) != nullptr && 
+            font->FindGlyph((ImWchar)0x6587) != nullptr &&
+            font->FindGlyph((ImWchar)0x91D1) != nullptr);
+}
+
 ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size) {
+    if (!path || access(path, R_OK) != 0) return nullptr;
     ImFontConfig cfg;
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
@@ -1824,13 +1833,11 @@ ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size
     cfg.FontNo = fontNo;
     ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
     if (f) {
-        if (io.Fonts->Build()) {
-            LOGI("[+] Font OK: %s (FontNo: %d)", path, fontNo);
+        if (io.Fonts->Build() && FontHasChineseGlyphs(f)) {
+            LOGI("[+] True Chinese Font Validated OK: %s (FontNo: %d)", path, fontNo);
             return f;
         }
-        LOGI("[!] Font Build() failed: %s (FontNo: %d)", path, fontNo);
-    } else {
-        LOGI("[!] AddFontFromFileTTF NULL: %s (FontNo: %d)", path, fontNo);
+        LOGI("[!] Font loaded but missing Chinese glyphs (Latin stub): %s (FontNo: %d)", path, fontNo);
     }
     io.Fonts->Clear();
     return nullptr;
@@ -1869,77 +1876,34 @@ void UpdateFontHD(bool force = false) {
     io.Fonts->Clear();
     g_mainFont = nullptr;
 
-    // Phase 1: 尝试系统已知标准 TrueType 路径
-    const char* priority_paths[] = {
-        "/system/fonts/DroidSansFallback.ttf",
-        "/system/fonts/DroidSansFallbackFull.ttf",
-        "/system/fonts/NotoSansSC-Regular.ttf",
-        "/system/fonts/NotoSansHans-Regular.ttf",
-        "/system/fonts/SysSans-Hans-Regular.ttf",
-        "/system/fonts/Miui-Regular.ttf",
-        "/system/fonts/SourceHanSansCN-Regular.ttf",
-        "/system/fonts/HarmonyOS_Sans_SC.ttf",
-        "/system/fonts/OplusSC-Regular.ttf",
-        "/system/fonts/VivoSansSC-Regular.ttf",
-    };
-
-    for (const char* path : priority_paths) {
-        if (access(path, R_OK) != 0) continue;
-        LOGI("[*] Phase1 trying: %s", path);
-        g_mainFont = TryLoadChineseFont(io, path, 0, targetSize);
-        if (g_mainFont) goto font_done;
-    }
-
-    // Phase 2: 扫描系统 TTC 集合
-    {
-        const char* ttc_paths[] = {
-            "/system/fonts/NotoSansCJK-Regular.ttc",
-            "/system/fonts/NotoSerifCJK-Regular.ttc",
-        };
-        for (const char* path : ttc_paths) {
-            if (access(path, R_OK) != 0) continue;
-            for (int idx = 0; idx < 5; idx++) {
-                LOGI("[*] Phase2 trying TTC: %s (FontNo: %d)", path, idx);
-                g_mainFont = TryLoadChineseFont(io, path, idx, targetSize);
-                if (g_mainFont) goto font_done;
-            }
-        }
-    }
-
-    // Phase 3: 扫描 /system/fonts/ 和 /product/fonts/ 下所有 .ttf 文件
-    {
-        const char* font_dirs[] = { "/system/fonts", "/product/fonts", "/data/fonts/files" };
-        for (const char* dir_path : font_dirs) {
-            DIR* dir = opendir(dir_path);
-            if (dir) {
-                struct dirent* ent;
-                while ((ent = readdir(dir)) != NULL) {
-                    std::string name = ent->d_name;
-                    if (name.size() < 5) continue;
-                    std::string ext = name.substr(name.size() - 4);
-                    if (ext != ".ttf" && ext != ".TTF") continue;
-                    std::string full = std::string(dir_path) + "/" + name;
-                    if (access(full.c_str(), R_OK) != 0) continue;
-                    g_mainFont = TryLoadChineseFont(io, full.c_str(), 0, targetSize);
-                    if (g_mainFont) { closedir(dir); goto font_done; }
-                }
-                closedir(dir);
-            }
-        }
-    }
-
-    // Phase 4: 终极保底 —— 加载内置内置中文字库 (100% 成功，永无豆腐块)
-    LOGI("[*] Phase 4: Loading built-in embedded Chinese TrueType font subset...");
+    // Step 1: 尝试内置的高清中文字库 (最稳妥，100% 保证有中文字符)
+    LOGI("[*] Loading embedded Chinese TrueType font...");
     LoadEmbeddedChineseFont(io, targetSize);
-    if (g_mainFont) {
-        if (io.Fonts->Build()) {
-            LOGI("[+] Built-in Embedded Chinese font loaded and built successfully!");
-            goto font_done;
+    if (g_mainFont && io.Fonts->Build() && FontHasChineseGlyphs(g_mainFont)) {
+        LOGI("[+] Embedded Chinese TrueType font loaded perfectly!");
+        goto font_done;
+    }
+    io.Fonts->Clear();
+    g_mainFont = nullptr;
+
+    // Step 2: 如果内置失败，尝试系统真实中文字体
+    {
+        const char* candidate_fonts[] = {
+            "/system/fonts/NotoSansSC-Regular.ttf",
+            "/system/fonts/NotoSansHans-Regular.ttf",
+            "/system/fonts/DroidSansFallback.ttf",
+            "/system/fonts/DroidSansFallbackFull.ttf",
+            "/system/fonts/SourceHanSansCN-Regular.ttf",
+            "/system/fonts/HarmonyOS_Sans_SC.ttf"
+        };
+        for (const char* path : candidate_fonts) {
+            g_mainFont = TryLoadChineseFont(io, path, 0, targetSize);
+            if (g_mainFont) goto font_done;
         }
     }
 
-    // Phase 5: 默认英文字体
-    LOGI("[!] Built-in failed, fallback to default font.");
+    // Step 3: 默认英文字体保底
+    LOGI("[!] Fallback to default font.");
     g_mainFont = io.Fonts->AddFontDefault();
     io.Fonts->Build();
 
@@ -4622,9 +4586,22 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 }
 
 unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
+    static uint64_t last_frame_time = 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + (ts.tv_nsec / 1000000);
+
+    // Anti-Flicker: Ignore duplicate swap calls within 5ms (prevents double-swap flip-flop)
     static bool in_render = false;
-    if (!in_render) {
+    if (!in_render && (now_ms - last_frame_time >= 4)) {
         in_render = true;
+        last_frame_time = now_ms;
+
+        if (!g_ourImGuiContext) {
+            g_ourImGuiContext = ImGui::CreateContext();
+        }
+        ImGui::SetCurrentContext(g_ourImGuiContext);
+
         RenderImGui_Core_GLES(display, surface);
         in_render = false;
     }
@@ -4634,9 +4611,8 @@ unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
 
 void* hook_eglGetProcAddress(const char* procname) {
     if (!procname) return nullptr;
-    if (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) {
-        return (void*)hook_eglSwap;
-    }
+    // Do NOT redirect eglGetProcAddress("eglSwapBuffers") if we already direct-hooked eglSwapBuffers
+    // to prevent dual-hook double-render loop!
     if (old_eglGetProcAddress) return old_eglGetProcAddress(procname);
     return nullptr;
 }
