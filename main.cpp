@@ -3070,11 +3070,12 @@ static bool SmartStringMatch(const std::string& candidate, const std::string& ta
     std::string c_low = SafeToLower(candidate);
     std::string t_low = SafeToLower(target);
     
-    // 1. 完全或子串包含 (如 "我是小红" 包含 "我是" 或 "红")
+    // 1. 标准子串不区分大小写包含 (如 "ZGameChess.ChessModelManager" 匹配 "Chess", "Model", "Manager", "zgame")
+    // 或者 "我是小红" 包含 "我是", "小红"
     if (c_low.find(t_low) != std::string::npos) return true;
-    if (t_low.find(c_low) != std::string::npos && c_low.length() >= 2) return true;
+    if (t_low.find(c_low) != std::string::npos && c_low.length() >= 3) return true;
     
-    // 2. 任意单个字 / 中文字符模糊命中 (只要候选词包含目标词中的任何一个字)
+    // 2. 中文字符单字模糊匹配 (★ 严格限定仅对 UTF-8 中文多字节汉字字符生效，绝不能对单个英文字母 'e'/'a' 乱匹配！)
     size_t i = 0;
     while (i < target.length()) {
         unsigned char lead = (unsigned char)target[i];
@@ -3085,14 +3086,31 @@ static bool SmartStringMatch(const std::string& candidate, const std::string& ta
         else charLen = 1;
         
         if (i + charLen <= target.length()) {
-            std::string singleChar = target.substr(i, charLen);
-            if (!singleChar.empty() && singleChar != " " && singleChar != "\t") {
-                std::string single_low = SafeToLower(singleChar);
-                if (c_low.find(single_low) != std::string::npos) return true;
+            // 只有多字节字符（UTF-8 中文字符 charLen >= 2）才允许单字匹配
+            if (charLen >= 2) {
+                std::string singleChineseChar = target.substr(i, charLen);
+                if (candidate.find(singleChineseChar) != std::string::npos) return true;
             }
         }
         i += charLen;
     }
+
+    // 3. 空格分词英文匹配 (例如输入 "Chess Manager"，若 candidate 包含 "Chess" 且包含 "Manager")
+    if (t_low.find(' ') != std::string::npos) {
+        std::istringstream iss(t_low);
+        std::string token;
+        bool allTokensMatch = true;
+        int tokenCount = 0;
+        while (iss >> token) {
+            tokenCount++;
+            if (c_low.find(token) == std::string::npos) {
+                allTokensMatch = false;
+                break;
+            }
+        }
+        if (tokenCount > 0 && allTokensMatch) return true;
+    }
+
     return false;
 }
 
