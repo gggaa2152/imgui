@@ -3014,6 +3014,7 @@ struct ObjectPathFindingResult {
     bool found;
     std::string targetKeyword;
     std::vector<FoundPath> paths;
+    std::vector<FoundPath> exploredChains; // 记录所有深度探索过的分支链条 (即使未搜到也全量呈现)
 };
 
 static ObjectPathFindingResult g_lastPathResult;
@@ -3025,12 +3026,11 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     result.found = false;
     result.targetKeyword = targetName;
 
-    if (!IsValidPtr(rootObj) || targetName.empty() || !g_il2cpp_api.init()) return result;
+    if (!IsValidPtr(rootObj) || !g_il2cpp_api.init()) return result;
 
     std::string target_raw = targetName;
     while (!target_raw.empty() && isspace((unsigned char)target_raw.front())) target_raw.erase(target_raw.begin());
     while (!target_raw.empty() && isspace((unsigned char)target_raw.back())) target_raw.pop_back();
-    if (target_raw.empty()) return result;
 
     std::string target_lower = target_raw;
     std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
@@ -3038,11 +3038,13 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     // 数值解析 (支持 10进制、16进制、浮点)
     bool hasTargetInt = false;
     int64_t targetIntVal = 0;
-    try {
-        size_t idx = 0;
-        targetIntVal = (int64_t)std::stoll(target_raw, &idx, 0);
-        if (idx == target_raw.length()) hasTargetInt = true;
-    } catch (...) {}
+    if (!target_raw.empty()) {
+        try {
+            size_t idx = 0;
+            targetIntVal = (int64_t)std::stoll(target_raw, &idx, 0);
+            if (idx == target_raw.length()) hasTargetInt = true;
+        } catch (...) {}
+    }
 
     bool hasTargetHexPtr = false;
     uintptr_t targetHexPtr = 0;
@@ -3063,6 +3065,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     std::deque<QueueItem> queue;
     std::unordered_set<uintptr_t> visited;
     std::unordered_set<std::string> recordedPaths;
+    std::unordered_set<std::string> recordedExplored;
 
     auto GetObjClassName = [](uintptr_t ptr) -> std::string {
         if (!IsValidPtr(ptr)) return "";
@@ -3078,7 +3081,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
 
     std::string root_lower = rootClass;
     std::transform(root_lower.begin(), root_lower.end(), root_lower.begin(), ::tolower);
-    if (root_lower.find(target_lower) != std::string::npos) {
+    if (!target_lower.empty() && root_lower.find(target_lower) != std::string::npos) {
         FoundPath fp;
         fp.matchDesc = (const char*)u8"[起点类名匹配] " + rootClass;
         fp.targetInstance = rootObj;
@@ -3097,9 +3100,9 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
     visited.insert(rootObj);
 
     int nodesProcessed = 0;
-    const int maxNodes = 20000;
+    const int maxNodes = 25000;
 
-    while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 80) {
+    while (!queue.empty() && nodesProcessed < maxNodes && result.paths.size() < 100) {
         QueueItem item = queue.front();
         queue.pop_front();
         nodesProcessed++;
@@ -3109,13 +3112,42 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
         void* klass_ptr = nullptr;
         if (!SafeReadMemory(item.obj, &klass_ptr, sizeof(void*)) || !IsValidIl2CppClass(klass_ptr)) continue;
 
+        // 记录探索过的分支链条 (Explored Chain)
+        if (!item.path.empty() && result.exploredChains.size() < 40) {
+            std::string sig = "";
+            for (const auto& s : item.path) { sig += s.fromClass + ":" + std::to_string(s.offset) + "->"; }
+            if (recordedExplored.find(sig) == recordedExplored.end()) {
+                recordedExplored.insert(sig);
+                FoundPath fp;
+                fp.matchDesc = (const char*)u8"[探测分支] " + item.className;
+                fp.targetInstance = item.obj;
+                fp.steps = item.path;
+                fp.fieldName = item.className;
+                fp.cleanType = CleanIl2CppTypeName(item.className);
+                fp.offset = item.path.back().offset;
+                fp.fieldAddress = item.obj;
+                char buf[64]; snprintf(buf, sizeof(buf), "0x%lx", item.obj);
+                fp.formattedVal = buf;
+                fp.isIntField = false;
+                result.exploredChains.push_back(fp);
+            }
+        }
+
         // 1. 数组类型解包 (Array / T[])
-        bool isArray = (item.className.find("[]") != std::string::npos || item.className.find("Array") != std::string::npos);
+        bool isArray = (item.className.find("[]") != std::string::npos || item.className.find("Array") != std::string::npos || item.className == "System.Array");
         if (isArray) {
-            int arr_len = SAFE_READ_INT(item.obj, 0x18);
-            if (arr_len > 0 && arr_len <= 500) {
-                for (int i = 0; i < arr_len && i < 64; i++) {
-                    size_t elem_off = 0x20 + i * sizeof(uintptr_t);
+            uint32_t len_18 = 0, len_10 = 0;
+            SafeReadMemory(item.obj + 0x18, &len_18, sizeof(uint32_t));
+            SafeReadMemory(item.obj + 0x10, &len_10, sizeof(uint32_t));
+            
+            uint32_t arr_len = 0;
+            size_t elem_start_off = 0x20;
+            if (len_18 > 0 && len_18 <= 5000) { arr_len = len_18; elem_start_off = 0x20; }
+            else if (len_10 > 0 && len_10 <= 5000) { arr_len = len_10; elem_start_off = 0x18; }
+
+            if (arr_len > 0) {
+                for (uint32_t i = 0; i < arr_len && i < 64; i++) {
+                    size_t elem_off = elem_start_off + i * sizeof(uintptr_t);
                     uintptr_t elem_ptr = 0;
                     SafeReadMemory(item.obj + elem_off, &elem_ptr, sizeof(uintptr_t));
                     int32_t elem_val32 = 0;
@@ -3130,7 +3162,7 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                         std::string elem_lower = elemClass;
                         std::transform(elem_lower.begin(), elem_lower.end(), elem_lower.begin(), ::tolower);
 
-                        bool classMatch = (!elem_lower.empty() && elem_lower.find(target_lower) != std::string::npos);
+                        bool classMatch = (!target_lower.empty() && !elem_lower.empty() && elem_lower.find(target_lower) != std::string::npos);
 
                         char fbuf[64]; snprintf(fbuf, sizeof(fbuf), "0x%lx (%s)", elem_ptr, elem_clean.c_str());
                         std::vector<ObjectPathStep> nextPath = item.path;
@@ -3185,10 +3217,12 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
             }
         }
 
-        // 2. 列表与容器解包 (List<T> / Dictionary)
+        // 2. 列表 List<T> 快速穿透底层 _items
         if (item.className.find("List") != std::string::npos) {
             uintptr_t items_arr = 0;
             SafeReadMemory(item.obj + 0x10, &items_arr, sizeof(uintptr_t));
+            if (!IsValidPtr(items_arr)) SafeReadMemory(item.obj + 0x18, &items_arr, sizeof(uintptr_t));
+
             if (IsValidPtr(items_arr) && visited.find(items_arr) == visited.end()) {
                 visited.insert(items_arr);
                 std::vector<ObjectPathStep> nextPath = item.path;
@@ -3269,18 +3303,23 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                     }
 
                     // 全面模糊匹配判断
-                    bool fieldMatch = (!field_lower.empty() && field_lower.find(target_lower) != std::string::npos);
-                    bool typeMatch = (!type_lower.empty() && type_lower.find(target_lower) != std::string::npos) ||
-                                     (!clean_type_lower.empty() && clean_type_lower.find(target_lower) != std::string::npos);
-                    std::string str_content_lower = str_content;
-                    std::transform(str_content_lower.begin(), str_content_lower.end(), str_content_lower.begin(), ::tolower);
-                    bool stringValMatch = (!str_content.empty() && (str_content.find(target_raw) != std::string::npos || str_content_lower.find(target_lower) != std::string::npos));
-                    bool intValMatch = hasTargetInt && (val32 == targetIntVal || val64 == targetIntVal || (int64_t)rawVal == targetIntVal);
-                    bool offsetMatch = hasTargetInt && (f_offset == (size_t)targetIntVal);
-                    bool ptrMatch = hasTargetHexPtr && (rawVal == targetHexPtr || (item.obj + f_offset) == targetHexPtr);
-                    bool boolMatch = (target_lower == "true" && (rawVal & 0xFF) != 0) || (target_lower == "false" && (rawVal & 0xFF) == 0 && clean_type == "Boolean");
-                    
-                    bool isAnyMatch = fieldMatch || typeMatch || stringValMatch || intValMatch || offsetMatch || ptrMatch || boolMatch;
+                    bool isAnyMatch = false;
+                    bool intValMatch = false, fieldMatch = false, typeMatch = false, stringValMatch = false, classMatch = false;
+
+                    if (!target_lower.empty()) {
+                        fieldMatch = (!field_lower.empty() && field_lower.find(target_lower) != std::string::npos);
+                        typeMatch = (!type_lower.empty() && type_lower.find(target_lower) != std::string::npos) ||
+                                    (!clean_type_lower.empty() && clean_type_lower.find(target_lower) != std::string::npos);
+                        std::string str_content_lower = str_content;
+                        std::transform(str_content_lower.begin(), str_content_lower.end(), str_content_lower.begin(), ::tolower);
+                        stringValMatch = (!str_content.empty() && (str_content.find(target_raw) != std::string::npos || str_content_lower.find(target_lower) != std::string::npos));
+                        intValMatch = hasTargetInt && (val32 == targetIntVal || val64 == targetIntVal || (int64_t)rawVal == targetIntVal);
+                        bool offsetMatch = hasTargetInt && (f_offset == (size_t)targetIntVal);
+                        bool ptrMatch = hasTargetHexPtr && (rawVal == targetHexPtr || (item.obj + f_offset) == targetHexPtr);
+                        bool boolMatch = (target_lower == "true" && (rawVal & 0xFF) != 0) || (target_lower == "false" && (rawVal & 0xFF) == 0 && clean_type == "Boolean");
+                        
+                        isAnyMatch = fieldMatch || typeMatch || stringValMatch || intValMatch || offsetMatch || ptrMatch || boolMatch;
+                    }
 
                     uintptr_t child_ptr = 0;
                     bool isObjectRef = (IsValidPtr(item.obj + f_offset) && SafeReadMemory(item.obj + f_offset, &child_ptr, sizeof(uintptr_t)) && IsValidPtr(child_ptr));
@@ -3290,8 +3329,10 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
                         std::string child_lower = childClass;
                         std::transform(child_lower.begin(), child_lower.end(), child_lower.begin(), ::tolower);
 
-                        bool classMatch = (!child_lower.empty() && child_lower.find(target_lower) != std::string::npos);
-                        if (classMatch) isAnyMatch = true;
+                        if (!target_lower.empty() && !child_lower.empty() && child_lower.find(target_lower) != std::string::npos) {
+                            classMatch = true;
+                            isAnyMatch = true;
+                        }
 
                         std::vector<ObjectPathStep> nextPath = item.path;
                         nextPath.push_back({ item.obj, item.className, field_str, type_str, clean_type, f_offset, child_ptr, childClass.empty() ? clean_type : childClass, false, rawVal, formattedVal });
@@ -3363,6 +3404,11 @@ ObjectPathFindingResult AutoFindPath(uintptr_t rootObj, const std::string& targe
             }
         }
     }
+
+    // 严格按偏移升序排序
+    std::sort(result.paths.begin(), result.paths.end(), [](const FoundPath& a, const FoundPath& b) {
+        return a.offset < b.offset;
+    });
 
     return result;
 }
@@ -4925,7 +4971,7 @@ void DrawSymbolResolverUI() {
     ImGui::Spacing();
 
     // 2. 寻址终点 (类名/字段名/数值/金币/字典/列表/字符串等一切内容)
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名/字段名/金币数值/列表字典):");
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名/字段名/金币数值/列表字典，留空则全量探测链条):");
     ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
     ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
     ImGui::SameLine(); 
@@ -4964,6 +5010,7 @@ void DrawSymbolResolverUI() {
         } else {
             g_lastPathResult.found = false;
             g_lastPathResult.paths.clear();
+            g_lastPathResult.exploredChains.clear();
         }
     }
 
@@ -4989,151 +5036,167 @@ void DrawSymbolResolverUI() {
         }
     }
 
-    if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"未在当前内存搜索深度(%d)内找到目标: %s", g_search_max_depth, g_class_search_input);
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"建议适当调大顶部【深度】或确认对象已在游戏中实例化生成。");
-    }
+    auto RenderPathItem = [&](size_t p, const FoundPath& fp, bool isExplored) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        if (isExplored) {
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"=== 探测链条 [%zu] %s ===", p + 1, fp.matchDesc.c_str());
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), (const char*)u8"=== 匹配路径 [%zu] %s ===", p + 1, fp.matchDesc.c_str());
+        }
+        
+        ImGui::Indent(8.0f * g_autoScale);
+        
+        if (fp.steps.empty()) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", fp.targetInstance);
+        } else {
+            for (size_t s = 0; s < fp.steps.size(); s++) {
+                const auto& st = fp.steps[s];
+                ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "[第 %zu 层] %s", s + 1, st.fromClass.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "-> [+0x%lx: %s] ->", st.offset, st.fieldName.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
+            }
 
-    // 4. 路径输出：每一条路径下面都完整输出包含所有层级读到的三列表格 (字段/属性 | 值 | 类型)
+            std::string off_summary = (const char*)u8"[提取] 偏移链: 起点单例";
+            for (const auto& st : fp.steps) {
+                char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
+                off_summary += obuf;
+            }
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 字段物理绝对地址: 0x%lx (所属实例: 0x%lx)", fp.fieldAddress, fp.targetInstance);
+        }
+        
+        ImGui::Spacing();
+
+        // 3 列表格 (字段/属性 | 值 | 类型)
+        float col0_w = (avail_x - 20.0f * g_autoScale) * 0.40f;
+        float col1_w = (avail_x - 20.0f * g_autoScale) * 0.38f;
+        float col2_w = (avail_x - 20.0f * g_autoScale) * 0.22f;
+
+        char table_id[32]; snprintf(table_id, sizeof(table_id), "PathFieldCols_%s_%zu", isExplored ? "exp" : "mat", p);
+        ImGui::Columns(3, table_id, true);
+        ImGui::SetColumnWidth(0, col0_w);
+        ImGui::SetColumnWidth(1, col1_w);
+        ImGui::SetColumnWidth(2, col2_w);
+
+        // 表头
+        ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"字段/属性");
+        ImGui::NextColumn();
+        ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"值");
+        ImGui::NextColumn();
+        ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"类型");
+        ImGui::NextColumn();
+        ImGui::Separator();
+
+        if (fp.steps.empty()) {
+            // 0 层（起点自身）
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%s [+0x0]", fp.fieldName.c_str());
+            ImGui::NextColumn();
+            ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", fp.formattedVal.c_str());
+            ImGui::NextColumn();
+            ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", fp.cleanType.c_str());
+            ImGui::NextColumn();
+        } else {
+            // 完整输出第 1 层、第 2 层 ... 所有层级的字段行！
+            for (size_t s = 0; s < fp.steps.size(); s++) {
+                const auto& st = fp.steps[s];
+
+                uintptr_t cur_raw = 0;
+                SafeReadMemory(st.fromObj + st.offset, &cur_raw, sizeof(uintptr_t));
+                int32_t cur_val32 = 0;
+                SafeReadMemory(st.fromObj + st.offset, &cur_val32, sizeof(int32_t));
+
+                std::string live_val = "";
+                bool is_int = false;
+
+                if (st.cleanType == "String") {
+                    if (IsValidPtr(cur_raw)) {
+                        std::string s_str = ReadIl2CppString(cur_raw);
+                        live_val = s_str.empty() ? (const char*)u8"空字段" : ("\"" + s_str + "\"");
+                    } else {
+                        live_val = (const char*)u8"空字段";
+                    }
+                } else if (st.cleanType == "Boolean") {
+                    live_val = (cur_raw & 0xFF) ? "true" : "false";
+                } else if (st.cleanType == "Int32" || st.cleanType == "UInt32") {
+                    is_int = true;
+                    char buf[32]; snprintf(buf, sizeof(buf), "%d", cur_val32);
+                    live_val = buf;
+                } else if (st.cleanType == "Int64" || st.cleanType == "UInt64") {
+                    is_int = true;
+                    char buf[32]; snprintf(buf, sizeof(buf), "%ld", (int64_t)cur_raw);
+                    live_val = buf;
+                } else if (st.cleanType == "Single") {
+                    float fval = 0; memcpy(&fval, &cur_raw, sizeof(float));
+                    char buf[32]; snprintf(buf, sizeof(buf), "%.3f", fval);
+                    live_val = buf;
+                } else {
+                    if (cur_raw == 0) {
+                        live_val = "Null";
+                    } else {
+                        char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", cur_raw, st.cleanType.c_str());
+                        live_val = buf;
+                    }
+                }
+
+                // 列 1: 字段/属性
+                char layer_prefix[32]; snprintf(layer_prefix, sizeof(layer_prefix), "[L%zu] ", s + 1);
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", layer_prefix);
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%s", st.fieldName.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "[+0x%lx]", st.offset);
+                ImGui::NextColumn();
+
+                // 列 2: 实时值与快捷设置按钮
+                ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", live_val.c_str());
+                if (is_int) {
+                    ImGui::SameLine();
+                    char btn_apply_id[64]; snprintf(btn_apply_id, sizeof(btn_apply_id), (const char*)u8"★ 设为 pi_money##p%zu_s%zu_%s", p, s, isExplored ? "e" : "m");
+                    if (ImGui::Button(btn_apply_id)) {
+                        g_off.pi_money = st.offset;
+                        SaveConfig();
+                        AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx 并保存本地!", st.offset);
+                    }
+                }
+                ImGui::NextColumn();
+
+                // 列 3: 类型
+                ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", st.cleanType.c_str());
+                ImGui::NextColumn();
+            }
+        }
+
+        ImGui::Columns(1);
+        ImGui::Separator();
+
+        ImGui::Unindent(8.0f * g_autoScale);
+    };
+
+    // 4. 路径输出：
     if (g_lastPathResult.found) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 共扫描出 %zu 条关联路径与字段：", g_lastPathResult.paths.size());
         
         for (size_t p = 0; p < g_lastPathResult.paths.size(); p++) {
-            const auto& fp = g_lastPathResult.paths[p];
+            RenderPathItem(p, g_lastPathResult.paths[p], false);
+        }
+    } else {
+        // ★ 核心改进：即使未完全匹配到目标，也全量展示当前单例探测到的全部底层分支链条与所有层级表格！
+        if (!g_lastPathResult.exploredChains.empty()) {
             ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), (const char*)u8"=== 路径 [%zu] %s ===", p + 1, fp.matchDesc.c_str());
-            
-            ImGui::Indent(8.0f * g_autoScale);
-            
-            if (fp.steps.empty()) {
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", fp.targetInstance);
+            if (g_class_search_input[0] != '\0') {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), (const char*)u8"[提示] 未直接完全匹配到目标: \"%s\" (搜索深度: %d 层)", g_class_search_input, g_search_max_depth);
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f), (const char*)u8"-> 已为您全量解析展开当前单例已探测到的 %zu 条底层链路与全层级表格数据：", g_lastPathResult.exploredChains.size());
             } else {
-                for (size_t s = 0; s < fp.steps.size(); s++) {
-                    const auto& st = fp.steps[s];
-                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "[第 %zu 层] %s", s + 1, st.fromClass.c_str());
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "-> [+0x%lx: %s] ->", st.offset, st.fieldName.c_str());
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
-                }
-
-                std::string off_summary = (const char*)u8"[提取] 偏移链: 起点单例";
-                for (const auto& st : fp.steps) {
-                    char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
-                    off_summary += obuf;
-                }
-                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
-                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 字段物理绝对地址: 0x%lx (所属实例: 0x%lx)", fp.fieldAddress, fp.targetInstance);
-            }
-            
-            ImGui::Spacing();
-
-            // ★ 核心展示：遍历输出该路径上【所有层级 (第1层、第2层...)】读到的所有字段表格！
-            float col0_w = (avail_x - 20.0f * g_autoScale) * 0.40f;
-            float col1_w = (avail_x - 20.0f * g_autoScale) * 0.38f;
-            float col2_w = (avail_x - 20.0f * g_autoScale) * 0.22f;
-
-            char table_id[32]; snprintf(table_id, sizeof(table_id), "PathFieldCols_%zu", p);
-            ImGui::Columns(3, table_id, true);
-            ImGui::SetColumnWidth(0, col0_w);
-            ImGui::SetColumnWidth(1, col1_w);
-            ImGui::SetColumnWidth(2, col2_w);
-
-            // 表头
-            ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"字段/属性");
-            ImGui::NextColumn();
-            ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"值");
-            ImGui::NextColumn();
-            ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"类型");
-            ImGui::NextColumn();
-            ImGui::Separator();
-
-            if (fp.steps.empty()) {
-                // 0 层（起点自身）
-                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%s [+0x0]", fp.fieldName.c_str());
-                ImGui::NextColumn();
-                ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", fp.formattedVal.c_str());
-                ImGui::NextColumn();
-                ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", fp.cleanType.c_str());
-                ImGui::NextColumn();
-            } else {
-                // 完整输出第 1 层、第 2 层 ... 所有层级的字段行！
-                for (size_t s = 0; s < fp.steps.size(); s++) {
-                    const auto& st = fp.steps[s];
-
-                    // 实时从内存读取最新动态值
-                    uintptr_t cur_raw = 0;
-                    SafeReadMemory(st.fromObj + st.offset, &cur_raw, sizeof(uintptr_t));
-                    int32_t cur_val32 = 0;
-                    SafeReadMemory(st.fromObj + st.offset, &cur_val32, sizeof(int32_t));
-
-                    std::string live_val = "";
-                    bool is_int = false;
-
-                    if (st.cleanType == "String") {
-                        if (IsValidPtr(cur_raw)) {
-                            std::string s_str = ReadIl2CppString(cur_raw);
-                            live_val = s_str.empty() ? (const char*)u8"空字段" : ("\"" + s_str + "\"");
-                        } else {
-                            live_val = (const char*)u8"空字段";
-                        }
-                    } else if (st.cleanType == "Boolean") {
-                        live_val = (cur_raw & 0xFF) ? "true" : "false";
-                    } else if (st.cleanType == "Int32" || st.cleanType == "UInt32") {
-                        is_int = true;
-                        char buf[32]; snprintf(buf, sizeof(buf), "%d", cur_val32);
-                        live_val = buf;
-                    } else if (st.cleanType == "Int64" || st.cleanType == "UInt64") {
-                        is_int = true;
-                        char buf[32]; snprintf(buf, sizeof(buf), "%ld", (int64_t)cur_raw);
-                        live_val = buf;
-                    } else if (st.cleanType == "Single") {
-                        float fval = 0; memcpy(&fval, &cur_raw, sizeof(float));
-                        char buf[32]; snprintf(buf, sizeof(buf), "%.3f", fval);
-                        live_val = buf;
-                    } else {
-                        if (cur_raw == 0) {
-                            live_val = "Null";
-                        } else {
-                            char buf[64]; snprintf(buf, sizeof(buf), "0x%lx (%s)", cur_raw, st.cleanType.c_str());
-                            live_val = buf;
-                        }
-                    }
-
-                    // 列 1: 字段/属性 (带层级标号，如 [L1] _spriteHelperModel [+0x88])
-                    char layer_prefix[32]; snprintf(layer_prefix, sizeof(layer_prefix), "[L%zu] ", s + 1);
-                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", layer_prefix);
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%s", st.fieldName.c_str());
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "[+0x%lx]", st.offset);
-                    ImGui::NextColumn();
-
-                    // 列 2: 实时值与快捷设置按钮
-                    ImGui::TextColored(ImVec4(1.0f, 0.95f, 0.4f, 1.0f), "%s", live_val.c_str());
-                    if (is_int) {
-                        ImGui::SameLine();
-                        char btn_apply_id[64]; snprintf(btn_apply_id, sizeof(btn_apply_id), (const char*)u8"★ 设为 pi_money##p%zu_s%zu", p, s);
-                        if (ImGui::Button(btn_apply_id)) {
-                            g_off.pi_money = st.offset;
-                            SaveConfig();
-                            AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx 并保存本地!", st.offset);
-                        }
-                    }
-                    ImGui::NextColumn();
-
-                    // 列 3: 类型
-                    ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", st.cleanType.c_str());
-                    ImGui::NextColumn();
-                }
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[就绪] 当前单例全量探测到 %zu 条核心分支链条：", g_lastPathResult.exploredChains.size());
             }
 
-            ImGui::Columns(1);
-            ImGui::Separator();
-
-            ImGui::Unindent(8.0f * g_autoScale);
+            for (size_t p = 0; p < g_lastPathResult.exploredChains.size(); p++) {
+                RenderPathItem(p, g_lastPathResult.exploredChains[p], true);
+            }
         }
     }
     
