@@ -4310,12 +4310,13 @@ static std::string g_last_ime_text;
 static char*       g_ime_focus_target = nullptr; // 点[输入法]后需重新聚焦的输入框
 static const char* g_last_focused_input = nullptr; // 记录上一帧获得焦点的输入框，用于“点框即弹键盘”
 
-// 必须在 UI 线程执行（addContentView / showSoftInput 强制主线程），由 hook_nativeInjectEvent 消费 pending 标志
+// 注意：本函数可能在 GL 渲染线程（非 UI 线程）被调用。addContentView 会因 CalledFromWrongThread 抛异常，
+// 此时自动回退到 WindowManager 分支（独立 ViewRootImpl，线程一致，不会抛该异常，但需 SYSTEM_ALERT_WINDOW 权限）。
 static void DoShowIME() {
     if (g_ime_open) return;
     JNIEnv* e = nullptr;
-    if (!g_jvm) return;
-    if (g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6) != JNI_OK || !e) return;
+    if (!g_jvm) { LOGI("[IME] g_jvm null, abort"); return; }
+    if (g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6) != JNI_OK || !e) { LOGI("[IME] GetEnv fail, abort"); return; }
 
     // g_context 可能尚未从触摸 hook 初始化；这里兜底从 g_view_obj 推导 Activity/Context
     if (!g_context && g_view_obj) {
@@ -4324,22 +4325,27 @@ static void DoShowIME() {
         if (gc) { jobject c = e->CallObjectMethod(g_view_obj, gc); if (c) g_context = e->NewGlobalRef(c); }
         e->ExceptionClear();
     }
-    if (!g_context) return;
+    if (!g_context) { LOGI("[IME] g_context null, abort"); return; }
+    LOGI("[IME] context ready");
 
     jclass ctxCls = e->FindClass("android/content/Context");
     jmethodID getSys = e->GetMethodID(ctxCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
     jstring immName = e->NewStringUTF("input_method");
     jobject imm = e->CallObjectMethod(g_context, getSys, immName);
     e->DeleteLocalRef(immName);
-    if (!imm) return;
+    if (!imm) { LOGI("[IME] InputMethodManager null, abort"); return; }
 
     jclass etCls = e->FindClass("android/widget/EditText");
     jmethodID etCtor = e->GetMethodID(etCls, "<init>", "(Landroid/content/Context;)V");
     jobject et = e->NewObject(etCls, etCtor, g_context);
     jmethodID setText = e->GetMethodID(etCls, "setText", "(Ljava/lang/CharSequence;)V");
     e->CallVoidMethod(et, setText, e->NewStringUTF("")); // 清空上次残留
+    // 设为普通文本输入，确保弹出标准键盘
+    jmethodID setInputType = e->GetMethodID(etCls, "setInputType", "(I)V");
+    e->CallVoidMethod(et, setInputType, 1); // InputType.TYPE_CLASS_TEXT
 
-    // attach：优先 Activity.addContentView，否则 WindowManager 悬浮窗（TYPE_APPLICATION_OVERLAY）
+    // attach：先试 Activity.addContentView（需在主线程），失败再试 WindowManager 悬浮窗
+    bool attached = false;
     jclass actCls = e->FindClass("android/app/Activity");
     if (e->IsInstanceOf(g_context, actCls)) {
         jmethodID addCV = e->GetMethodID(actCls, "addContentView", "(Landroid/view/View;Landroid/view/ViewGroup$LayoutParams;)V");
@@ -4348,20 +4354,35 @@ static void DoShowIME() {
         jobject lp = e->NewObject(lpCls, lpCtor, 1, 1);
         e->CallVoidMethod(g_context, addCV, et, lp);
         e->DeleteLocalRef(lp);
-    } else {
+        if (e->ExceptionCheck()) {
+            e->ExceptionClear();
+            LOGI("[IME] addContentView threw (likely NOT on UI thread / CalledFromWrongThread)");
+        } else {
+            attached = true;
+            LOGI("[IME] addContentView ok");
+        }
+    }
+    if (!attached) {
+        // WindowManager 悬浮窗：从任意线程创建独立 ViewRootImpl（线程一致，不会 CalledFromWrongThread），
+        // 但需要 SYSTEM_ALERT_WINDOW 权限；窗口必须可聚焦（不能加 FLAG_NOT_FOCUSABLE），否则键盘弹不出。
         jobject wm = e->CallObjectMethod(g_context, getSys, e->NewStringUTF("window"));
         jclass wmCls = e->FindClass("android/view/WindowManager");
-        jmethodID addW = e->GetMethodID(wmCls, "addView", "(Landroid/view/View;Landroid/view/ViewGroup$LayoutParams;)V");
         jclass wlpCls = e->FindClass("android/view/WindowManager$LayoutParams");
         jmethodID wlpCtor = e->GetMethodID(wlpCls, "<init>", "(IIIIII)V");
-        // (w,h, TYPE_APPLICATION_OVERLAY=2038, FLAG_NOT_FOCUSABLE|FLAG_NOT_TOUCHABLE=8|16, FORMAT=-3)
-        jobject wlp = e->NewObject(wlpCls, wlpCtor, 1, 1, 2038, 8 | 16, -3);
+        jmethodID addW = e->GetMethodID(wmCls, "addView", "(Landroid/view/View;Landroid/view/ViewGroup$LayoutParams;)V");
+        // (w,h, TYPE_APPLICATION_OVERLAY=2038, 仅 FLAG_NOT_TOUCHABLE=16 [去掉 NOT_FOCUSABLE], FORMAT=-3)
+        jobject wlp = e->NewObject(wlpCls, wlpCtor, 1, 1, 2038, 16, -3);
         e->CallVoidMethod(wm, addW, et, wlp);
         e->DeleteLocalRef(wlp);
+        if (e->ExceptionCheck()) {
+            e->ExceptionClear();
+            LOGI("[IME] WM addView threw (likely no SYSTEM_ALERT_WINDOW permission)");
+        } else {
+            attached = true;
+            LOGI("[IME] WM addView ok");
+        }
     }
-
-    // 若 addContentView/addView 抛异常（非 UI 线程调用 / 无悬浮窗权限），立即回滚，避免误判为已打开
-    if (e->ExceptionCheck()) { e->ExceptionClear(); return; }
+    if (!attached) { LOGI("[IME] attach failed, abort"); return; }
 
     // 让隐藏的 EditText 也能拿到焦点并唤起键盘：先设为可聚焦，再隐藏，再 requestFocus
     e->CallVoidMethod(et, e->GetMethodID(etCls, "setFocusableInTouchMode", "(Z)V"), 1);
@@ -4372,12 +4393,14 @@ static void DoShowIME() {
 
     jclass immCls = e->FindClass("android/view/inputmethod/InputMethodManager");
     jmethodID show = e->GetMethodID(immCls, "showSoftInput", "(Landroid/view/View;I)Z");
-    e->CallBooleanMethod(imm, show, et, 2); // SHOW_FORCED，比 SHOW_IMPLICIT 更可靠
+    jboolean ok = e->CallBooleanMethod(imm, show, et, 2); // SHOW_FORCED，比 SHOW_IMPLICIT 更可靠
     e->ExceptionClear();
+    LOGI("[IME] showSoftInput returned %d", (int)ok);
 
     g_ime_edittext = e->NewGlobalRef(et);
     g_ime_open = true;
     g_last_ime_text.clear();
+    LOGI("[IME] opened");
 }
 
 static void DoHideIME() {
