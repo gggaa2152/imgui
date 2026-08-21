@@ -10,8 +10,6 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <string>
-#include "chinese_font_data.h"
-#include <zlib.h>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -206,7 +204,6 @@ static bool g_need_segment_gap_before_enter = false;
 
 // UI State & Styles
 bool g_isImGuiInit = false;
-ImGuiContext* g_ourImGuiContext = nullptr;
 ImFont* g_mainFont = nullptr;
 float g_autoScale = 1.0f;
 float g_current_rendered_size = 0.0f;
@@ -1816,53 +1813,24 @@ void SetupImGuiStyle() { ApplyFrostedTheme(); }
 // 暴力扫描 /system/fonts/ 目录，尝试所有字体文件直到找到能加载中文的
 // 原因: MuMu 12 (Android 12+) 的中文字体都是 CFF/OTF 格式，stb_truetype 只支持 TrueType 轮廓
 // 所以需要暴力尝试所有 .ttf 文件，找到真正的 TrueType 格式字体
-static bool FontHasChineseGlyphs(ImFont* font) {
-    if (!font) return false;
-    // Check basic Chinese test characters: "中"(0x4E2D), "文"(0x6587), "金"(0x91D1)
-    return (font->IsGlyphInFont((ImWchar)0x4E2D) && 
-            font->IsGlyphInFont((ImWchar)0x6587) &&
-            font->IsGlyphInFont((ImWchar)0x91D1));
-}
-
 ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size) {
-    if (!path || access(path, R_OK) != 0) return nullptr;
     ImFontConfig cfg;
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
     cfg.PixelSnapH = true;
     cfg.FontNo = fontNo;
-    ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseFull());
+    ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
     if (f) {
-        if (io.Fonts->Build() && FontHasChineseGlyphs(f)) {
-            LOGI("[+] True Chinese Font Validated OK: %s (FontNo: %d)", path, fontNo);
+        if (io.Fonts->Build()) {
+            LOGI("[+] Font OK: %s (FontNo: %d)", path, fontNo);
             return f;
         }
-        LOGI("[!] Font loaded but missing Chinese glyphs (Latin stub): %s (FontNo: %d)", path, fontNo);
+        LOGI("[!] Font Build() failed: %s (FontNo: %d)", path, fontNo);
+    } else {
+        LOGI("[!] AddFontFromFileTTF NULL: %s (FontNo: %d)", path, fontNo);
     }
     io.Fonts->Clear();
     return nullptr;
-}
-
-static std::vector<unsigned char> g_embedded_font_buffer;
-
-void LoadEmbeddedChineseFont(ImGuiIO& io, float targetSize) {
-    if (g_embedded_font_buffer.empty()) {
-        g_embedded_font_buffer.resize(chinese_font_original_size);
-        uLongf destLen = chinese_font_original_size;
-        int res = uncompress(g_embedded_font_buffer.data(), &destLen, chinese_font_compressed_data, chinese_font_compressed_size);
-        if (res != Z_OK) {
-            LOGI("[!] Font decompression failed with code %d", res);
-            g_embedded_font_buffer.clear();
-            return;
-        }
-        LOGI("[+] Embedded Chinese font decompressed successfully (%lu bytes)", destLen);
-    }
-    ImFontConfig cfg;
-    cfg.OversampleH = 1;
-    cfg.OversampleV = 1;
-    cfg.PixelSnapH = true;
-    cfg.FontDataOwnedByAtlas = false;
-    g_mainFont = io.Fonts->AddFontFromMemoryTTF(g_embedded_font_buffer.data(), g_embedded_font_buffer.size(), targetSize, &cfg, io.Fonts->GetGlyphRangesChineseFull());
 }
 
 void UpdateFontHD(bool force = false) {
@@ -1876,34 +1844,110 @@ void UpdateFontHD(bool force = false) {
     io.Fonts->Clear();
     g_mainFont = nullptr;
 
-    // Step 1: 尝试内置的高清中文字库 (最稳妥，100% 保证有中文字符)
-    LOGI("[*] Loading embedded Chinese TrueType font...");
-    LoadEmbeddedChineseFont(io, targetSize);
-    if (g_mainFont && io.Fonts->Build() && FontHasChineseGlyphs(g_mainFont)) {
-        LOGI("[+] Embedded Chinese TrueType font loaded perfectly!");
-        goto font_done;
-    }
-    io.Fonts->Clear();
-    g_mainFont = nullptr;
+    // Phase 1: 优先尝试已知的纯 TrueType 中文字体路径
+    const char* priority_paths[] = {
+        "/system/fonts/DroidSansFallback.ttf",
+        "/system/fonts/DroidSansFallbackFull.ttf",
+        "/system/fonts/NotoSansSC-Regular.ttf",
+        "/system/fonts/NotoSansHans-Regular.ttf",
+        "/system/fonts/SysSans-Hans-Regular.ttf",
+        "/system/fonts/Miui-Regular.ttf",
+        "/system/fonts/SourceHanSansCN-Regular.ttf",
+        "/system/fonts/HarmonyOS_Sans_SC.ttf",
+        "/system/fonts/OplusSC-Regular.ttf",
+        "/system/fonts/VivoSansSC-Regular.ttf",
+    };
 
-    // Step 2: 如果内置失败，尝试系统真实中文字体
+    for (const char* path : priority_paths) {
+        if (access(path, R_OK) != 0) continue;
+        LOGI("[*] Phase1 trying: %s", path);
+        g_mainFont = TryLoadChineseFont(io, path, 0, targetSize);
+        if (g_mainFont) goto font_done;
+    }
+
+    // Phase 2: 尝试 TTC 集合字体（索引 0~4）
     {
-        const char* candidate_fonts[] = {
-            "/system/fonts/NotoSansSC-Regular.ttf",
-            "/system/fonts/NotoSansHans-Regular.ttf",
-            "/system/fonts/DroidSansFallback.ttf",
-            "/system/fonts/DroidSansFallbackFull.ttf",
-            "/system/fonts/SourceHanSansCN-Regular.ttf",
-            "/system/fonts/HarmonyOS_Sans_SC.ttf"
+        const char* ttc_paths[] = {
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/NotoSerifCJK-Regular.ttc",
         };
-        for (const char* path : candidate_fonts) {
-            g_mainFont = TryLoadChineseFont(io, path, 0, targetSize);
-            if (g_mainFont) goto font_done;
+        for (const char* path : ttc_paths) {
+            if (access(path, R_OK) != 0) continue;
+            for (int idx = 0; idx < 5; idx++) {
+                LOGI("[*] Phase2 trying TTC: %s (FontNo: %d)", path, idx);
+                g_mainFont = TryLoadChineseFont(io, path, idx, targetSize);
+                if (g_mainFont) goto font_done;
+            }
         }
     }
 
-    // Step 3: 默认英文字体保底
-    LOGI("[!] Fallback to default font.");
+    // Phase 3: 暴力扫描 /system/fonts/ 目录，尝试所有 .ttf 文件
+    {
+        DIR* dir = opendir("/system/fonts");
+        if (dir) {
+            LOGI("[*] Phase3: Scanning /system/fonts/ for ANY TrueType font with Chinese glyphs...");
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                std::string name = ent->d_name;
+                // 只尝试 .ttf 文件（.otf 是 CFF 格式，stb_truetype 不支持）
+                if (name.size() < 5) continue;
+                std::string ext = name.substr(name.size() - 4);
+                if (ext != ".ttf" && ext != ".TTF") continue;
+                std::string full = "/system/fonts/" + name;
+                if (access(full.c_str(), R_OK) != 0) continue;
+                LOGI("[*] Phase3 trying: %s", full.c_str());
+                g_mainFont = TryLoadChineseFont(io, full.c_str(), 0, targetSize);
+                if (g_mainFont) { closedir(dir); goto font_done; }
+            }
+            closedir(dir);
+        }
+
+        // 也扫描 /product/fonts/
+        dir = opendir("/product/fonts");
+        if (dir) {
+            LOGI("[*] Phase3: Scanning /product/fonts/...");
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                std::string name = ent->d_name;
+                if (name.size() < 5) continue;
+                std::string ext = name.substr(name.size() - 4);
+                if (ext != ".ttf" && ext != ".TTF") continue;
+                std::string full = "/product/fonts/" + name;
+                if (access(full.c_str(), R_OK) != 0) continue;
+                LOGI("[*] Phase3 trying: %s", full.c_str());
+                g_mainFont = TryLoadChineseFont(io, full.c_str(), 0, targetSize);
+                if (g_mainFont) { closedir(dir); goto font_done; }
+            }
+            closedir(dir);
+        }
+    }
+
+    // Phase 4: 尝试所有 .ttc 文件的所有子字体索引
+    {
+        DIR* dir = opendir("/system/fonts");
+        if (dir) {
+            LOGI("[*] Phase4: Trying ALL .ttc files with indices 0-6...");
+            struct dirent* ent;
+            while ((ent = readdir(dir)) != NULL) {
+                std::string name = ent->d_name;
+                if (name.size() < 5) continue;
+                std::string ext = name.substr(name.size() - 4);
+                if (ext != ".ttc" && ext != ".TTC") continue;
+                std::string full = "/system/fonts/" + name;
+                if (access(full.c_str(), R_OK) != 0) continue;
+                for (int idx = 0; idx < 7; idx++) {
+                    LOGI("[*] Phase4 trying: %s (FontNo: %d)", full.c_str(), idx);
+                    g_mainFont = TryLoadChineseFont(io, full.c_str(), idx, targetSize);
+                    if (g_mainFont) { closedir(dir); goto font_done; }
+                }
+            }
+            closedir(dir);
+        }
+    }
+
+    // Phase 5: 完全失败，使用默认英文字体
+    LOGI("[!] ALL FONT PHASES FAILED. No TrueType Chinese font found on this system.");
+    LOGI("[!] Falling back to default ASCII font. Chinese will show as '?'.");
     g_mainFont = io.Fonts->AddFontDefault();
     io.Fonts->Build();
 
@@ -4331,11 +4375,6 @@ extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) 
                 if (g_cached_view_width > 0 && g_gl_width > 0) scale_x = (float)g_gl_width / g_cached_view_width;
                 if (g_cached_view_height > 0 && g_gl_height > 0) scale_y = (float)g_gl_height / g_cached_view_height;
 
-                // 关键修复: 必须切换到我们自己的 ImGui 上下文!
-                // 不设置的话, 当 libTool.so 也使用 ImGui 时, GetIO() 可能返回对方的上下文
-                // 导致触摸输入写入错误位置, 菜单收不到点击, 字体纹理被污染
-                if (!g_ourImGuiContext) { if (old_nativeInjectEvent) old_nativeInjectEvent(env, obj, event); return; }
-                ImGui::SetCurrentContext(g_ourImGuiContext);
                 ImGuiIO& io = ImGui::GetIO();
                 io.AddMousePosEvent(raw_x * scale_x, raw_y * scale_y);
 
@@ -4504,12 +4543,8 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     GLboolean last_enable_scissor_test = glIsEnabled(GL_SCISSOR_TEST);
     GLint last_fbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &last_fbo);
 
-    if (!g_ourImGuiContext) {
-        g_ourImGuiContext = ImGui::CreateContext();
-    }
-    ImGui::SetCurrentContext(g_ourImGuiContext);
-
     if (!g_isImGuiInit) {
+        ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
 
@@ -4563,8 +4598,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 
     ImGui::Render();
 
-    // 强制渲染到屏幕 FBO 0 (不是 last_fbo!)
-    // 当另一个 SO 也 Hook eglSwapBuffers 时, last_fbo 可能是对方的离屏 FBO
+    // 强行刷新状态机并绑定画面最顶层
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, g_gl_width, g_gl_height);
     glDisable(GL_DEPTH_TEST);
@@ -4572,19 +4606,6 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    // 关键: 清除外部 SO 可能绑定的 Sampler Object, 否则会覆盖我们字体纹理的采样参数导致豆腐块
-    glActiveTexture(GL_TEXTURE0);
-    typedef void (*PFNGLBINDSAMPLERPROC)(GLuint unit, GLuint sampler);
-    static PFNGLBINDSAMPLERPROC myGlBindSampler = nullptr;
-    static bool sampler_resolved = false;
-    if (!sampler_resolved) {
-        myGlBindSampler = (PFNGLBINDSAMPLERPROC)eglGetProcAddress("glBindSampler");
-        sampler_resolved = true;
-    }
-    if (myGlBindSampler) {
-        myGlBindSampler(0, 0); // 解绑 Sampler Object, 使用纹理自身的采样参数
-    }
 
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -4605,20 +4626,9 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 }
 
 unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
-    // 帧计数器 (GLES 路径)
-    g_current_frame++;
-    if (g_active_renderer.load() == 0) g_active_renderer.store(1);
-
-    // 防重入: 如果另一个 SO 的 hook 链导致递归调用, 直接跳过
     static bool in_render = false;
     if (!in_render) {
         in_render = true;
-
-        if (!g_ourImGuiContext) {
-            g_ourImGuiContext = ImGui::CreateContext();
-        }
-        ImGui::SetCurrentContext(g_ourImGuiContext);
-
         RenderImGui_Core_GLES(display, surface);
         in_render = false;
     }
@@ -4628,6 +4638,9 @@ unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
 
 void* hook_eglGetProcAddress(const char* procname) {
     if (!procname) return nullptr;
+    if (strcmp(procname, "eglSwapBuffers") == 0 || strcmp(procname, "eglSwapBuffersWithDamageKHR") == 0) {
+        return (void*)hook_eglSwap;
+    }
     if (old_eglGetProcAddress) return old_eglGetProcAddress(procname);
     return nullptr;
 }
