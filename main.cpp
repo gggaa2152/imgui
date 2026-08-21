@@ -3410,12 +3410,61 @@ void DrawActionLogOverlay() {
 
 
 
+// ==========================================
+// 符号反查与动态反射模块 (Symbol Reflection & Inspector)
+// ==========================================
+
+inline std::string CleanIl2CppTypeName(const std::string& raw) {
+    if (raw.empty()) return "var";
+    if (raw == "System.Int32" || raw == "int") return "Int32";
+    if (raw == "System.Int64" || raw == "long") return "Int64";
+    if (raw == "System.UInt32" || raw == "uint") return "UInt32";
+    if (raw == "System.UInt64" || raw == "ulong") return "UInt64";
+    if (raw == "System.Single" || raw == "float") return "Single";
+    if (raw == "System.Double" || raw == "double") return "Double";
+    if (raw == "System.Boolean" || raw == "bool") return "Boolean";
+    if (raw == "System.String" || raw == "string") return "String";
+    if (raw == "System.Byte" || raw == "byte") return "Byte";
+    if (raw == "System.SByte" || raw == "sbyte") return "SByte";
+    if (raw == "System.Int16" || raw == "short") return "Int16";
+    if (raw == "System.UInt16" || raw == "ushort") return "UInt16";
+    if (raw == "System.Char" || raw == "char") return "Char";
+    if (raw == "System.Void" || raw == "void") return "Void";
+    if (raw == "UnityEngine.Transform") return "Transform";
+    if (raw == "UnityEngine.GameObject") return "GameObject";
+    if (raw == "UnityEngine.Vector2") return "Vector2";
+    if (raw == "UnityEngine.Vector3") return "Vector3";
+    if (raw == "UnityEngine.Color") return "Color";
+    
+    // Handle List`1 generics
+    if (raw.find("System.Collections.Generic.List`1") != std::string::npos || raw.find("List`1") != std::string::npos) {
+        size_t b = raw.find('[');
+        size_t e = raw.rfind(']');
+        if (b != std::string::npos && e != std::string::npos && e > b) {
+            std::string sub = raw.substr(b + 1, e - b - 1);
+            return "List<" + CleanIl2CppTypeName(sub) + ">";
+        }
+        return "List<GameObject>";
+    }
+    
+    // Remove namespaces
+    size_t lastDot = raw.rfind('.');
+    if (lastDot != std::string::npos && lastDot + 1 < raw.length()) {
+        return raw.substr(lastDot + 1);
+    }
+    return raw;
+}
+
 struct LiveFieldInfo {
     std::string name;
     std::string typeName;
+    std::string cleanTypeName;
     size_t offset;
     uintptr_t rawValue;
     std::string childClassName;
+    std::string strValue;
+    bool isString;
+    bool isPointer;
     bool matchesKnown;
     std::string matchDesc;
 };
@@ -3424,6 +3473,7 @@ struct LiveInstanceDump {
     std::string label;
     uintptr_t address;
     std::string fullClassName;
+    std::string shortClassName;
     std::vector<LiveFieldInfo> fields;
     bool valid;
 };
@@ -3445,6 +3495,7 @@ LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
     const char* c_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass_ptr) : nullptr;
     if (!c_name || !c_name[0]) return dump;
 
+    dump.shortClassName = c_name;
     dump.fullClassName = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
     dump.valid = true;
 
@@ -3459,21 +3510,35 @@ LiveInstanceDump InspectLiveInstance(const char* label, uintptr_t ptr) {
             LiveFieldInfo fInfo;
             fInfo.name = f_name ? f_name : "";
             fInfo.typeName = t_name ? t_name : "";
+            fInfo.cleanTypeName = CleanIl2CppTypeName(fInfo.typeName);
             fInfo.offset = f_offset;
             fInfo.rawValue = 0;
+            fInfo.strValue = "";
+            fInfo.isString = false;
+            fInfo.isPointer = false;
             fInfo.matchesKnown = false;
 
-                        if (IsValidPtr(ptr + f_offset)) {
-                SafeReadMemory((uintptr_t)(ptr + f_offset), &fInfo.rawValue, sizeof(uintptr_t));
-                if (IsValidPtr(fInfo.rawValue)) {
-                    if (fInfo.typeName.find("System.String") == std::string::npos &&
-                        fInfo.typeName != "int" && fInfo.typeName != "float" && 
-                        fInfo.typeName != "bool" && fInfo.typeName != "byte" && 
-                        fInfo.typeName != "short" && fInfo.typeName != "long" && 
-                        fInfo.typeName != "double" && fInfo.typeName != "uint" && 
-                        fInfo.typeName != "ushort" && fInfo.typeName != "ulong" && 
-                        fInfo.typeName != "sbyte" && fInfo.typeName != "char") {
-                        fInfo.childClassName = fInfo.typeName;
+            if (IsValidPtr(ptr + f_offset)) {
+                SafeReadMemory(ptr + f_offset, &fInfo.rawValue, sizeof(uintptr_t));
+                
+                // 字符串解析
+                if (fInfo.typeName == "System.String" || fInfo.typeName.find("String") != std::string::npos) {
+                    fInfo.isString = true;
+                    if (IsValidPtr(fInfo.rawValue)) {
+                        fInfo.strValue = ReadIl2CppString(fInfo.rawValue);
+                    }
+                }
+                // 指针对象解析
+                else if (IsValidPtr(fInfo.rawValue)) {
+                    fInfo.isPointer = true;
+                    void* child_klass = nullptr;
+                    if (SafeReadMemory(fInfo.rawValue, &child_klass, sizeof(void*)) && IsValidIl2CppClass(child_klass)) {
+                        const char* child_cname = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(child_klass) : "";
+                        const char* child_ns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(child_klass) : "";
+                        fInfo.childClassName = (child_ns && child_ns[0]) ? (std::string(child_ns) + "." + child_cname) : std::string(child_cname);
+                    }
+                    if (fInfo.childClassName.empty()) {
+                        fInfo.childClassName = fInfo.cleanTypeName;
                     }
                 }
             }
@@ -3566,7 +3631,7 @@ void DoKeywordSearch(std::string kw) {
 
                         std::lock_guard<std::mutex> lock(g_kwMutex);
                         if (g_kwResults.size() < 400) {
-                            g_kwResults.push_back({ full_class, f_str, t_name ? t_name : "", (uintptr_t)f_offset, false });
+                            g_kwResults.push_back({ full_class, f_str, CleanIl2CppTypeName(t_name ? t_name : ""), (uintptr_t)f_offset, false });
                         }
                     }
                 }
@@ -3598,10 +3663,208 @@ void DoKeywordSearch(std::string kw) {
     AddActionLog((const char*)u8"-> [关键词搜索] 搜索 '%s' 找到 %zu 条匹配元数据!", kw.c_str(), g_kwResults.size());
 }
 
-static int g_resolver_subtab = 0;
+// ===== 面包屑导航与对象检查器状态 =====
+struct InspectBreadcrumb {
+    std::string name;
+    uintptr_t address;
+};
+
+static std::vector<InspectBreadcrumb> g_inspect_breadcrumbs;
+static char g_inspector_filter[64] = "";
+static bool g_inspect_include_props = true;
+static int g_resolver_subtab = 0; // 0=金币定位与对象检查器, 1=单例链路寻址, 2=关键字符号搜索
 static char g_custom_inspect_addr[32] = "0x0";
 static LiveInstanceDump g_custom_dump;
 
+// ===== 金币定位数据结构与扫描引擎 =====
+struct CoinMatchResult {
+    uintptr_t instancePtr;
+    std::string instanceName;
+    std::string fieldName;
+    std::string fieldType;
+    size_t offset;
+    uintptr_t fieldAddress;
+    int64_t val;
+};
+
+static std::vector<CoinMatchResult> g_coin_matches;
+static int g_coin_search_val = 50;
+static char g_coin_search_str[32] = "50";
+static int g_coin_search_scope = 0; // 0=我的玩家实例, 1=所有玩家列表, 2=当前检查对象, 3=ChessModelManager, 4=CSOGame, 5=自定义内存地址
+static char g_custom_coin_scan_addr[32] = "0x0";
+static bool g_coin_scanned = false;
+static std::string g_coin_scan_msg = "";
+
+void NavigateToInspect(const std::string& name, uintptr_t address) {
+    if (!IsValidPtr(address)) return;
+
+    int existingIdx = -1;
+    for (size_t i = 0; i < g_inspect_breadcrumbs.size(); i++) {
+        if (g_inspect_breadcrumbs[i].address == address) {
+            existingIdx = (int)i;
+            break;
+        }
+    }
+
+    if (existingIdx >= 0) {
+        g_inspect_breadcrumbs.resize(existingIdx + 1);
+    } else {
+        if (g_inspect_breadcrumbs.size() >= 8) {
+            g_inspect_breadcrumbs.erase(g_inspect_breadcrumbs.begin());
+        }
+        g_inspect_breadcrumbs.push_back({ name, address });
+    }
+
+    g_custom_dump = InspectLiveInstance(name.c_str(), address);
+    snprintf(g_custom_inspect_addr, sizeof(g_custom_inspect_addr), "0x%lx", address);
+}
+
+void ScanInstanceForCoin(uintptr_t inst, const std::string& instLabel, int targetCoin, std::vector<CoinMatchResult>& outMatches) {
+    if (!IsValidPtr(inst)) return;
+
+    void* klass_ptr = nullptr;
+    std::string className = instLabel;
+    if (SafeReadMemory(inst, &klass_ptr, sizeof(void*)) && IsValidIl2CppClass(klass_ptr)) {
+        const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass_ptr) : "";
+        if (c_name && c_name[0]) className = c_name;
+    }
+
+    bool foundAny = false;
+    if (klass_ptr && g_il2cpp_api.class_get_fields) {
+        void* iter = nullptr;
+        while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
+            const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
+            size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
+            void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
+            const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
+            std::string cleanType = CleanIl2CppTypeName(t_name ? t_name : "");
+
+            if (f_offset > 0 && f_offset < 0x3000) {
+                int32_t val32 = 0;
+                if (SafeReadMemory(inst + f_offset, &val32, sizeof(int32_t))) {
+                    if (val32 == targetCoin) {
+                        foundAny = true;
+                        char f_display[128];
+                        snprintf(f_display, sizeof(f_display), "%s", f_name && f_name[0] ? f_name : "unknown_field");
+                        outMatches.push_back({
+                            inst,
+                            className,
+                            std::string(f_display),
+                            cleanType.empty() ? "Int32" : cleanType,
+                            f_offset,
+                            inst + f_offset,
+                            (int64_t)val32
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 若未通过反射匹配到，则执行内存偏移暴力扫描 (0x10 ~ 0x300, 4字节步长)
+    if (!foundAny) {
+        for (size_t off = 0x10; off <= 0x300; off += 4) {
+            int32_t v = SAFE_READ_INT(inst, off);
+            if (v == targetCoin) {
+                char obuf[32];
+                snprintf(obuf, sizeof(obuf), "offset_+0x%lx", off);
+                outMatches.push_back({
+                    inst,
+                    className,
+                    std::string(obuf),
+                    "Int32",
+                    off,
+                    inst + off,
+                    (int64_t)v
+                });
+            }
+        }
+    }
+}
+
+void ExecuteCoinLocatorScan() {
+    g_coin_matches.clear();
+    g_coin_search_val = atoi(g_coin_search_str);
+    g_coin_scanned = true;
+
+    if (g_coin_search_scope == 0) { // 我的玩家实例
+        uintptr_t my_player_ptr = 0;
+        uintptr_t my_addr13 = 0;
+        std::string my_name = "我的玩家";
+
+        for (const auto& pi : g_players) {
+            if (pi.id == g_my_player_id && IsValidPtr(pi.val_ptr)) {
+                my_player_ptr = pi.val_ptr;
+                my_addr13 = pi.addr13_ptr;
+                my_name = "我的玩家 (" + pi.name + ")";
+                break;
+            }
+        }
+        if (my_player_ptr == 0 && !g_dbg_player_addrs.empty() && IsValidPtr(g_dbg_player_addrs[0])) {
+            my_player_ptr = g_dbg_player_addrs[0];
+            my_name = "玩家实例[0]";
+        }
+
+        if (IsValidPtr(my_player_ptr)) {
+            ScanInstanceForCoin(my_player_ptr, my_name, g_coin_search_val, g_coin_matches);
+            if (IsValidPtr(my_addr13)) {
+                ScanInstanceForCoin(my_addr13, my_name + "->addr13", g_coin_search_val, g_coin_matches);
+            }
+        } else {
+            g_coin_scan_msg = (const char*)u8"未找到有效我的玩家实例指针，请先进入对局或选择其他扫描范围！";
+            return;
+        }
+    } else if (g_coin_search_scope == 1) { // 全部玩家列表
+        for (size_t i = 0; i < g_dbg_player_addrs.size(); i++) {
+            uintptr_t p_val = g_dbg_player_addrs[i];
+            if (IsValidPtr(p_val)) {
+                char p_label[64];
+                snprintf(p_label, sizeof(p_label), "玩家 [%zu]", i + 1);
+                ScanInstanceForCoin(p_val, p_label, g_coin_search_val, g_coin_matches);
+            }
+        }
+    } else if (g_coin_search_scope == 2) { // 当前检查对象
+        if (IsValidPtr(g_custom_dump.address)) {
+            ScanInstanceForCoin(g_custom_dump.address, g_custom_dump.shortClassName.empty() ? "当前对象" : g_custom_dump.shortClassName, g_coin_search_val, g_coin_matches);
+        } else {
+            g_coin_scan_msg = (const char*)u8"当前检查对象指针为空，请先载入对象！";
+            return;
+        }
+    } else if (g_coin_search_scope == 3) { // ChessModelManager
+        uintptr_t cmm = g_dbg_addr1;
+        if (!IsValidPtr(cmm)) cmm = GetSingletonInstance("ChessModelManager");
+        if (IsValidPtr(cmm)) {
+            ScanInstanceForCoin(cmm, "ChessModelManager", g_coin_search_val, g_coin_matches);
+        } else {
+            g_coin_scan_msg = (const char*)u8"无法获取 ChessModelManager 单例实例！";
+            return;
+        }
+    } else if (g_coin_search_scope == 4) { // CSOGame
+        if (IsValidPtr(g_dbg_segmentcsogame)) {
+            ScanInstanceForCoin(g_dbg_segmentcsogame, "CSOGame", g_coin_search_val, g_coin_matches);
+        } else {
+            g_coin_scan_msg = (const char*)u8"CSOGame 对局基址未就绪！";
+            return;
+        }
+    } else if (g_coin_search_scope == 5) { // 自定义内存地址
+        uintptr_t custom_ptr = strtoull(g_custom_coin_scan_addr, nullptr, 16);
+        if (IsValidPtr(custom_ptr)) {
+            ScanInstanceForCoin(custom_ptr, "自定义实例", g_coin_search_val, g_coin_matches);
+        } else {
+            g_coin_scan_msg = (const char*)u8"请输入有效的 16 进制内存地址 (如 0x741b86f880)！";
+            return;
+        }
+    }
+
+    if (g_coin_matches.empty()) {
+        g_coin_scan_msg = (const char*)u8"未在目标实例中找到值为 " + std::to_string(g_coin_search_val) + (const char*)u8" 的字段，请确认金币数值是否发生变动。";
+    } else {
+        g_coin_scan_msg = (const char*)u8"成功匹配到 " + std::to_string(g_coin_matches.size()) + (const char*)u8" 个金币字段！";
+        AddActionLog((const char*)u8"-> [金币定位] 匹配到 %zu 个金币字段 (数值: %d)", g_coin_matches.size(), g_coin_search_val);
+    }
+}
+
+// ===== 树状下钻节点 =====
 void DrawInteractiveObjectNode(uintptr_t obj_ptr, const char* fieldName, size_t offset, float scale, int depth, std::unordered_set<uintptr_t>& visited) {
     if (!IsValidPtr(obj_ptr)) {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "  +0x%-4lx %s: null / 0x0", offset, fieldName);
@@ -3624,7 +3887,6 @@ void DrawInteractiveObjectNode(uintptr_t obj_ptr, const char* fieldName, size_t 
     std::string full_class = (c_ns && c_ns[0]) ? (std::string(c_ns) + "." + c_name) : std::string(c_name);
     if (full_class.empty()) full_class = "UnknownClass";
 
-    // 1. 如果是 String 字符串对象，直接读取并显示内容
     if (full_class == "System.String" || full_class.find("String") != std::string::npos) {
         std::string str_val = ReadIl2CppString(obj_ptr);
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", offset);
@@ -3637,7 +3899,6 @@ void DrawInteractiveObjectNode(uintptr_t obj_ptr, const char* fieldName, size_t 
         return;
     }
 
-    // 2. 如果是 List<T> 列表，读取 Count 并允许逐个展开元素
     if (full_class.find("System.Collections.Generic.List`1") != std::string::npos || full_class.find("List`1") != std::string::npos) {
         int list_size = SAFE_READ_INT(obj_ptr, 0x18);
         uintptr_t items_arr = SAFE_READ_PTR(obj_ptr, 0x10);
@@ -3663,93 +3924,53 @@ void DrawInteractiveObjectNode(uintptr_t obj_ptr, const char* fieldName, size_t 
         return;
     }
 
-    // 3. 防递归死循环
     if (visited.find(obj_ptr) != visited.end() || depth > 10) {
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  +0x%-4lx %s: 0x%lx (%s) [已展开/循环引用]", offset, fieldName, obj_ptr, full_class.c_str());
         return;
     }
 
-    // 4. 获取该类的所有成员字段（全量无遗漏）
-    std::vector<LiveFieldInfo> all_fields;
-    if (g_il2cpp_api.class_get_fields) {
-        void* iter = nullptr;
-        while (void* field = g_il2cpp_api.class_get_fields(klass_ptr, &iter)) {
-            const char* f_name = g_il2cpp_api.field_get_name ? g_il2cpp_api.field_get_name(field) : "";
-            size_t f_offset = g_il2cpp_api.field_get_offset ? g_il2cpp_api.field_get_offset(field) : 0;
-            void* f_type = g_il2cpp_api.field_get_type ? g_il2cpp_api.field_get_type(field) : nullptr;
-            const char* t_name = (f_type && g_il2cpp_api.type_get_name) ? g_il2cpp_api.type_get_name(f_type) : "var";
-
-            LiveFieldInfo fInfo;
-            fInfo.name = f_name ? f_name : "";
-            fInfo.typeName = t_name ? t_name : "";
-            fInfo.offset = f_offset;
-            fInfo.rawValue = 0;
-            fInfo.matchesKnown = false;
-
-                        if (IsValidPtr(obj_ptr + f_offset)) {
-                SafeReadMemory(obj_ptr + f_offset, &fInfo.rawValue, sizeof(uintptr_t));
-                if (IsValidPtr(fInfo.rawValue)) {
-                    if (fInfo.typeName.find("System.String") == std::string::npos &&
-                        fInfo.typeName != "int" && fInfo.typeName != "float" && 
-                        fInfo.typeName != "bool" && fInfo.typeName != "byte" && 
-                        fInfo.typeName != "short" && fInfo.typeName != "long" && 
-                        fInfo.typeName != "double" && fInfo.typeName != "uint" && 
-                        fInfo.typeName != "ushort" && fInfo.typeName != "ulong" && 
-                        fInfo.typeName != "sbyte" && fInfo.typeName != "char") {
-                        fInfo.childClassName = fInfo.typeName;
-                    }
-                }
-            }
-
-            all_fields.push_back(fInfo);
-        }
-    }
+    LiveInstanceDump dump = InspectLiveInstance(fieldName, obj_ptr);
 
     char node_label[320];
     if (offset == 0 && depth == 0) {
         snprintf(node_label, sizeof(node_label), "%s (0x%lx) -> C# 类: %s (包含 %zu 个成员字段)###Root_%lx", 
-            fieldName, obj_ptr, full_class.c_str(), all_fields.size(), obj_ptr);
+            fieldName, obj_ptr, full_class.c_str(), dump.fields.size(), obj_ptr);
     } else {
         snprintf(node_label, sizeof(node_label), "+0x%-4lx %s: 0x%lx (C# 类: %s, 包含 %zu 个字段)###Sub_%lx_%lx", 
-            offset, fieldName, obj_ptr, full_class.c_str(), all_fields.size(), obj_ptr, (uintptr_t)offset);
+            offset, fieldName, obj_ptr, full_class.c_str(), dump.fields.size(), obj_ptr, (uintptr_t)offset);
     }
 
-    // 可无限点击下钻的 TreeNode
     if (ImGui::TreeNode(node_label)) {
         visited.insert(obj_ptr);
         ImGui::Indent(12.0f * scale);
 
-        for (const auto& f : all_fields) {
-            // 如果是指针且指向有效 C# 对象，渲染为可继续点击下钻展开的子节点！
-            if (IsValidPtr(f.rawValue) && !f.childClassName.empty()) {
+        for (const auto& f : dump.fields) {
+            if (IsValidPtr(f.rawValue) && !f.childClassName.empty() && !f.isString) {
                 DrawInteractiveObjectNode(f.rawValue, f.name.c_str(), f.offset, scale, depth + 1, visited);
             }
-            // 如果是 String
-            else if (f.typeName == "System.String" || f.typeName.find("String") != std::string::npos) {
-                std::string s_val = ReadIl2CppString(f.rawValue);
+            else if (f.isString) {
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", f.name.c_str());
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(string)");
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "= \"%s\"", s_val.c_str());
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "= \"%s\"", f.strValue.c_str());
             }
-            // 普通数值字段
             else {
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "  +0x%-4lx", f.offset);
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "%s", f.name.c_str());
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(%s)", f.typeName.c_str());
+                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "(%s)", f.cleanTypeName.c_str());
                 ImGui::SameLine();
 
-                if (f.typeName.find("Boolean") != std::string::npos || f.typeName.find("bool") != std::string::npos) {
+                if (f.cleanTypeName == "Boolean") {
                     ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "= %s", (f.rawValue & 0xFF) ? "true" : "false");
-                } else if (f.typeName.find("Single") != std::string::npos || f.typeName.find("float") != std::string::npos) {
+                } else if (f.cleanTypeName == "Single") {
                     float fval = 0; memcpy(&fval, &f.rawValue, sizeof(float));
                     ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "= %.3f", fval);
-                } else if (f.typeName.find("Int32") != std::string::npos || f.typeName.find("int") != std::string::npos) {
+                } else if (f.cleanTypeName == "Int32") {
                     int ival = (int)f.rawValue;
                     ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "= %d (0x%x)", ival, ival);
                 } else {
@@ -3773,15 +3994,221 @@ void DrawLiveInstanceTree(const char* label, uintptr_t address, float scale) {
     DrawInteractiveObjectNode(address, label, 0, scale, 0, visited);
 }
 
+// ===== 类似图片样式的 3 列对象检查器表格渲染 =====
+void DrawObjectInspectorTable(LiveInstanceDump& dump, float scale) {
+    float avail_x = ImGui::GetContentRegionAvail().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // 1. 顶部面包屑与导航路径 (类似图片中的 ...ChessModelManager CSOGame Inspecting ChessElementModel 0x...)
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f * scale, 6.0f * scale));
+    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), (const char*)u8"导航路径:");
+    ImGui::SameLine();
+
+    // 快捷跳入常用对象
+    if (ImGui::Button((const char*)u8"...我的玩家", ImVec2(0, 26 * scale))) {
+        uintptr_t my_ptr = 0;
+        for (const auto& pi : g_players) { if (pi.id == g_my_player_id && IsValidPtr(pi.val_ptr)) { my_ptr = pi.val_ptr; break; } }
+        if (my_ptr == 0 && !g_dbg_player_addrs.empty()) my_ptr = g_dbg_player_addrs[0];
+        if (IsValidPtr(my_ptr)) NavigateToInspect("PlayerInfoModel", my_ptr);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"ChessModelManager", ImVec2(0, 26 * scale))) {
+        uintptr_t cmm = g_dbg_addr1 ? g_dbg_addr1 : GetSingletonInstance("ChessModelManager");
+        if (IsValidPtr(cmm)) NavigateToInspect("ChessModelManager", cmm);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button((const char*)u8"CSOGame", ImVec2(0, 26 * scale))) {
+        if (IsValidPtr(g_dbg_segmentcsogame)) NavigateToInspect("CSOGame", g_dbg_segmentcsogame);
+    }
+    
+    // 渲染历史面包屑
+    for (size_t i = 0; i < g_inspect_breadcrumbs.size(); i++) {
+        ImGui::SameLine();
+        const auto& bc = g_inspect_breadcrumbs[i];
+        bool isCurrent = (i == g_inspect_breadcrumbs.size() - 1);
+        char pill_txt[128];
+        snprintf(pill_txt, sizeof(pill_txt), isCurrent ? (const char*)u8"Inspecting %s 0x%lx" : "%s", bc.name.c_str(), bc.address);
+
+        if (isCurrent) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.15f, 0.45f, 0.95f)); // 紫红色高亮药丸
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.25f, 0.55f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.75f, 0.10f, 0.35f, 1.0f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.24f, 0.32f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.34f, 0.45f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.18f, 0.20f, 0.28f, 1.0f));
+        }
+
+        if (ImGui::Button(pill_txt, ImVec2(0, 26 * scale))) {
+            NavigateToInspect(bc.name, bc.address);
+        }
+        ImGui::PopStyleColor(3);
+    }
+    ImGui::PopStyleVar();
+
+    ImGui::Spacing();
+
+    // 2. 搜索过滤栏与包含属性开关 (对应图片中的 Filter 和 包含属性)
+    float filter_w = 220.0f * scale;
+    ImGui::Checkbox((const char*)u8"包含属性", &g_inspect_include_props);
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(avail_x - filter_w);
+    ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.85f, 1.0f), "Filter:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(filter_w - 55.0f * scale);
+    ImGui::InputText("##InspectorFilter", g_inspector_filter, sizeof(g_inspector_filter));
+
+    // 对象副标题 (对应图片中的 _chessElementModel / 类名)
+    std::string headerTitle = dump.valid ? (dump.shortClassName.empty() ? dump.fullClassName : dump.shortClassName) : "NullObject";
+    ImGui::TextColored(ImVec4(0.95f, 0.95f, 0.95f, 1.0f), "%s", headerTitle.c_str());
+    if (dump.valid) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.45f, 0.75f, 1.0f, 0.9f), "(0x%lx - %zu 个字段/属性)", dump.address, dump.fields.size());
+    }
+
+    ImGui::Separator();
+
+    // 3. 表格主体 (3 列：字段/属性 | 值 | 类型)
+    if (!dump.valid || !IsValidPtr(dump.address)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"当前对象无效或内存不可读 (地址: 0x%lx)，请先从上方路径选择对象！", dump.address);
+        return;
+    }
+
+    // 准备过滤列表
+    std::string filter_str = g_inspector_filter;
+    std::transform(filter_str.begin(), filter_str.end(), filter_str.begin(), ::tolower);
+
+    // 3 列布局比例：40% 字段/属性，36% 值，24% 类型
+    float col0_w = avail_x * 0.40f;
+    float col1_w = avail_x * 0.36f;
+    float col2_w = avail_x * 0.24f;
+
+    ImGui::Columns(3, "InspectorColumns", true);
+    ImGui::SetColumnWidth(0, col0_w);
+    ImGui::SetColumnWidth(1, col1_w);
+    ImGui::SetColumnWidth(2, col2_w);
+
+    // 表头
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"字段/属性");
+    ImGui::NextColumn();
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"值");
+    ImGui::NextColumn();
+    ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, 1.0f), (const char*)u8"类型");
+    ImGui::NextColumn();
+    ImGui::Separator();
+
+    int rowIdx = 0;
+    for (const auto& f : dump.fields) {
+        if (!g_inspect_include_props && f.name.find("<") != std::string::npos) {
+            continue; // 过滤属性生成的 backing field
+        }
+
+        std::string fname_lower = f.name;
+        std::transform(fname_lower.begin(), fname_lower.end(), fname_lower.begin(), ::tolower);
+        std::string ftype_lower = f.cleanTypeName;
+        std::transform(ftype_lower.begin(), ftype_lower.end(), ftype_lower.begin(), ::tolower);
+
+        if (!filter_str.empty() && fname_lower.find(filter_str) == std::string::npos && ftype_lower.find(filter_str) == std::string::npos) {
+            continue;
+        }
+
+        rowIdx++;
+        bool isCoinMatch = (f.cleanTypeName == "Int32" && (int)f.rawValue == g_coin_search_val && g_coin_search_val > 0);
+
+        // 列 1: 字段/属性名称
+        if (isCoinMatch) {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "%s", f.name.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "[+0x%lx]", f.offset);
+        } else {
+            ImGui::TextColored(ImVec4(0.92f, 0.92f, 0.96f, 1.0f), "%s", f.name.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.5f, 0.6f, 0.7f, 0.8f), "[+0x%lx]", f.offset);
+        }
+        ImGui::NextColumn();
+
+        // 列 2: 值
+        if (f.isString) {
+            if (f.strValue.empty()) {
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 0.9f), (const char*)u8"空字段");
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.90f, 0.35f, 1.0f), "\"%s\"", f.strValue.c_str());
+            }
+        } else if (f.cleanTypeName == "Boolean") {
+            bool bval = (f.rawValue & 0xFF) != 0;
+            ImGui::TextColored(bval ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(0.8f, 0.4f, 0.4f, 1.0f), "%s", bval ? "true" : "false");
+        } else if (f.cleanTypeName == "Single") {
+            float fval = 0; memcpy(&fval, &f.rawValue, sizeof(float));
+            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%.3f", fval);
+        } else if (f.cleanTypeName == "Int32") {
+            int ival = (int)f.rawValue;
+            if (isCoinMatch) {
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.1f, 1.0f), "%d ★[金币命中]", ival);
+                ImGui::SameLine();
+                char btn_set_id[32]; snprintf(btn_set_id, sizeof(btn_set_id), (const char*)u8"设为金币##%d", rowIdx);
+                if (ImGui::Button(btn_set_id)) {
+                    g_off.pi_money = f.offset;
+                    SaveConfig();
+                    AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx !", f.offset);
+                }
+            } else {
+                ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "%d", ival);
+            }
+        } else if (f.cleanTypeName == "Int64" || f.cleanTypeName == "UInt64") {
+            ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "%ld", (int64_t)f.rawValue);
+        } else if (f.isPointer) {
+            if (f.rawValue == 0) {
+                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 0.9f), "Null");
+            } else {
+                char ptr_lbl[128];
+                snprintf(ptr_lbl, sizeof(ptr_lbl), "%s (0x%lx) ➔##%d", f.childClassName.c_str(), f.rawValue, rowIdx);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.28f, 0.45f, 0.8f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.40f, 0.65f, 1.0f));
+                if (ImGui::Button(ptr_lbl)) {
+                    NavigateToInspect(f.childClassName, f.rawValue);
+                }
+                ImGui::PopStyleColor(2);
+            }
+        } else {
+            if (f.rawValue == 0) {
+                ImGui::TextColored(ImVec4(0.55f, 0.55f, 0.55f, 0.9f), "Null");
+            } else {
+                ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "0x%lx", f.rawValue);
+            }
+        }
+        ImGui::NextColumn();
+
+        // 列 3: 类型
+        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s", f.cleanTypeName.c_str());
+        ImGui::NextColumn();
+    }
+
+    ImGui::Columns(1);
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // 4. 底部紫红色 [ Dump Object ] 按钮 (对应图片底部的 Dump Object 大按钮)
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.82f, 0.18f, 0.48f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.28f, 0.58f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.70f, 0.12f, 0.38f, 1.0f));
+    if (ImGui::Button((const char*)u8"Dump Object", ImVec2(avail_x, 38.0f * scale))) {
+        AddActionLog((const char*)u8"=== [Dump Object] %s (0x%lx) 包含 %zu 个字段 ===", dump.fullClassName.c_str(), dump.address, dump.fields.size());
+        for (const auto& f : dump.fields) {
+            AddActionLog("+0x%03lx | %s | %s | 0x%lx", f.offset, f.name.c_str(), f.cleanTypeName.c_str(), f.rawValue);
+        }
+    }
+    ImGui::PopStyleColor(3);
+}
+
+// ===== 符号反查总入口与子模块切换 =====
 void DrawSymbolResolverUI() {
     float sc = 1.0f;
     ImGui::SetWindowFontScale(g_custom_font_scale);
-
     float avail_x = ImGui::GetContentRegionAvail().x;
     float btn_w = 60.0f * g_autoScale;
 
-    // Manual font scale stepper control with [ - ] and [ + ]
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"字体大小:");
+    // 字体大小缩放控制
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"字体缩放:");
     ImGui::SameLine();
     if (ImGui::Button((const char*)u8"  -  ", ImVec2(40.0f * g_autoScale, 0))) {
         g_custom_font_scale = std::max(0.40f, g_custom_font_scale - 0.05f);
@@ -3798,111 +4225,303 @@ void DrawSymbolResolverUI() {
     }
 
     ImGui::Spacing();
+
+    // 顶层子功能 Tab 切换
+    const char* subTabs[] = {
+        (const char*)u8"💰 金币定位与对象检查器",
+        (const char*)u8"🔗 单例全量链路寻址",
+        (const char*)u8"🔍 全局关键字符号搜索"
+    };
+
+    float tabBtnW = (avail_x - 16.0f * g_autoScale) / 3.0f;
+    for (int t = 0; t < 3; t++) {
+        bool isSel = (g_resolver_subtab == t);
+        if (isSel) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(UITheme().primary.x, UITheme().primary.y, UITheme().primary.z, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, UITheme().primaryHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, UITheme().primary);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.20f, 0.28f, 0.75f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.28f, 0.38f, 0.9f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.16f, 0.22f, 0.9f));
+        }
+
+        if (ImGui::Button(subTabs[t], ImVec2(tabBtnW, 32.0f * g_autoScale))) {
+            g_resolver_subtab = t;
+        }
+        ImGui::PopStyleColor(3);
+        if (t < 2) ImGui::SameLine();
+    }
+
+    ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
-    ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
-    ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); 
-    ImGui::SameLine(); 
-    if (ImGui::Button((const char*)u8"[键盘]##1", ImVec2(btn_w, 0))) { 
-        g_vkbd_target = g_root_class_input; 
-        g_vkbd_target_size = sizeof(g_root_class_input); 
-        g_show_vkbd = true; 
-    }
-
-    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名或字段名):");
-    ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
-    ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
-    ImGui::SameLine(); 
-    if (ImGui::Button((const char*)u8"[键盘]##2", ImVec2(btn_w, 0))) { 
-        g_vkbd_target = g_class_search_input; 
-        g_vkbd_target_size = sizeof(g_class_search_input); 
-        g_show_vkbd = true; 
-    }
-
-    ImGui::Spacing();
-    
-    if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配与字段)", ImVec2(avail_x, 38 * g_autoScale))) {
-        uintptr_t rootObj = g_dbg_addr1;
-        if (strlen(g_root_class_input) > 0) {
-            uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
-            if (singletonObj != 0) {
-                rootObj = singletonObj;
-                g_dbg_addr1 = singletonObj;
-                AddActionLog((const char*)u8"-> [单例解析] 成功获取 %s 单例实例: 0x%lx", g_root_class_input, singletonObj);
-            } else {
-                rootObj = 0;
-                AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例", g_root_class_input);
-            }
-        }
-        if (rootObj != 0) {
-            g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8);
-        } else {
-            g_lastPathResult.found = false;
-            g_lastPathResult.paths.clear();
-        }
-    }
-
-    ImGui::Spacing();
-    ImGui::PushTextWrapPos(0.0f);
-
-    if (strlen(g_root_class_input) > 0) {
-        if (g_dbg_addr1 != 0 && GetSingletonInstance(g_root_class_input) != 0) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪] %s = 0x%lx", g_root_class_input, GetSingletonInstance(g_root_class_input));
-        } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[起点异常] 无法获取 %s 单例，请检查拼写或等待游戏加载完成。", g_root_class_input);
-        }
-    }
-
-    if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"未在当前内存搜索深度(8)内找到目标: %s", g_class_search_input);
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
-    }
-
-    if (g_lastPathResult.found) {
+    // -------------------------------------------------------------
+    // 子功能 0: 💰 金币定位与对象检查器 (主功能，类似图片效果)
+    // -------------------------------------------------------------
+    if (g_resolver_subtab == 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), (const char*)u8"【通过输入当前金币定位字段地址】");
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 共扫描出 %zu 条关联路径与字段：", g_lastPathResult.paths.size());
-        
-        for (size_t p = 0; p < g_lastPathResult.paths.size(); p++) {
-            const auto& fp = g_lastPathResult.paths[p];
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), (const char*)u8"=== 路径 [%zu] %s ===", p + 1, fp.matchDesc.c_str());
-            
-            ImGui::Indent(8.0f * g_autoScale);
-            
-            if (fp.steps.empty()) {
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", fp.targetInstance);
-            } else {
-                for (size_t s = 0; s < fp.steps.size(); s++) {
-                    const auto& st = fp.steps[s];
-                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "[第 %zu 层] %s", s + 1, st.fromClass.c_str());
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "-> [+0x%lx: %s] ->", st.offset, st.fieldName.c_str());
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
-                }
 
-                std::string off_summary = (const char*)u8"[提取] 偏移链: 起点单例";
-                for (const auto& st : fp.steps) {
-                    char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
-                    off_summary += obuf;
-                }
-                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
-                if (fp.steps.back().isValueField) {
-                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 字段内存地址: 0x%lx", fp.targetInstance);
-                } else {
-                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 目标实例实时地址: 0x%lx", fp.targetInstance);
-                }
+        // 1. 金币数值输入
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"当前游戏内金币数值:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120.0f * g_autoScale);
+        ImGui::InputText("##CoinInput", g_coin_search_str, sizeof(g_coin_search_str));
+        ImGui::SameLine();
+        if (ImGui::Button((const char*)u8"[键盘]##Coin", ImVec2(btn_w, 0))) {
+            g_vkbd_target = g_coin_search_str;
+            g_vkbd_target_size = sizeof(g_coin_search_str);
+            g_show_vkbd = true;
+        }
+
+        // 2. 扫描目标范围选择
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"扫描目标实例范围:");
+        const char* scopes[] = {
+            (const char*)u8"我的玩家实例",
+            (const char*)u8"所有玩家列表",
+            (const char*)u8"当前检查对象",
+            (const char*)u8"ChessModelManager",
+            (const char*)u8"CSOGame 对局基址",
+            (const char*)u8"自定义内存地址"
+        };
+        for (int sc_idx = 0; sc_idx < 6; sc_idx++) {
+            if (sc_idx > 0 && sc_idx % 3 != 0) ImGui::SameLine();
+            if (ImGui::RadioButton(scopes[sc_idx], g_coin_search_scope == sc_idx)) {
+                g_coin_search_scope = sc_idx;
             }
-            
-            ImGui::Unindent(8.0f * g_autoScale);
+        }
+
+        if (g_coin_search_scope == 5) {
+            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), (const char*)u8"自定义实例内存地址:");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(180.0f * g_autoScale);
+            ImGui::InputText("##CustomScanAddr", g_custom_coin_scan_addr, sizeof(g_custom_coin_scan_addr));
+            ImGui::SameLine();
+            if (ImGui::Button((const char*)u8"[键盘]##CustomAddr", ImVec2(btn_w, 0))) {
+                g_vkbd_target = g_custom_coin_scan_addr;
+                g_vkbd_target_size = sizeof(g_custom_coin_scan_addr);
+                g_show_vkbd = true;
+            }
+        }
+
+        ImGui::Spacing();
+
+        // 3. 开始扫描按钮
+        if (ImGui::Button((const char*)u8"🔍 开始通过金币定位字段地址！", ImVec2(avail_x, 36.0f * g_autoScale))) {
+            ExecuteCoinLocatorScan();
+        }
+
+        // 4. 展示金币扫描结果
+        if (g_coin_scanned) {
+            ImGui::Spacing();
+            if (!g_coin_matches.empty()) {
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"✨ %s (共匹配 %zu 个字段):", g_coin_scan_msg.c_str(), g_coin_matches.size());
+                
+                for (size_t m = 0; m < g_coin_matches.size(); m++) {
+                    const auto& match = g_coin_matches[m];
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.16f, 0.24f, 0.85f));
+                    char card_id[32]; snprintf(card_id, sizeof(card_id), "CoinMatchCard_%zu", m);
+                    ImGui::BeginChild(card_id, ImVec2(avail_x, 70.0f * g_autoScale), true);
+
+                    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[匹配 %zu] 实例: 0x%lx (%s)", m + 1, match.instancePtr, match.instanceName.c_str());
+                    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), (const char*)u8"字段名: %s  |  偏移: +0x%lx (%zu)  |  绝对地址: 0x%lx  |  类型: %s", 
+                        match.fieldName.c_str(), match.offset, match.offset, match.fieldAddress, match.fieldType.c_str());
+
+                    // 快捷按钮：设为 pi_money 并保存
+                    char btn_apply[64];
+                    snprintf(btn_apply, sizeof(btn_apply), (const char*)u8"★ 一键设为 pi_money (0x%lx) 并保存##%zu", match.offset, m);
+                    if (ImGui::Button(btn_apply)) {
+                        g_off.pi_money = match.offset;
+                        SaveConfig();
+                        AddActionLog((const char*)u8"-> [配置应用] 已将 pi_money 成功设为 0x%lx 并保存本地!", match.offset);
+                    }
+                    ImGui::SameLine();
+                    char btn_inspect[64];
+                    snprintf(btn_inspect, sizeof(btn_inspect), (const char*)u8"🔎 载入对象检查器##%zu", m);
+                    if (ImGui::Button(btn_inspect)) {
+                        NavigateToInspect(match.instanceName, match.instancePtr);
+                    }
+
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                }
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", g_coin_scan_msg.c_str());
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 5. 渲染类似图片的对象检查器 (Object Inspector)
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"【对象字段动态检查器 (Inspector)】");
+        if (g_custom_dump.valid && IsValidPtr(g_custom_dump.address)) {
+            DrawObjectInspectorTable(g_custom_dump, g_autoScale);
+        } else {
+            // 自动初始载入当前我的玩家实例或 ChessModelManager
+            uintptr_t auto_ptr = 0;
+            std::string auto_name = "PlayerInfoModel";
+            for (const auto& pi : g_players) { if (pi.id == g_my_player_id && IsValidPtr(pi.val_ptr)) { auto_ptr = pi.val_ptr; break; } }
+            if (auto_ptr == 0 && !g_dbg_player_addrs.empty()) auto_ptr = g_dbg_player_addrs[0];
+            if (auto_ptr == 0) { auto_ptr = g_dbg_addr1 ? g_dbg_addr1 : GetSingletonInstance("ChessModelManager"); auto_name = "ChessModelManager"; }
+
+            if (IsValidPtr(auto_ptr)) {
+                NavigateToInspect(auto_name, auto_ptr);
+                DrawObjectInspectorTable(g_custom_dump, g_autoScale);
+            } else {
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), (const char*)u8"请从上方金币定位或路径按钮选择一个对象以开启检查。");
+            }
         }
     }
-    
-    ImGui::PopTextWrapPos();
+    // -------------------------------------------------------------
+    // 子功能 1: 🔗 单例全量链路寻址 (保留原 AutoFindPath 功能)
+    // -------------------------------------------------------------
+    else if (g_resolver_subtab == 1) {
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
+        ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
+        ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); 
+        ImGui::SameLine(); 
+        if (ImGui::Button((const char*)u8"[键盘]##1", ImVec2(btn_w, 0))) { 
+            g_vkbd_target = g_root_class_input; 
+            g_vkbd_target_size = sizeof(g_root_class_input); 
+            g_show_vkbd = true; 
+        }
+
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名或字段名):");
+        ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
+        ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
+        ImGui::SameLine(); 
+        if (ImGui::Button((const char*)u8"[键盘]##2", ImVec2(btn_w, 0))) { 
+            g_vkbd_target = g_class_search_input; 
+            g_vkbd_target_size = sizeof(g_class_search_input); 
+            g_show_vkbd = true; 
+        }
+
+        ImGui::Spacing();
+        
+        if (ImGui::Button((const char*)u8"> 开始全量自动寻址！(输出所有匹配与字段)", ImVec2(avail_x, 38 * g_autoScale))) {
+            uintptr_t rootObj = g_dbg_addr1;
+            if (strlen(g_root_class_input) > 0) {
+                uintptr_t singletonObj = GetSingletonInstance(g_root_class_input);
+                if (singletonObj != 0) {
+                    rootObj = singletonObj;
+                    g_dbg_addr1 = singletonObj;
+                    AddActionLog((const char*)u8"-> [单例解析] 成功获取 %s 单例实例: 0x%lx", g_root_class_input, singletonObj);
+                } else {
+                    rootObj = 0;
+                    AddActionLog((const char*)u8"-> [单例解析失败] 无法找到 %s 的单例实例", g_root_class_input);
+                }
+            }
+            if (rootObj != 0) {
+                g_lastPathResult = AutoFindPath(rootObj, g_class_search_input, 8);
+            } else {
+                g_lastPathResult.found = false;
+                g_lastPathResult.paths.clear();
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(0.0f);
+
+        if (strlen(g_root_class_input) > 0) {
+            if (g_dbg_addr1 != 0 && GetSingletonInstance(g_root_class_input) != 0) {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), (const char*)u8"[起点就绪] %s = 0x%lx", g_root_class_input, GetSingletonInstance(g_root_class_input));
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"[起点异常] 无法获取 %s 单例，请检查拼写或等待游戏加载完成。", g_root_class_input);
+            }
+        }
+
+        if (!g_lastPathResult.found && g_class_search_input[0] != '\0') {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), (const char*)u8"未在当前内存搜索深度(8)内找到目标: %s", g_class_search_input);
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), (const char*)u8"该对象可能尚未在堆内存中实例化，或处于更深层级。");
+        }
+
+        if (g_lastPathResult.found) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"[成功] 共扫描出 %zu 条关联路径与字段：", g_lastPathResult.paths.size());
+            
+            for (size_t p = 0; p < g_lastPathResult.paths.size(); p++) {
+                const auto& fp = g_lastPathResult.paths[p];
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), (const char*)u8"=== 路径 [%zu] %s ===", p + 1, fp.matchDesc.c_str());
+                
+                ImGui::Indent(8.0f * g_autoScale);
+                
+                if (fp.steps.empty()) {
+                    ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), (const char*)u8"-> 目标即为起点自身 (0x%lx) [0 层跳跃]", fp.targetInstance);
+                } else {
+                    for (size_t s = 0; s < fp.steps.size(); s++) {
+                        const auto& st = fp.steps[s];
+                        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "[第 %zu 层] %s", s + 1, st.fromClass.c_str());
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "-> [+0x%lx: %s] ->", st.offset, st.fieldName.c_str());
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", st.toClass.c_str());
+                    }
+
+                    std::string off_summary = (const char*)u8"[提取] 偏移链: 起点单例";
+                    for (const auto& st : fp.steps) {
+                        char obuf[32]; snprintf(obuf, sizeof(obuf), " -> +0x%lx", st.offset);
+                        off_summary += obuf;
+                    }
+                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.7f, 1.0f), "%s", off_summary.c_str());
+                    if (fp.steps.back().isValueField) {
+                        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 字段内存地址: 0x%lx", fp.targetInstance);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), (const char*)u8"[定位] 目标实例实时地址: 0x%lx", fp.targetInstance);
+                    }
+                }
+                
+                ImGui::Unindent(8.0f * g_autoScale);
+            }
+        }
+        
+        ImGui::PopTextWrapPos();
+    }
+    // -------------------------------------------------------------
+    // 子功能 2: 🔍 全局关键字符号搜索 (DoKeywordSearch)
+    // -------------------------------------------------------------
+    else if (g_resolver_subtab == 2) {
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"搜索元数据类名/字段/方法:");
+        ImGui::SetNextItemWidth(avail_x - btn_w - 10.0f);
+        ImGui::InputText("##KwSearchInput", g_kw_search_input, sizeof(g_kw_search_input));
+        ImGui::SameLine();
+        if (ImGui::Button((const char*)u8"[键盘]##Kw", ImVec2(btn_w, 0))) {
+            g_vkbd_target = g_kw_search_input;
+            g_vkbd_target_size = sizeof(g_kw_search_input);
+            g_show_vkbd = true;
+        }
+
+        ImGui::Spacing();
+        if (ImGui::Button((const char*)u8"🔍 执行全库元数据模糊搜索", ImVec2(avail_x, 34.0f * g_autoScale))) {
+            std::thread(DoKeywordSearch, std::string(g_kw_search_input)).detach();
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        std::lock_guard<std::mutex> lock(g_kwMutex);
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), (const char*)u8"匹配结果 (共 %zu 项):", g_kwResults.size());
+
+        for (size_t i = 0; i < g_kwResults.size(); i++) {
+            const auto& r = g_kwResults[i];
+            ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1.0f), "[%s]", r.className.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(r.isFunc ? ImVec4(1.0f, 0.5f, 0.5f, 1.0f) : ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%s", r.memberName.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "(%s)", r.typeName.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), r.isFunc ? "RVA: +0x%lx" : "Offset: +0x%lx", r.offsetOrRva);
+        }
+    }
 }
+
 void DrawMainMenu() {
     ApplyFrostedTheme();
     if (g_menu_orb) {
