@@ -2942,24 +2942,49 @@ static std::string SafeReadCString(const char* ptr, size_t maxLen = 128) {
 static bool IsValidIl2CppClass(void* klass) {
     if (!klass || !IsValidPtr((uintptr_t)klass)) return false;
     if (((uintptr_t)klass & 0x7) != 0) return false;
-    
-    // 快速缓存匹配
+
+    // 先确保全局类白名单已建立(枚举所有程序集/镜像里的真实类). 这是下钻安全的核心防线,
+    // 此前该函数从未被调用, 导致 g_valid_classes 一直为空, 外来指针只能靠下面的宽松兜底放行.
+    CacheValidClasses();
+
+    // 命中已知真实类 -> 直接放行, 绝不对外来指针调用 il2cpp API.
     if (g_valid_classes.find(klass) != g_valid_classes.end()) return true;
 
-    // 动态验证泛型类、实例化类与数组类 (支持 List<T>, Dictionary<K,V>, T[] 等运行时动态生成的泛型类)
+    // 动态验证泛型/实例化/数组类等运行时动态生成的类 (List<T>, Dictionary<K,V>, T[] 等).
+    // 安全前提: 必须先确认 klass 自身内存可读, 否则 class_get_name 对野指针解引用会让游戏闪退.
     if (g_il2cpp_api.init() && g_il2cpp_api.class_get_name) {
+        uintptr_t probe = 0;
+        if (!SafeReadMemory((uintptr_t)klass, &probe, sizeof(probe))) return false;
         const char* c_name = g_il2cpp_api.class_get_name(klass);
-        if (IsValidPtr((uintptr_t)c_name)) {
-            char first_char = 0;
-            if (SafeReadMemory((uintptr_t)c_name, &first_char, sizeof(char))) {
-                if (first_char != 0) {
-                    g_valid_classes.insert(klass);
-                    return true;
+        std::string nm = SafeReadCString(c_name, 128);
+        // 类名识别启发式: 允许最多 2 个前导非可打印字节(因元数据字符串堆的奇数偏移导致),
+        // 但可打印 ASCII 核心必须 ≥ 4 且全程可打印. 这样 ?BattleModel(1 前导+10 核心)放行,
+        // ?_t(核心 2 字符)仍被拒, 兼顾字段名识别与防真垃圾缓存.
+        bool printable = false;
+        if (!nm.empty() && nm.size() <= 128) {
+            size_t lead = 0;
+            while (lead < nm.size()) {
+                unsigned char uc = (unsigned char)nm[lead];
+                if (uc >= 0x20 && uc < 0x7F) break;
+                lead++;
+            }
+            if (lead <= 2 && (nm.size() - lead) >= 4) {
+                printable = true;
+                for (size_t i = lead; i < nm.size(); i++) {
+                    unsigned char uc = (unsigned char)nm[i];
+                    if (uc < 0x20 || uc >= 0x7F) { printable = false; break; }
                 }
             }
         }
+        if (printable) {
+            g_valid_classes.insert(klass);
+            return true;
+        }
     }
-    return IsValidPtr((uintptr_t)klass);
+    // 关键修复: 此前误写成 return IsValidPtr(klass), 导致"落在有效地址范围内"的野指针
+    // 全部被当作类, 下钻时对垃圾 klass 调用 class_get_fields 深层解引用 -> 游戏闪退.
+    // 现在未经验证的指针一律视为无效, 杜绝闪退.
+    return false;
 }
 
 static bool StringEqualsIgnoreCase(const std::string& a, const std::string& b) {
@@ -4817,6 +4842,10 @@ void PushInspectObject(const std::string& name, const std::string& cls, uintptr_
     if (!IsValidPtr(addr)) return;
     void* test_klass = nullptr;
     if (!SafeReadMemory(addr, &test_klass, sizeof(void*))) return;
+    // 安全校验: 该地址首 8 字节必须是真实 IL2CPP 类的指针, 否则它不是对象.
+    // 一旦把非对象地址下钻压栈, 下一帧会把它当对象解析, 对垃圾 klass 调用 il2cpp API -> 游戏闪退.
+    // 因此非对象地址直接拒绝下钻(不压栈), 既避免闪退, 也避免"假下钻"到空层.
+    if (!IsValidIl2CppClass(test_klass)) return;
     g_inspect_breadcrumbs.push_back({ name, cls, addr });
 }
 
@@ -5078,8 +5107,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                 std::string type_str = SafeReadCString(t_name);
                 std::string clean_type = CleanIl2CppTypeName(type_str);
 
-                // 即便字段名因元数据布局等原因读不出, 也用偏移兜底占位, 保证该字段仍被显示,
-                // 不再因 field_str.empty() 而整条丢弃(这正是此前"不显示所有字段名"的根因).
+                // 名字兜底: 即便字段名因元数据布局等原因读不出, 也用偏移占位, 保证该字段仍被显示.
                 if (field_str.empty()) {
                     char fb[32];
                     snprintf(fb, sizeof(fb), "<field@+0x%zx>", f_offset);
@@ -5149,6 +5177,36 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
                     } else {
                         char buf[32]; snprintf(buf, sizeof(buf), "0x%lx", rawVal);
                         liveVal = buf;
+                    }
+                }
+
+                // 字段名读出但被污染(包含非可打印字节, 例如元数据字符串堆奇数偏移导致的 ?_t 之类),
+                // 或只是偏移占位时, 若该字段指向的对象类名可识别, 沿用 D 段的 [推导] _ClassName
+                // 规则反推一个友好字段名, 这样 UI 上不会出现 ?_t / <field@+0xNN> 这类无意义标识.
+                bool name_garbled = false;
+                for (char ch : field_str) {
+                    unsigned char uc = (unsigned char)ch;
+                    if (uc < 0x20 || uc >= 0x7F) { name_garbled = true; break; }
+                }
+                if (name_garbled || field_str.find("<field@") == 0) {
+                    if (!childCls.empty()) {
+                        std::string inferred = childCls;
+                        size_t dot = inferred.find_last_of('.');
+                        if (dot != std::string::npos) inferred = inferred.substr(dot + 1);
+                        inferred = CleanIl2CppTypeName(inferred);
+                        // 去掉前导非标识符垃圾(元数据读取残留的 '?' 等), 保留 _battleModel 这样的干净标识.
+                        size_t ks = 0;
+                        while (ks < inferred.size()) {
+                            char c = inferred[ks];
+                            bool ok = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_');
+                            if (ok) break;
+                            ks++;
+                        }
+                        if (ks > 0 && ks < inferred.size()) inferred = inferred.substr(ks);
+                        if (!inferred.empty() && inferred != "Object" && inferred != "ValueType") {
+                            if (!inferred.empty()) inferred[0] = (char)::tolower(inferred[0]);
+                            field_str = "[推导] _" + inferred;
+                        }
                     }
                 }
 
@@ -5302,6 +5360,15 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
 
                             // ★ 智能推导字段名：若识别出具体类名（如 SpriteHelperModel），自动生成友好字段标识！
                             std::string clean_cls = CleanIl2CppTypeName(scn.empty() ? full_cname : scn);
+                            // 去掉前导非标识符垃圾(元数据读取残留的 '?' 等), 避免出现 _?battleModel 这类脏名.
+                            size_t ks2 = 0;
+                            while (ks2 < clean_cls.size()) {
+                                char c = clean_cls[ks2];
+                                bool ok = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_');
+                                if (ok) break;
+                                ks2++;
+                            }
+                            if (ks2 > 0 && ks2 < clean_cls.size()) clean_cls = clean_cls.substr(ks2);
                             if (!clean_cls.empty() && clean_cls != "Object" && clean_cls != "ValueType") {
                                 std::string inferred_name = clean_cls;
                                 if (!inferred_name.empty()) inferred_name[0] = (char)::tolower(inferred_name[0]);
