@@ -1818,10 +1818,10 @@ void SetupImGuiStyle() { ApplyFrostedTheme(); }
 // 所以需要暴力尝试所有 .ttf 文件，找到真正的 TrueType 格式字体
 static bool FontHasChineseGlyphs(ImFont* font) {
     if (!font) return false;
-    // Check basic Chinese test characters: "中"(0x4E2D), "文"(0x6587), "金"(0x91D1), "查"(0x67E5)
-    return (font->FindGlyph((ImWchar)0x4E2D) != nullptr && 
-            font->FindGlyph((ImWchar)0x6587) != nullptr &&
-            font->FindGlyph((ImWchar)0x91D1) != nullptr);
+    // Check basic Chinese test characters: "中"(0x4E2D), "文"(0x6587), "金"(0x91D1)
+    return (font->FindGlyphNoFallback((ImWchar)0x4E2D) != nullptr && 
+            font->FindGlyphNoFallback((ImWchar)0x6587) != nullptr &&
+            font->FindGlyphNoFallback((ImWchar)0x91D1) != nullptr);
 }
 
 ImFont* TryLoadChineseFont(ImGuiIO& io, const char* path, int fontNo, float size) {
