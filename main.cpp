@@ -153,8 +153,10 @@ std::map<uintptr_t, std::vector<uintptr_t>> g_dbg_list9_map;
 std::vector<uintptr_t> g_dbg_player_addrs;
 
 int g_my_player_id = -1;
-int g_hex_qualities[3] = {0, 0, 0};
-std::atomic<bool> g_hex_confirmed{false}; // 海克斯品质读满一轮(3 个候选)后为 true, 停止调用
+int g_hex_qualities[3] = {0, 0, 0};                    // 最近一次采样结果 (链路诊断用)
+int g_hex_round_results[3][3] = {{0,0,0},{0,0,0},{0,0,0}}; // 3 次采样各自的 (q0,q1,q2), 整局显示 3 行
+int g_hex_round_count = 0;                             // 已完成采样次数 (0~3)
+std::atomic<bool> g_hex_confirmed{false}; // 3 次采样全部完成才为 true, 停止调用
 std::vector<int> g_next_opponents;
 
 struct PoolHero { int heroId; int remaining; int total; int cost; uintptr_t addr10; };
@@ -900,6 +902,10 @@ void ClearGameState() {
     g_next_opponents.clear();
     g_my_player_id = -1;
     g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
+    g_hex_round_count = 0;
+    g_hex_round_results[0][0]=g_hex_round_results[0][1]=g_hex_round_results[0][2]=0;
+    g_hex_round_results[1][0]=g_hex_round_results[1][1]=g_hex_round_results[1][2]=0;
+    g_hex_round_results[2][0]=g_hex_round_results[2][1]=g_hex_round_results[2][2]=0;
     g_hex_confirmed.store(false);
 
     g_dbg_list7_addrs.clear();
@@ -1279,30 +1285,33 @@ void ParseGameMemory() {
             g_dbg_hexctrl = SAFE_READ_PTR(g_dbg_addr26, g_off.hexctrl);
         
         if (g_dbg_hexctrl != 0 && g_off.func_get_hex != 0) {
-            // 用户要求: 读一轮(get_hex 调 0/1/2 共 3 次)直接输出 3 个候选品质, 之后不再调用。
+            // 用户要求: 每 2 秒采样一次, 每次调 get_hex 3 次(参数 0/1/2)读 3 个候选品质,
+            // 共采样 3 次, 整局显示 3 行结果 (第1次金彩金 -> 第2次金金金 ... 看候选变化)。
             // 品质映射: 1=银色 2=金色 3=彩色 (显示 qn[] = 无/银/金/彩)。
-            // 全 0(未加载好)时下一帧重试, 直到读出有效值; hexctrl 变化(下一局)重新读。
-            static uintptr_t last_hexctrl = 0;
-
-            if (last_hexctrl != g_dbg_hexctrl) {
-                last_hexctrl = g_dbg_hexctrl;
-                g_hex_confirmed.store(false);
-                g_hex_qualities[0] = 0; g_hex_qualities[1] = 0; g_hex_qualities[2] = 0;
-            }
-
+            // ★ 不做指针比较重置: g_dbg_hexctrl 每 2 帧重新解析会抖动, 比较会导致反复重置。
+            //   用"距上次采样 ≥2 秒"节流; 采样到有效值(任一>0)才计入一行; 满 3 行 confirmed=true 停。
             if (!g_hex_confirmed.load(std::memory_order_acquire)) {
-                // ★ 直接同步调用: 一轮读 3 个候选, 有有效值即停, 无线程/无节流
                 typedef int (*func_get_hex_t)(uintptr_t, int);
                 func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
                 if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
-                    int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
-                    int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
-                    int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
-                    if (q0 > 0 || q1 > 0 || q2 > 0) { // 有任一有效值即输出并停止, 避免全 0(未加载好)
-                        g_hex_qualities[0] = q0;
-                        g_hex_qualities[1] = q1;
-                        g_hex_qualities[2] = q2;
-                        g_hex_confirmed.store(true); // 一轮即停, 之后不再调用 get_hex
+                    static auto s_last_sample = std::chrono::steady_clock::now() - std::chrono::seconds(10); // 首次立即采样
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration<double>(now - s_last_sample).count() >= 2.0) {
+                        s_last_sample = now; // 无论本次是否有效, 都进入下一 2 秒窗口 (避免高频重试)
+                        int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
+                        int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
+                        int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
+                        if (q0 > 0 || q1 > 0 || q2 > 0) { // 有任一有效值才计入一行, 避免全 0(未加载好)占行
+                            int row = (g_hex_round_count < 3) ? g_hex_round_count : 2;
+                            g_hex_round_results[row][0] = q0;
+                            g_hex_round_results[row][1] = q1;
+                            g_hex_round_results[row][2] = q2;
+                            g_hex_qualities[0] = q0;
+                            g_hex_qualities[1] = q1;
+                            g_hex_qualities[2] = q2;
+                            g_hex_round_count++;
+                            if (g_hex_round_count >= 3) g_hex_confirmed.store(true); // 3 次采样完成, 整局不再调用
+                        }
                     }
                 }
             }
@@ -1311,6 +1320,10 @@ void ParseGameMemory() {
         g_dbg_addr26 = 0; g_dbg_hexctrl = 0;
         g_hex_confirmed.store(false);
         g_hex_qualities[0] = 0; g_hex_qualities[1] = 0; g_hex_qualities[2] = 0;
+        g_hex_round_count = 0;
+        g_hex_round_results[0][0]=g_hex_round_results[0][1]=g_hex_round_results[0][2]=0;
+        g_hex_round_results[1][0]=g_hex_round_results[1][1]=g_hex_round_results[1][2]=0;
+        g_hex_round_results[2][0]=g_hex_round_results[2][1]=g_hex_round_results[2][2]=0;
     }
 }
 
@@ -2914,16 +2927,23 @@ void DrawHextechCapsule() {
     ImGui::SetWindowFontScale(g_autoScale * g_hextech_scale);
     const char* qn[] = { (const char*)u8"无", (const char*)u8"银", (const char*)u8"金", (const char*)u8"彩" };
     if (g_hex_confirmed.load()) {
-        // 一次读取的 3 个候选品质全部输出 (1=银色 2=金色 3=彩色)
-        std::string txt = (const char*)u8"海克斯预测: ";
-        for (int i = 0; i < 3; i++) {
-            int q = g_hex_qualities[i];
-            txt += (q >= 0 && q <= 3) ? qn[q] : "?";
-            if (i < 2) txt += " | ";
+        // 3 次采样结果全部输出 (1=银色 2=金色 3=彩色), 整局看候选变化
+        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", (const char*)u8"海克斯预测 (3 次采样):");
+        for (int r = 0; r < 3; r++) {
+            std::string line = (const char*)u8"  第";
+            line += std::to_string(r + 1);
+            line += (const char*)u8"次: ";
+            for (int i = 0; i < 3; i++) {
+                int q = g_hex_round_results[r][i];
+                line += (q >= 0 && q <= 3) ? qn[q] : "?";
+                if (i < 2) line += " | ";
+            }
+            ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", line.c_str());
         }
-        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", txt.c_str());
     } else {
-        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", (const char*)u8"海克斯预测: 读取中...");
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s (%d/3)", (const char*)u8"海克斯预测: 采样中", g_hex_round_count);
+        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", buf);
     }
     // 展开态窗口内容后补一点右侧间距, 避免三角盖住文字
     ImGui::SameLine(0, 26.0f * g_autoScale);
