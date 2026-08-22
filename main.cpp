@@ -2881,7 +2881,7 @@ static void DrawHextechCollapsedCapsule() {
     const char* txt = (const char*)u8"海克斯 ▸";
     ImFont* font = ImGui::GetFont();
     if (!font) return;
-    float font_h = font->FontSize * 0.9f;
+    float font_h = ImGui::GetFontSize() * 0.9f; // 旧版 imgui 无 font->FontSize, 用全局 GetFontSize()
     ImVec2 tsz = font->CalcTextSizeA(font_h, FLT_MAX, 0.0f, txt);
     float pad = 8.0f * sc;
     float w = tsz.x + pad * 2.0f;
