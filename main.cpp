@@ -2938,8 +2938,10 @@ static std::vector<SkinEntry> g_skins = {
     { "art_tft_raw/scenes/prefab/s5_tft_midautumn", "s5_tft_midautumn" },
 };
 static int  g_skin_selected = 0;
-static bool g_auto_skin_enabled = false;
+static bool g_auto_skin_enabled = true;
 static bool g_skin_hook_installed = false;
+// LoadMapImpl 在 libil2cpp.so 内的偏移(RVA)。游戏版本更新导致偏移变化时需更新此值
+static uintptr_t g_skin_loadmap_offset = 0x8beba60;
 
 // 与原方法同 ABI: ARM64 实例方法 -> x0=this, x1=bundlePath, x2=assetName, x3=releaseList, x4=isBackground, x5=isMineMap
 typedef void* (*LoadMapImpl_fn)(void* self, void* bundlePath, void* assetName, void* releaseList, int isBackground, int isMineMap);
@@ -2959,48 +2961,26 @@ static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void*
 
 static void InstallSkinHook() {
     if (g_skin_hook_installed) return;
-    if (!g_il2cpp_api.init()) { LOGI("[SKIN] il2cpp api init failed"); return; }
-    void* domain = g_il2cpp_api.domain_get();
-    if (!domain) { LOGI("[SKIN] domain null"); return; }
-    size_t asm_count = 0;
-    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
-    if (!assemblies) { LOGI("[SKIN] no assemblies"); return; }
-    for (size_t a = 0; a < asm_count; a++) {
-        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
-        if (!img) continue;
-        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
-        for (size_t c = 0; c < cls_count; c++) {
-            void* klass = g_il2cpp_api.image_get_class(img, c);
-            if (!klass) continue;
-            const char* cname = SAFE_CALL(g_il2cpp_api.class_get_name(klass), (const char*)nullptr);
-            if (!cname) continue;
-            if (strstr(cname, "BattleMap") == nullptr) continue;   // 类名可改: 若实际类是 BattleMapManager 之外, 在这里调整
-            void* iter = nullptr;
-            while (void* m = g_il2cpp_api.class_get_methods(klass, &iter)) {
-                const char* mname = g_il2cpp_api.method_get_name(m);
-                if (!mname || strcmp(mname, "LoadMapImpl") != 0) continue;
-                uint32_t pc = g_il2cpp_api.method_get_param_count ? g_il2cpp_api.method_get_param_count(m) : 0;
-                if (pc != 5) continue;   // (String, String, IReleaseList, bool, bool)
-                void* fnptr = nullptr;
-                if (g_il2cpp_api.method_get_function_pointer)
-                    fnptr = g_il2cpp_api.method_get_function_pointer(m);
-                else if (g_il2cpp_api.method_get_code)
-                    fnptr = g_il2cpp_api.method_get_code(m);
-                if (!fnptr) continue;
-                int ret = SafeDobbyHook(fnptr, (void*)HK_LoadMapImpl, (void**)&g_orig_LoadMapImpl);
-                if (ret == 0) {
-                    g_skin_hook_installed = true;
-                    LOGI("[SKIN] Hooked %s::LoadMapImpl @ %p", cname, fnptr);
-                    AddActionLog((const char*)u8"-> [换肤] 已挂载地图加载Hook, 自动换肤就绪");
-                } else {
-                    LOGI("[SKIN] DobbyHook failed ret=%d", ret);
-                }
-                return;
-            }
-        }
+    if (g_il2cppTrueBase == 0) { LOGI("[SKIN] il2cpp base 未就绪"); return; }
+    // 换肤需要 il2cpp_string_new 来构造托管字符串参数
+    if (!g_il2cpp_api.string_new) g_il2cpp_api.init();
+    if (!g_il2cpp_api.string_new) { LOGI("[SKIN] il2cpp_string_new 未解析"); return; }
+
+    void* fnptr = (void*)(g_il2cppTrueBase + g_skin_loadmap_offset);
+    if (!IsValidExecutableAddr(fnptr)) {
+        LOGI("[SKIN] 偏移 0x%lx 不在可执行区域", (unsigned long)g_skin_loadmap_offset);
+        AddActionLog((const char*)u8"-> [换肤] 偏移无效, 请确认 0x8beba60");
+        return;
     }
-    LOGI("[SKIN] LoadMapImpl not found");
-    AddActionLog((const char*)u8"-> [换肤] 未找到 LoadMapImpl, 请确认类名/方法名");
+    int ret = SafeDobbyHook(fnptr, (void*)HK_LoadMapImpl, (void**)&g_orig_LoadMapImpl);
+    if (ret == 0) {
+        g_skin_hook_installed = true;
+        LOGI("[SKIN] Hooked LoadMapImpl @ %p (offset 0x%lx)", fnptr, (unsigned long)g_skin_loadmap_offset);
+        AddActionLog((const char*)u8"-> [换肤] 已挂载地图加载Hook, 自动换肤就绪");
+    } else {
+        LOGI("[SKIN] DobbyHook failed ret=%d", ret);
+        AddActionLog((const char*)u8"-> [换肤] Hook失败, 检查偏移 0x8beba60");
+    }
 }
 
 static void CacheValidClasses() {
