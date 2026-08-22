@@ -7474,14 +7474,14 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
                 LOGI("[FPS] 刷新率解锁失败, 保持游戏默认帧率");
             }
         }
-        if (s_fps_hz > 0) eglSwapInterval(display, surface, 0); // 仅解锁成功后才每帧关 VSync
+        if (s_fps_hz > 0) eglSwapInterval(display, 0); // 仅解锁成功后才每帧关 VSync (签名: eglSwapInterval(dpy, interval), 无 surface)
     } else {
         if (s_fps_prev_on) {               // 从开切到关: 恢复默认设置
             SetUnityStaticIntProperty("UnityEngine", "Application", "set_targetFrameRate", -1);
             SetUnityStaticIntProperty("UnityEngine", "QualitySettings", "set_vSyncCount", 1);
             LOGI("[FPS] 帧率跟随系统已关闭, 恢复默认垂直同步");
         }
-        eglSwapInterval(display, surface, 1); // 每帧恢复垂直同步
+        eglSwapInterval(display, 1); // 每帧恢复垂直同步 (签名: eglSwapInterval(dpy, interval), 无 surface)
         s_fps_hz = -1;                       // 下次开启时重新尝试
     }
     s_fps_prev_on = g_unlock_fps;
