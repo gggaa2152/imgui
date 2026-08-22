@@ -2365,10 +2365,13 @@ static void DrawHeroStars(ImDrawList* dl, ImVec2 center, int stars, float star_r
 void BuildHeroImageIndex() {
     std::thread([]() {
         int found = 0;
-        for (int i = 1; i <= 99999; i++) {
+        // 只扫英雄 ID 实际区间(11400~18336), 不扫 1..99999; 每 64 次让步 1ms,
+        // 避免注入后全核扫描巨型 switch 导致平板发烫
+        for (int i = 11000; i <= 20000; i++) {
             int len = 0;
             const unsigned char* ptr = GetHeroImageBytes(i, &len);
             if (ptr != nullptr && len > 0) found++;
+            if ((i & 0x3F) == 0) usleep(1000);
         }
         g_hero_image_count = found;
         g_hero_images_ready.store(true);
@@ -2401,6 +2404,8 @@ void TextureDecodingWorkerThread() {
                     stbi_image_free(data);
                 }
             }
+            // 每解码 1 张让出 2ms: 首帧窗口全开时队列会有上百张, 不加节流会满核解码导致发烫
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
@@ -2430,7 +2435,10 @@ void ProcessTextureQueue() {
     GLint last_unpack = 0;
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &last_unpack);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    for (auto& item : g_HeroTexDecodedQueue) {
+    // 每帧最多上传 8 张: 首帧解码队列可能上百张, 一次性全部 glTexImage2D 会卡渲染线程
+    int uploaded = 0;
+    while (!g_HeroTexDecodedQueue.empty() && uploaded < 8) {
+        auto& item = g_HeroTexDecodedQueue.front();
         GLuint tex = 0;
         glGenTextures(1, &tex);
         if (tex != 0) {
@@ -2443,8 +2451,9 @@ void ProcessTextureQueue() {
         }
         stbi_image_free(item.second.pixels);
         g_heroTextureCache[item.first] = tex;
+        g_HeroTexDecodedQueue.pop_front();
+        uploaded++;
     }
-    g_HeroTexDecodedQueue.clear();
     glPixelStorei(GL_UNPACK_ALIGNMENT, last_unpack);
 }
 
@@ -7216,85 +7225,12 @@ void* hook_SendWillRenderCanvases() { g_count_SendWillRenderCanvases++;
 }
 
 // ==========================================
-// 满血高刷帧率解锁引擎 (强制解除 Android VSync 60Hz 限制与 Unity targetFrameRate 限制)
+// (已移除) 满血高刷帧率解锁引擎: 强制 144FPS + 关 VSync 导致 CPU/GPU 满载, 平板发烫,
+// 用户决定直接删除, 游戏保持默认 60Hz 垂直同步。
 // ==========================================
-static void ForceUnlock144FPS(EGLDisplay display) {
-    // 1. 解除 EGL 交换链 60Hz 垂直同步等待
-    typedef EGLBoolean (*eglSwapInterval_t)(EGLDisplay dpy, EGLint interval);
-    static eglSwapInterval_t p_eglSwapInterval = nullptr;
-    if (!p_eglSwapInterval) {
-        p_eglSwapInterval = (eglSwapInterval_t)DobbySymbolResolver("libEGL.so", "eglSwapInterval");
-        if (!p_eglSwapInterval) {
-            void* h = dlopen("libEGL.so", RTLD_LAZY);
-            if (h) p_eglSwapInterval = (eglSwapInterval_t)dlsym(h, "eglSwapInterval");
-        }
-    }
-    if (p_eglSwapInterval && display != EGL_NO_DISPLAY) {
-        p_eglSwapInterval(display, 0); // 0 = 禁用 VSync 锁 60 帧，允许 144Hz/120Hz 满血刷新
-    }
-
-    // 2. 动态反射注入 Unity 引擎 Application.targetFrameRate = 144 / QualitySettings.vSyncCount = 0
-    if (g_il2cpp_api.init() && g_il2cpp_api.runtime_invoke) {
-        static bool s_unity_fps_unlocked = false;
-        static int s_unlock_retries = 0;
-        if (!s_unity_fps_unlocked && s_unlock_retries < 10) {
-            s_unlock_retries++;
-            void* domain = g_il2cpp_api.domain_get ? g_il2cpp_api.domain_get() : nullptr;
-            if (domain && g_il2cpp_api.domain_get_assemblies) {
-                size_t ass_count = 0;
-                void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &ass_count);
-                if (assemblies) {
-                    for (size_t i = 0; i < ass_count; i++) {
-                        void* img = g_il2cpp_api.assembly_get_image(assemblies[i]);
-                        if (!img) continue;
-                        const char* img_name = g_il2cpp_api.image_get_name ? g_il2cpp_api.image_get_name(img) : "";
-                        if (strstr(img_name, "UnityEngine.CoreModule") || strstr(img_name, "UnityEngine")) {
-                            size_t cls_cnt = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
-                            for (size_t c = 0; c < cls_cnt; c++) {
-                                void* klass = g_il2cpp_api.image_get_class(img, c);
-                                if (!klass) continue;
-                                const char* c_name = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass) : "";
-                                if (strcmp(c_name, "Application") == 0) {
-                                    void* iter = nullptr;
-                                    while (void* m = g_il2cpp_api.class_get_methods(klass, &iter)) {
-                                        const char* m_name = g_il2cpp_api.method_get_name ? g_il2cpp_api.method_get_name(m) : "";
-                                        if (strcmp(m_name, "set_targetFrameRate") == 0) {
-                                            int targetFps = 144;
-                                            void* args[1] = { &targetFps };
-                                            void* exc = nullptr;
-                                            g_il2cpp_api.runtime_invoke(m, nullptr, args, &exc);
-                                            s_unity_fps_unlocked = true;
-                                            LOGI("[+] ForceUnlock144FPS: Successfully set Application.targetFrameRate = 144!");
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (strcmp(c_name, "QualitySettings") == 0) {
-                                    void* iter = nullptr;
-                                    while (void* m = g_il2cpp_api.class_get_methods(klass, &iter)) {
-                                        const char* m_name = g_il2cpp_api.method_get_name ? g_il2cpp_api.method_get_name(m) : "";
-                                        if (strcmp(m_name, "set_vSyncCount") == 0) {
-                                            int vsync = 0;
-                                            void* args[1] = { &vsync };
-                                            void* exc = nullptr;
-                                            g_il2cpp_api.runtime_invoke(m, nullptr, args, &exc);
-                                            LOGI("[+] ForceUnlock144FPS: Successfully set QualitySettings.vSyncCount = 0!");
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     g_current_frame++;
-    ForceUnlock144FPS(display);
     if (g_active_renderer.load() == 0) g_active_renderer.store(1);
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
 
