@@ -1297,11 +1297,14 @@ void ParseGameMemory() {
                     static auto s_last_sample = std::chrono::steady_clock::now() - std::chrono::seconds(10); // 首次立即采样
                     auto now = std::chrono::steady_clock::now();
                     if (std::chrono::duration<double>(now - s_last_sample).count() >= 2.0) {
-                        s_last_sample = now; // 无论本次是否有效, 都进入下一 2 秒窗口 (避免高频重试)
+                        s_last_sample = now;
                         int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
                         int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
                         int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
-                        if (q0 > 0 || q1 > 0 || q2 > 0) { // 有任一有效值才计入一行, 避免全 0(未加载好)占行
+                        // ★ 调试: 每次采样都打印 q0/q1/q2 到 logcat, 看真实值; 无效也存行便于排查
+                        LOGI("[HEX] sample #%d: q0=%d q1=%d q2=%d (hexctrl=%p, func=%p)",
+                            g_hex_round_count, q0, q1, q2, (void*)g_dbg_hexctrl, (void*)get_hex);
+                        if (q0 >= 0 && q1 >= 0 && q2 >= 0 && (q0 + q1 + q2) > 0) { // 至少一个 >0 才计入 (放宽, 0 也可能合法但避免全是 fallback=0)
                             int row = (g_hex_round_count < 3) ? g_hex_round_count : 2;
                             g_hex_round_results[row][0] = q0;
                             g_hex_round_results[row][1] = q1;
@@ -1310,7 +1313,7 @@ void ParseGameMemory() {
                             g_hex_qualities[1] = q1;
                             g_hex_qualities[2] = q2;
                             g_hex_round_count++;
-                            if (g_hex_round_count >= 3) g_hex_confirmed.store(true); // 3 次采样完成, 整局不再调用
+                            if (g_hex_round_count >= 3) g_hex_confirmed.store(true);
                         }
                     }
                 }
