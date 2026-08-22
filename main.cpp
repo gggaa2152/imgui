@@ -154,6 +154,7 @@ std::vector<uintptr_t> g_dbg_player_addrs;
 
 int g_my_player_id = -1;
 int g_hex_qualities[3] = {0, 0, 0};
+std::atomic<bool> g_hex_confirmed{false}; // 海克斯品质 3 轮一致才为 true, 否则显示"无法确认"
 std::vector<int> g_next_opponents;
 
 struct PoolHero { int heroId; int remaining; int total; int cost; uintptr_t addr10; };
@@ -893,6 +894,7 @@ void ClearGameState() {
     g_next_opponents.clear();
     g_my_player_id = -1;
     g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
+    g_hex_confirmed.store(false);
 
     g_dbg_list7_addrs.clear();
     g_dbg_list9_map.clear();
@@ -1271,62 +1273,64 @@ void ParseGameMemory() {
             g_dbg_hexctrl = SAFE_READ_PTR(g_dbg_addr26, g_off.hexctrl);
         
         if (g_dbg_hexctrl != 0 && g_off.func_get_hex != 0) {
+            // 3 轮确认: 每 120 帧(~2秒)读一轮 (q0,q1,q2), 连续 3 轮完全相同才更新显示并置 g_hex_confirmed;
+            // 不一致则保持"无法确认"。海克斯每回合刷新, 新值连续 3 轮稳定后自动跟进。
             static uintptr_t last_hexctrl = 0;
-            static std::atomic<bool> hex_confirmed(false);
             static std::atomic<int> match_counter(0);
             static std::atomic<int> prev_q0(0), prev_q1(0), prev_q2(0);
-            
+
             if (last_hexctrl != g_dbg_hexctrl) {
                 last_hexctrl = g_dbg_hexctrl;
-                hex_confirmed.store(false);
                 match_counter.store(0);
                 prev_q0.store(0); prev_q1.store(0); prev_q2.store(0);
+                g_hex_confirmed.store(false);
             }
 
-            if (!hex_confirmed.load()) {
-                static int frame_counter = 0;
-                frame_counter++;
-                if (frame_counter > 120) { 
-                    frame_counter = 0;
-                    std::thread([=]() {
-                        typedef void* (*il2cpp_domain_get_t)();
-                        typedef void* (*il2cpp_thread_attach_t)(void*);
-                        auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
-                        auto thread_attach = (il2cpp_thread_attach_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_thread_attach");
-                        if (domain_get && thread_attach) {
-                            void* domain = domain_get();
-                            if (domain) thread_attach(domain);
-                        }
+            static int frame_counter = 0;
+            frame_counter++;
+            if (frame_counter > 120) {
+                frame_counter = 0;
+                std::thread([=]() {
+                    typedef void* (*il2cpp_domain_get_t)();
+                    typedef void* (*il2cpp_thread_attach_t)(void*);
+                    auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
+                    auto thread_attach = (il2cpp_thread_attach_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_thread_attach");
+                    if (domain_get && thread_attach) {
+                        void* domain = domain_get();
+                        if (domain) thread_attach(domain);
+                    }
 
-                        typedef int (*func_get_hex_t)(uintptr_t, int);
-                        func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
-                        if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
-                            int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
-                            int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
-                            int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
-                                
-                                if (q0 > 0 || q1 > 0 || q2 > 0) {
-                                    if (q0 == prev_q0.load() && q1 == prev_q1.load() && q2 == prev_q2.load()) {
-                                        match_counter++;
-                                        if (match_counter.load() >= 1) { 
-                                            hex_confirmed.store(true);
-                                        }
-                                    } else {
-                                        prev_q0.store(q0); prev_q1.store(q1); prev_q2.store(q2);
-                                        match_counter.store(0);
-                                    }
+                    typedef int (*func_get_hex_t)(uintptr_t, int);
+                    func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
+                    if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
+                        int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
+                        int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
+                        int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
+                        if (q0 > 0 || q1 > 0 || q2 > 0) {
+                            if (q0 == prev_q0.load() && q1 == prev_q1.load() && q2 == prev_q2.load()) {
+                                int mc = match_counter.load() + 1;
+                                match_counter.store(mc);
+                                if (mc >= 3) { // 连续 3 轮一致 -> 确认显示
+                                    g_hex_qualities[0] = q0;
+                                    g_hex_qualities[1] = q1;
+                                    g_hex_qualities[2] = q2;
+                                    g_hex_confirmed.store(true);
                                 }
-                                g_hex_qualities[0] = q0;
-                                g_hex_qualities[1] = q1;
-                                g_hex_qualities[2] = q2;
-
+                            } else {
+                                prev_q0.store(q0); prev_q1.store(q1); prev_q2.store(q2);
+                                match_counter.store(1); // 本轮为第 1 次
+                                g_hex_confirmed.store(false);
+                            }
+                        } else {
+                            g_hex_confirmed.store(false); // 读到全 0(无效), 无法确认
                         }
-                    }).detach();
-                }
+                    }
+                }).detach();
             }
         }
     } else {
         g_dbg_addr26 = 0; g_dbg_hexctrl = 0;
+        g_hex_confirmed.store(false);
         g_hex_qualities[0] = 0; g_hex_qualities[1] = 0; g_hex_qualities[2] = 0;
     }
 }
@@ -2869,11 +2873,15 @@ void DrawHextechCapsule() {
     if (!BeginContentFloatWindow("##HextechFloat", &g_win_hextech, &g_float_hex_x, &g_float_hex_y, g_alpha_hex)) return;
     ImGui::SetWindowFontScale(g_autoScale * g_hextech_scale);
     std::string txt = (const char*)u8"海克斯预测: ";
-    const char* qn[] = { (const char*)u8"无", (const char*)u8"银", (const char*)u8"金", (const char*)u8"彩" };
-    for (int i = 0; i < 3; i++) {
-        int q = g_hex_qualities[i];
-        txt += (q >= 0 && q <= 3) ? qn[q] : "?";
-        if (i < 2) txt += " | ";
+    if (g_hex_confirmed.load()) {
+        const char* qn[] = { (const char*)u8"无", (const char*)u8"银", (const char*)u8"金", (const char*)u8"彩" };
+        for (int i = 0; i < 3; i++) {
+            int q = g_hex_qualities[i];
+            txt += (q >= 0 && q <= 3) ? qn[q] : "?";
+            if (i < 2) txt += " | ";
+        }
+    } else {
+        txt += (const char*)u8"无法确认";
     }
     ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", txt.c_str());
     EndContentFloatWindow("hex_grip", &g_hextech_scale);
