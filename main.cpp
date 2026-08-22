@@ -478,15 +478,15 @@ inline int SafeDobbyHook(void* target, void* replace, void** origin) {
 
 
 bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
+    // ★ 注入式(同进程)直接内存读: 原实现每次 process_vm_readv 系统调用,
+    // ParseGameMemory 每 2 帧约 1.9 万次读 → 每秒 ~57 万次 syscall, 吃满一个核心,
+    // 是持续卡顿的最大来源。现改为直接解引用 + SAFE_CALL 信号兜底(崩溃被捕获返回 false)。
     if (addr < 0x10000000 || addr > 0x00007FFFFFFFFFFF) return false;
-    struct iovec local[1];
-    struct iovec remote[1];
-    local[0].iov_base = buffer;
-    local[0].iov_len = size;
-    remote[0].iov_base = (void*)addr;
-    remote[0].iov_len = size;
-    ssize_t bytesRead = syscall(__NR_process_vm_readv, getpid(), local, 1, remote, 1, 0);
-    return bytesRead == (ssize_t)size;
+    if (size == 0 || !buffer) return false;
+    if (addr + size > 0x00007FFFFFFFFFFF) return false;
+    bool ok = false;
+    SAFE_CALL({ memcpy(buffer, (const void*)addr, size); ok = true; }, (void)0);
+    return ok;
 }
 
 uintptr_t SafeReadPtr(uintptr_t addr, uint32_t offset) {
