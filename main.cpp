@@ -147,6 +147,10 @@ struct AvatarRankProbe { uintptr_t entry = 0, addr26 = 0; int raw_rank = 0, rank
 std::vector<AvatarRankProbe> g_dbg_avatar_ranks;
 uintptr_t g_dbg_addr26 = 0;
 uintptr_t g_dbg_hexctrl = 0;
+// ★ 修复: 收集所有玩家的 (hexctrl, pid), 采样时优先用自己的 -> 之前固定用 list23[0] (第一个玩家) 导致全 0
+struct HexCtrlEntry { uintptr_t ctrl; int pid; };
+std::vector<HexCtrlEntry> g_dbg_hexctrl_list;
+int g_dbg_hexctrl_src_pid = -999; // 最近一次读到有效品质所用的玩家 pid (-999=还没读到过)
 
 std::vector<uintptr_t> g_dbg_list7_addrs;
 std::map<uintptr_t, std::vector<uintptr_t>> g_dbg_list9_map;
@@ -332,6 +336,8 @@ std::atomic<uint64_t> g_count_buy_hero_new{0};
 std::atomic<uint64_t> g_count_func_get_Instance{0};
 std::atomic<uint64_t> g_count_func_quit{0};
 std::atomic<uint64_t> g_count_func_get_hex{0};
+std::atomic<uint64_t> g_count_hex_crash{0};   // get_hex 调用触发崩溃保护次数
+int g_hex_last_raw[3] = {-1, -1, -1};      // 最近一次采样原始返回值 (-1=未采样, -999=崩溃, 渲染线程内读写, 同线程无需原子)
 std::atomic<uint64_t> g_count_load_map{0};   // 棋盘加载 hook (系统调用)
 std::atomic<uint64_t> g_count_load_ll{0};    // 小英雄加载 hook (系统调用)
 
@@ -913,6 +919,8 @@ void ClearGameState() {
     g_dbg_player_addrs.clear();
     g_dbg_list23_addrs.clear();
     g_dbg_avatar_ranks.clear();
+    g_dbg_hexctrl_list.clear();
+    g_dbg_hexctrl_src_pid = -999;
 
     g_shop_slots.clear();
     g_shop_listen_done.store(false);
@@ -1109,9 +1117,9 @@ void ParseGameMemory() {
         static int s_dbg_frame = 0;
         if ((++s_dbg_frame % 120) == 0) {
             uintptr_t fptr = (g_off.func_get_hex != 0) ? (g_il2cppTrueBase + g_off.func_get_hex) : 0;
-            LOGI("[HEXDBG] ParseGameMemory CALLED | il2cppBase=%p inMatch=%d list23=%zu addr26=%p hexctrl=%p off_hex=0x%lx func=0x%lx fptr=%p",
+            LOGI("[HEXDBG] ParseGameMemory CALLED | il2cppBase=%p inMatch=%d list23=%zu ctrls=%zu mypid=%d src=%d off_hex=0x%lx func=0x%lx fptr=%p",
                 (void*)g_il2cppTrueBase, (int)g_is_in_match.load(std::memory_order_relaxed),
-                g_dbg_list23_addrs.size(), (void*)g_dbg_addr26, (void*)g_dbg_hexctrl,
+                g_dbg_list23_addrs.size(), g_dbg_hexctrl_list.size(), g_my_player_id, g_dbg_hexctrl_src_pid,
                 (unsigned long)g_off.hexctrl, (unsigned long)g_off.func_get_hex, (void*)fptr);
         }
     }
@@ -1290,12 +1298,29 @@ void ParseGameMemory() {
 
     g_dbg_addr26 = 0;
     g_dbg_hexctrl = 0;
+    g_dbg_hexctrl_list.clear();
     if (!g_dbg_list23_addrs.empty()) {
-        g_dbg_addr26 = SAFE_READ_PTR(g_dbg_list23_addrs[0], g_off.addr26);
-        if (IsValidPtr(g_dbg_addr26))
-            g_dbg_hexctrl = SAFE_READ_PTR(g_dbg_addr26, g_off.hexctrl);
-        
-        if (g_dbg_hexctrl != 0 && g_off.func_get_hex != 0) {
+        // ★ 修复: 遍历所有玩家条目, 收集 (hexctrl, pid); 优先匹配自己的 player_id
+        // 之前固定用 list23_addrs[0] (第一个玩家), 不是自己 -> get_hex 285 次全 0
+        for (uintptr_t entry : g_dbg_list23_addrs) {
+            if (!IsValidPtr(entry)) continue;
+            uintptr_t a26 = SAFE_READ_PTR(entry, g_off.addr26);
+            if (!IsValidPtr(a26)) continue;
+            uintptr_t ctrl = SAFE_READ_PTR(a26, g_off.hexctrl);
+            if (!IsValidPtr(ctrl)) continue;
+            int pid = SAFE_READ_INT(a26, g_off.pi_avatar_player_id); // addr26+0x248 = 玩家id
+            g_dbg_hexctrl_list.push_back({ctrl, pid});
+            if (g_my_player_id >= 0 && pid == g_my_player_id) {
+                g_dbg_addr26 = a26;   // 自己的 addr26
+                g_dbg_hexctrl = ctrl; // 自己的 hexctrl
+            }
+        }
+        // 没匹配到自己: fallback 用第一个有效条目 (保留旧行为)
+        if (g_dbg_hexctrl == 0 && !g_dbg_hexctrl_list.empty()) {
+            g_dbg_hexctrl = g_dbg_hexctrl_list[0].ctrl;
+        }
+
+        if (!g_dbg_hexctrl_list.empty() && g_off.func_get_hex != 0) {
             // 用户要求: 每 2 秒采样一次, 每次调 get_hex 3 次(参数 0/1/2)读 3 个候选品质,
             // 共采样 3 次, 整局显示 3 行结果 (第1次金彩金 -> 第2次金金金 ... 看候选变化)。
             // 品质映射: 1=银色 2=金色 3=彩色 (显示 qn[] = 无/银/金/彩)。
@@ -1304,18 +1329,59 @@ void ParseGameMemory() {
             if (!g_hex_confirmed.load(std::memory_order_acquire)) {
                 typedef int (*func_get_hex_t)(uintptr_t, int);
                 func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
-                if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
+                if (get_hex && IsValidExecutableAddr((void*)get_hex)) {
+                    // 带崩溃计数的调用封装: 区分"函数正常返回 0"和"调用直接崩被信号保护拦下"
+                    auto hex_call = [&](uintptr_t ctrl, int idx) -> int {
+                        InitCrashGuard();
+                        g_segv_guard_active = true;
+                        if (sigsetjmp(g_segv_jmp_buf, 1) == 0) {
+                            int r = get_hex(ctrl, idx);
+                            g_segv_guard_active = false;
+                            return r;
+                        }
+                        g_segv_guard_active = false;
+                        g_count_hex_crash++;
+                        return -999; // 崩溃哨兵值
+                    };
                     static auto s_last_sample = std::chrono::steady_clock::now() - std::chrono::seconds(10); // 首次立即采样
                     auto now = std::chrono::steady_clock::now();
                     if (std::chrono::duration<double>(now - s_last_sample).count() >= 2.0) {
                         s_last_sample = now;
-                        int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
-                        int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
-                        int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
-                        // ★ 调试: 每次采样都打印 q0/q1/q2 到 logcat, 看真实值; 无效也存行便于排查
-                        LOGI("[HEX] sample #%d: q0=%d q1=%d q2=%d (hexctrl=%p, func=%p)",
-                            g_hex_round_count, q0, q1, q2, (void*)g_dbg_hexctrl, (void*)get_hex);
-                        if (q0 >= 0 && q1 >= 0 && q2 >= 0 && (q0 + q1 + q2) > 0) { // 至少一个 >0 才计入 (放宽, 0 也可能合法但避免全是 fallback=0)
+                        // ★ 修复: 先用自己的 hexctrl 调 (参数 0/1/2), 全 0 则遍历其他玩家,
+                        // 任一 ctrl 读到非 0 品质即采用该组值 (整局固定来源 pid, 避免串玩家)
+                        int q0 = 0, q1 = 0, q2 = 0;
+                        int src_pid = -999;
+                        // 排序尝试: 自己的 pid 排最前 (来源一旦确定就固定用它, 后续只试它)
+                        std::vector<HexCtrlEntry> try_list;
+                        if (g_dbg_hexctrl_src_pid != -999) {
+                            for (auto& h : g_dbg_hexctrl_list)
+                                if (h.pid == g_dbg_hexctrl_src_pid) { try_list.push_back(h); break; }
+                        }
+                        if (try_list.empty()) {
+                            for (auto& h : g_dbg_hexctrl_list)
+                                if (g_my_player_id >= 0 && h.pid == g_my_player_id) { try_list.push_back(h); break; }
+                        }
+                        for (auto& h : g_dbg_hexctrl_list) {
+                            bool dup = false;
+                            for (auto& t : try_list) if (t.ctrl == h.ctrl) { dup = true; break; }
+                            if (!dup) try_list.push_back(h);
+                        }
+                        for (auto& h : try_list) {
+                            if (!IsValidPtr(h.ctrl)) continue;
+                            int r0 = (g_count_func_get_hex++, hex_call(h.ctrl, 0));
+                            int r1 = (g_count_func_get_hex++, hex_call(h.ctrl, 1));
+                            int r2 = (g_count_func_get_hex++, hex_call(h.ctrl, 2));
+                            if (r0 >= 0 && r1 >= 0 && r2 >= 0 && (r0 + r1 + r2) > 0) {
+                                q0 = r0; q1 = r1; q2 = r2;
+                                src_pid = h.pid;
+                                break; // 读到有效值, 停止遍历
+                            }
+                        }
+                        g_hex_last_raw[0] = q0; g_hex_last_raw[1] = q1; g_hex_last_raw[2] = q2; // 无论有效与否都记录, 悬浮窗直接显示
+                        if (src_pid != -999) g_dbg_hexctrl_src_pid = src_pid;
+                        LOGI("[HEX] sample #%d: q0=%d q1=%d q2=%d src_pid=%d my_pid=%d ctrls=%zu",
+                            g_hex_round_count, q0, q1, q2, src_pid, g_my_player_id, g_dbg_hexctrl_list.size());
+                        if (q0 >= 0 && q1 >= 0 && q2 >= 0 && (q0 + q1 + q2) > 0) { // 至少一个 >0 才计入一行
                             int row = (g_hex_round_count < 3) ? g_hex_round_count : 2;
                             g_hex_round_results[row][0] = q0;
                             g_hex_round_results[row][1] = q1;
@@ -1332,6 +1398,8 @@ void ParseGameMemory() {
         }
     } else {
         g_dbg_addr26 = 0; g_dbg_hexctrl = 0;
+        g_dbg_hexctrl_list.clear();
+        g_dbg_hexctrl_src_pid = -999;
         g_hex_confirmed.store(false);
         g_hex_qualities[0] = 0; g_hex_qualities[1] = 0; g_hex_qualities[2] = 0;
         g_hex_round_count = 0;
@@ -2894,9 +2962,20 @@ static void DrawHextechCollapseButton() {
     float sc = g_autoScale;
     float s = 11.0f * sc;
     ImVec2 c(wr.Max.x - s - 6.0f * sc, wr.Min.y + s + 6.0f * sc);
-    float hit_r = s * 2.6f;
+    float hit_r = s * 1.7f; // ★ 缩小判定半径(原 2.6 倍易误触)
+    // ★ 防拖动误触: 按下时记录位置, 释放时位移 < 8*sc 且仍在命中圈内才算"点击"收起
+    static bool s_dn = false;
+    static ImVec2 s_dn_pos(0.0f, 0.0f);
     if (ImGui::IsMouseClicked(0) && ImLengthSqr(io.MousePos - c) <= hit_r * hit_r) {
-        g_hex_collapsed = true;
+        s_dn = true;
+        s_dn_pos = io.MousePos;
+    }
+    if (s_dn && !ImGui::IsMouseDown(0)) {
+        float max_mv = 8.0f * sc;
+        if (ImLengthSqr(io.MousePos - s_dn_pos) <= max_mv * max_mv
+            && ImLengthSqr(io.MousePos - c) <= hit_r * hit_r * 4.0f)
+            g_hex_collapsed = true;
+        s_dn = false;
     }
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     dl->AddCircleFilled(c, s * 0.95f, IM_COL32(0, 0, 0, 110), 20);
@@ -2958,6 +3037,33 @@ void DrawHextechCapsule() {
         char buf[64];
         snprintf(buf, sizeof(buf), "%s (%d/3)", (const char*)u8"海克斯预测: 采样中", g_hex_round_count);
         ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", buf);
+
+        // ★ 屏上诊断 (不依赖 logcat): 直接显示调用链每一环的状态, 断在哪一眼看出
+        {
+            uintptr_t fptr = (g_off.func_get_hex != 0) ? (g_il2cppTrueBase + g_off.func_get_hex) : 0;
+            char dbg[192];
+            snprintf(dbg, sizeof(dbg),
+                "list23=%zu ctrls=%zu mypid=%d src=%d ctrl=%p(%s)",
+                g_dbg_list23_addrs.size(),
+                g_dbg_hexctrl_list.size(),
+                g_my_player_id,
+                g_dbg_hexctrl_src_pid,
+                (void*)g_dbg_hexctrl, IsValidPtr(g_dbg_hexctrl) ? "OK" : "--");
+            ImGui::TextColored(ImVec4(0.65f, 0.72f, 0.82f, 1.f), "%s", dbg);
+            const char* fs = (g_off.func_get_hex == 0) ? "--" : (IsValidExecutableAddr((void*)fptr) ? "OK" : "BAD");
+            auto fmtq = [](int q) -> const char* {
+                if (q == -999) return (const char*)u8"崩";
+                if (q == -1) return "-";
+                static thread_local char t[3][16]; static int ti = 0; ti = (ti + 1) % 3;
+                snprintf(t[ti], sizeof(t[ti]), "%d", q); return t[ti];
+            };
+            snprintf(dbg, sizeof(dbg), "func=0x%lx(%s) %s:%llu %s:%llu %s[%s,%s,%s]",
+                (unsigned long)g_off.func_get_hex, fs,
+                (const char*)u8"调", (unsigned long long)g_count_func_get_hex.load(),
+                (const char*)u8"崩", (unsigned long long)g_count_hex_crash.load(),
+                (const char*)u8"上次", fmtq(g_hex_last_raw[0]), fmtq(g_hex_last_raw[1]), fmtq(g_hex_last_raw[2]));
+            ImGui::TextColored(ImVec4(0.65f, 0.72f, 0.82f, 1.f), "%s", dbg);
+        }
     }
     // 展开态窗口内容后补一点右侧间距, 避免三角盖住文字
     ImGui::SameLine(0, 26.0f * g_autoScale);
