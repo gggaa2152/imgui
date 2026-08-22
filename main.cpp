@@ -1104,6 +1104,17 @@ static void ApplyAvatarRanksFromList23() {
 }
 
 void ParseGameMemory() {
+    // ★ 诊断 (最外层, 无条件节流打印; 用于确认本函数是否被调用 / 对局状态 / 关键偏移)
+    {
+        static int s_dbg_frame = 0;
+        if ((++s_dbg_frame % 120) == 0) {
+            uintptr_t fptr = (g_off.func_get_hex != 0) ? (g_il2cppTrueBase + g_off.func_get_hex) : 0;
+            LOGI("[HEXDBG] ParseGameMemory CALLED | il2cppBase=%p inMatch=%d list23=%zu addr26=%p hexctrl=%p off_hex=0x%lx func=0x%lx fptr=%p",
+                (void*)g_il2cppTrueBase, (int)g_is_in_match.load(std::memory_order_relaxed),
+                g_dbg_list23_addrs.size(), (void*)g_dbg_addr26, (void*)g_dbg_hexctrl,
+                (unsigned long)g_off.hexctrl, (unsigned long)g_off.func_get_hex, (void*)fptr);
+        }
+    }
     if (g_il2cppTrueBase == 0) return;
     if (!g_is_in_match.load(std::memory_order_acquire)) return;
 
