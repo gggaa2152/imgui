@@ -2436,9 +2436,10 @@ void ProcessTextureQueue() {
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &last_unpack);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     // 每帧最多上传 8 张: 首帧解码队列可能上百张, 一次性全部 glTexImage2D 会卡渲染线程
-    int uploaded = 0;
-    while (!g_HeroTexDecodedQueue.empty() && uploaded < 8) {
-        auto& item = g_HeroTexDecodedQueue.front();
+    size_t n = g_HeroTexDecodedQueue.size();
+    if (n > 8) n = 8;
+    for (size_t i = 0; i < n; i++) {
+        auto& item = g_HeroTexDecodedQueue[i];
         GLuint tex = 0;
         glGenTextures(1, &tex);
         if (tex != 0) {
@@ -2451,9 +2452,8 @@ void ProcessTextureQueue() {
         }
         stbi_image_free(item.second.pixels);
         g_heroTextureCache[item.first] = tex;
-        g_HeroTexDecodedQueue.pop_front();
-        uploaded++;
     }
+    g_HeroTexDecodedQueue.erase(g_HeroTexDecodedQueue.begin(), g_HeroTexDecodedQueue.begin() + (long)n);
     glPixelStorei(GL_UNPACK_ALIGNMENT, last_unpack);
 }
 
