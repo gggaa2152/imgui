@@ -595,9 +595,50 @@ std::vector<int> GetIntsInArray(uintptr_t arrayAddr, int maxCount) {
     return res;
 }
 
+// 游戏私有目录 files/ (应用对自己私有目录一定有写权限; 读 /proc/self/cmdline 拿包名, 纯 C 不依赖 JNI)
+static std::string GetPrivateFilesDir() {
+    static std::string cached;
+    if (!cached.empty()) return cached;
+    char buf[256];
+    int fd = open("/proc/self/cmdline", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            std::string pkg(buf); // 到第一个 \0 结束
+            if (!pkg.empty()) cached = "/data/data/" + pkg + "/files/";
+        }
+    }
+    return cached;
+}
+
+// 真实写探测: access 在 Android 分区存储下会误报, 直接尝试建临时文件判断目录是否可写
+static bool CanWriteDir(const char* dir) {
+    std::string probe = std::string(dir) + ".jkt_w";
+    FILE* f = fopen(probe.c_str(), "w");
+    if (!f) return false;
+    fclose(f);
+    remove(probe.c_str());
+    return true;
+}
+
+// 配置路径: /sdcard/Download 优先 -> /data/local/tmp -> 游戏私有目录 files/ (必有写权限)
 std::string GetConfigPath() {
-    if (access("/sdcard/Download/", W_OK) == 0) return "/sdcard/Download/jkt_offsets.txt";
+    if (CanWriteDir("/sdcard/Download/")) return "/sdcard/Download/jkt_offsets.txt";
+    if (CanWriteDir("/data/local/tmp/")) return "/data/local/tmp/jkt_offsets.txt";
+    std::string priv = GetPrivateFilesDir();
+    if (!priv.empty() && CanWriteDir(priv.c_str())) return priv + "jkt_offsets.txt";
     return "/data/local/tmp/jkt_offsets.txt";
+}
+
+// 皮肤列表保存路径, 与配置文件同一目录/同一判定逻辑
+std::string GetSkinsPath() {
+    if (CanWriteDir("/sdcard/Download/")) return "/sdcard/Download/jkt_skins.txt";
+    if (CanWriteDir("/data/local/tmp/")) return "/data/local/tmp/jkt_skins.txt";
+    std::string priv = GetPrivateFilesDir();
+    if (!priv.empty() && CanWriteDir(priv.c_str())) return priv + "jkt_skins.txt";
+    return "/data/local/tmp/jkt_skins.txt";
 }
 
 static void CaptureWindowPos(const char* name, float& x, float& y) {
@@ -612,6 +653,7 @@ void SaveConfig() {
     CaptureWindowPos("##OpponentFloat", g_float_opp_x, g_float_opp_y);
     CaptureWindowPos("##HextechFloat", g_float_hex_x, g_float_hex_y);
     CaptureWindowPos("##PathTraceFloat", g_float_pt_x, g_float_pt_y);
+    CaptureWindowPos("##HeroWarnFloat", g_float_hw_x, g_float_hw_y); // 英雄余量预警悬浮窗
 
     std::ofstream out(GetConfigPath());
     if (out.is_open()) {
@@ -721,12 +763,18 @@ void SaveConfig() {
         }
         out << "\n";
                                         out.close();
+        LOGI("[CFG] 配置已保存: %s", GetConfigPath().c_str());
+    } else {
+        LOGI("[CFG] 保存失败! 无法写入: %s", GetConfigPath().c_str());
     }
 }
 
 void LoadConfig() {
     std::ifstream in(GetConfigPath());
-    if (!in.is_open()) { SaveConfig(); return; }
+    if (!in.is_open()) {
+        in.open("/sdcard/Download/jkt_offsets.txt"); // 兼容旧路径: 之前保存在 /sdcard/Download 的配置
+        if (!in.is_open()) { SaveConfig(); return; }
+    }
     
     std::string line;
     bool has_full = false;
@@ -1738,7 +1786,8 @@ void DrawCardPoolCapsule() {
 static bool BeginContentFloatWindow(const char* id, bool* open, float* pos_x = nullptr, float* pos_y = nullptr, float alpha = 1.0f) {
     if (open && !*open) return false;
     if (pos_x && pos_y && *pos_x >= 0.0f && *pos_y >= 0.0f) {
-        if (s_pos_initialized.find(id) == s_pos_initialized.end()) {
+        // 首次渲染 或 LoadConfig 刚加载完 (g_apply_saved_float_pos) 时强制应用保存的位置
+        if (s_pos_initialized.find(id) == s_pos_initialized.end() || g_apply_saved_float_pos) {
             ImGui::SetNextWindowPos(ImVec2(*pos_x, *pos_y), ImGuiCond_Always);
             s_pos_initialized.insert(id);
         }
@@ -2933,21 +2982,30 @@ struct SkinEntry {
     char x2[256]; // assetName   (包内 prefab 名)
 };
 
+// 皮肤列表持久化 (前向声明, 定义在文件后部 IME/JNI 区, 需 g_context 取私有目录)
+static void SaveSkinsToFile();
+static void LoadSkinsFromFileOnce();
+
 // 自动捕获: 游戏实际加载过的棋盘 (x1=bundlePath, x2=assetName), 去重记录, 供换肤菜单直接选用
 static std::vector<SkinEntry> g_captured_skins;
 static std::mutex           g_capture_mutex;
 static void RecordCapturedSkin(const std::string& x1, const std::string& x2) {
     if (x1.empty() || x2.empty()) return;
-    std::lock_guard<std::mutex> lk(g_capture_mutex);
-    for (const auto& s : g_captured_skins) {
-        if (strcmp(s.x1, x1.c_str()) == 0 && strcmp(s.x2, x2.c_str()) == 0) return;
+    bool added = false;
+    {
+        std::lock_guard<std::mutex> lk(g_capture_mutex);
+        for (const auto& s : g_captured_skins) {
+            if (strcmp(s.x1, x1.c_str()) == 0 && strcmp(s.x2, x2.c_str()) == 0) return;
+        }
+        if (g_captured_skins.size() >= 256) return;
+        SkinEntry e;
+        memset(&e, 0, sizeof(e));
+        strncpy(e.x1, x1.c_str(), sizeof(e.x1) - 1);
+        strncpy(e.x2, x2.c_str(), sizeof(e.x2) - 1);
+        g_captured_skins.push_back(e);
+        added = true;
     }
-    if (g_captured_skins.size() >= 256) return;
-    SkinEntry e;
-    memset(&e, 0, sizeof(e));
-    strncpy(e.x1, x1.c_str(), sizeof(e.x1) - 1);
-    strncpy(e.x2, x2.c_str(), sizeof(e.x2) - 1);
-    g_captured_skins.push_back(e);
+    if (added) SaveSkinsToFile(); // 锁外保存, SaveSkinsToFile 内部自行加锁, 避免同线程重复加锁死锁
 }
 static std::vector<SkinEntry> g_skins = {
     // 默认皮肤: S5 中秋棋盘 (用户已验证可加载). 后续可继续往这里加 x1/x2.
@@ -2958,6 +3016,7 @@ static bool g_auto_skin_enabled = true;
 static bool g_skin_autorotate = true;      // 每局结束自动轮换到下一款皮肤
 static bool g_skin_hook_installed =  false;
 static bool g_skin_rotate_pending = false; // 下一局开局时轮转皮肤 (由游戏结束事件触发)
+static bool g_skin_match_active = false;   // 仅 set_IsGameEnd(isEnd=0)(游戏开始) 后才允许替换参数
 // LoadMapImpl 在 libil2cpp.so 内的偏移(RVA)。游戏版本更新导致偏移变化时需更新此值
 static uintptr_t g_skin_loadmap_offset = 0x8beba60;
 
@@ -2973,8 +3032,11 @@ static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void*
         if (!s1.empty() && !s2.empty()) RecordCapturedSkin(s1, s2);
     }
 
+    // 仅 set_IsGameEnd(isEnd=0)(游戏开始) 之后才替换参数; 大厅/预览/其他情况原样透传
+    bool in_match = g_skin_match_active;
+
     // 每局自动轮换: 由"游戏结束"事件置位 g_skin_rotate_pending, 在下一局开局 LoadMapImpl 时切换一次
-    if (g_auto_skin_enabled && g_skin_autorotate && !g_skins.empty() && g_il2cpp_api.string_new) {
+    if (g_auto_skin_enabled && g_skin_autorotate && in_match && !g_skins.empty() && g_il2cpp_api.string_new) {
         if (g_skin_rotate_pending) {
             g_skin_rotate_pending = false;
             g_skin_selected = (g_skin_selected + 1) % (int)g_skins.size();
@@ -2983,7 +3045,7 @@ static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void*
         }
     }
 
-    if (g_auto_skin_enabled && g_skin_selected >= 0 && g_skin_selected < (int)g_skins.size()
+    if (g_auto_skin_enabled && in_match && g_skin_selected >= 0 && g_skin_selected < (int)g_skins.size()
         && g_il2cpp_api.string_new) {
         void* nb = g_il2cpp_api.string_new(g_skins[g_skin_selected].x1);
         void* na = g_il2cpp_api.string_new(g_skins[g_skin_selected].x2);
@@ -4366,7 +4428,7 @@ static std::vector<std::string> GetPinyinCandidates(const std::string& py) {
         if (!str) return;
         std::stringstream ss(str);
         std::string token;
-        while (ss >> token && res.size() < 12) {
+        while (ss >> token) {
             res.push_back(token);
         }
     };
@@ -4423,6 +4485,137 @@ static void AutoPopupSoftKbd(char* buf, size_t size) {
     } else if (g_last_focused_input == buf) {
         g_last_focused_input = nullptr;
     }
+}
+
+// 通过 JNI 读取 Android 系统剪贴板文本（ImGui 在 Android 上没有默认剪贴板回调，GetClipboardText 返回空）
+static std::string GetSystemClipboardText() {
+    JNIEnv* e = nullptr;
+    if (!g_jvm || g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6) != JNI_OK || !e) return "";
+    if (!g_context) return "";
+    jclass ctxCls = e->FindClass("android/content/Context");
+    if (!ctxCls) { e->ExceptionClear(); return ""; }
+    jmethodID getSys = e->GetMethodID(ctxCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    if (!getSys) { e->ExceptionClear(); return ""; }
+    jstring svcName = e->NewStringUTF("clipboard");
+    jobject cm = e->CallObjectMethod(g_context, getSys, svcName);
+    e->DeleteLocalRef(svcName);
+    if (!cm) { e->ExceptionClear(); return ""; }
+    jclass cmCls = e->FindClass("android/content/ClipboardManager");
+    if (!cmCls) { e->ExceptionClear(); return ""; }
+    jmethodID getPri = e->GetMethodID(cmCls, "getPrimaryClip", "()Landroid/content/ClipData;");
+    if (!getPri) { e->ExceptionClear(); return ""; }
+    jobject clip = e->CallObjectMethod(cm, getPri);
+    if (!clip) { e->ExceptionClear(); return ""; }
+    jclass cdCls = e->FindClass("android/content/ClipData");
+    jmethodID getItem = e->GetMethodID(cdCls, "getItemAt", "(I)Landroid/content/ClipData$Item;");
+    if (!getItem) { e->ExceptionClear(); return ""; }
+    jobject item = e->CallObjectMethod(clip, getItem, 0);
+    if (!item) { e->ExceptionClear(); return ""; }
+    jclass itemCls = e->FindClass("android/content/ClipData$Item");
+    jmethodID getText = e->GetMethodID(itemCls, "getText", "()Ljava/lang/CharSequence;");
+    if (!getText) { e->ExceptionClear(); return ""; }
+    jobject cs = e->CallObjectMethod(item, getText);
+    if (!cs) { e->ExceptionClear(); return ""; }
+    jclass csCls = e->FindClass("java/lang/CharSequence");
+    jmethodID toStr = e->GetMethodID(csCls, "toString", "()Ljava/lang/String;");
+    if (!toStr) { e->ExceptionClear(); return ""; }
+    jstring js = (jstring)e->CallObjectMethod(cs, toStr);
+    if (!js) { e->ExceptionClear(); return ""; }
+    const char* p = e->GetStringUTFChars(js, nullptr);
+    std::string result(p ? p : "");
+    if (p) e->ReleaseStringUTFChars(js, p);
+    e->DeleteLocalRef(js);
+    return result;
+}
+
+// 通过 JNI 把文本写入 Android 系统剪贴板（ImGui 在 Android 上没有默认剪贴板回调，SetClipboardText 无效）
+static void SetSystemClipboardText(const std::string& text) {
+    JNIEnv* e = nullptr;
+    if (!g_jvm || g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6) != JNI_OK || !e) return;
+    if (!g_context) return;
+    jclass ctxCls = e->FindClass("android/content/Context");
+    if (!ctxCls) { e->ExceptionClear(); return; }
+    jmethodID getSys = e->GetMethodID(ctxCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    if (!getSys) { e->ExceptionClear(); return; }
+    jstring svcName = e->NewStringUTF("clipboard");
+    jobject cm = e->CallObjectMethod(g_context, getSys, svcName);
+    e->DeleteLocalRef(svcName);
+    if (!cm) { e->ExceptionClear(); return; }
+    // ClipData.newPlainText(label, text)
+    jclass cdCls = e->FindClass("android/content/ClipData");
+    jmethodID newPlain = e->GetStaticMethodID(cdCls, "newPlainText", "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;");
+    if (!newPlain) { e->ExceptionClear(); return; }
+    jstring label = e->NewStringUTF("imgui");
+    jstring content = e->NewStringUTF(text.c_str());
+    jobject clip = e->CallStaticObjectMethod(cdCls, newPlain, label, content);
+    e->DeleteLocalRef(label);
+    e->DeleteLocalRef(content);
+    if (!clip) { e->ExceptionClear(); return; }
+    jclass cmCls = e->FindClass("android/content/ClipboardManager");
+    jmethodID setPri = e->GetMethodID(cmCls, "setPrimaryClip", "(Landroid/content/ClipData;)V");
+    if (setPri) e->CallVoidMethod(cm, setPri, clip);
+    e->ExceptionClear();
+}
+
+// ==================== 皮肤列表持久化 ====================
+// 与"保存全部配置"的 jkt_offsets.txt 同一目录/同一判定逻辑 (GetSkinsPath)
+static std::string g_skins_file_path;
+static bool        g_skins_loaded = false;
+
+static void EnsureSkinsFilePath() {
+    if (!g_skins_file_path.empty()) return;
+    g_skins_file_path = GetSkinsPath();
+}
+
+static void SaveSkinsToFile() {
+    EnsureSkinsFilePath();
+    if (g_skins_file_path.empty()) return;
+    std::string content;
+    content += "[skins]\n";
+    {
+        std::lock_guard<std::mutex> lk(g_capture_mutex);
+        for (const auto& s : g_skins) { content += s.x1; content += "|"; content += s.x2; content += "\n"; }
+        content += "[captured]\n";
+        for (const auto& s : g_captured_skins) { content += s.x1; content += "|"; content += s.x2; content += "\n"; }
+    }
+    FILE* f = fopen(g_skins_file_path.c_str(), "w");
+    if (f) { fwrite(content.c_str(), 1, content.size(), f); fclose(f); }
+}
+
+static void LoadSkinsFromFile() {
+    EnsureSkinsFilePath();
+    if (g_skins_file_path.empty()) return;
+    FILE* f = fopen(g_skins_file_path.c_str(), "r");
+    if (!f) return;
+    std::vector<SkinEntry> newSkins, newCaptured;
+    bool inSkins = false, inCaptured = false;
+    char line[600];
+    while (fgets(line, sizeof(line), f)) {
+        std::string s(line);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+        if (s == "[skins]") { inSkins = true; inCaptured = false; continue; }
+        if (s == "[captured]") { inSkins = false; inCaptured = true; continue; }
+        size_t sep = s.find('|');
+        if (sep == std::string::npos) continue;
+        SkinEntry en{}; 
+        strncpy(en.x1, s.substr(0, sep).c_str(), sizeof(en.x1) - 1);
+        strncpy(en.x2, s.substr(sep + 1).c_str(), sizeof(en.x2) - 1);
+        if (en.x1[0] && en.x2[0]) {
+            if (inSkins) newSkins.push_back(en);
+            else if (inCaptured) newCaptured.push_back(en);
+        }
+    }
+    fclose(f);
+    std::lock_guard<std::mutex> lk(g_capture_mutex);
+    if (!newSkins.empty()) g_skins = newSkins;
+    if (!newCaptured.empty()) g_captured_skins = newCaptured;
+    if (g_skin_selected >= (int)g_skins.size()) g_skin_selected = 0;
+}
+
+static void LoadSkinsFromFileOnce() {
+    if (g_skins_loaded) return;
+    g_skins_loaded = true;
+    LoadSkinsFromFile();
 }
 
 // 注意：本函数可能在 GL 渲染线程（非 UI 线程）被调用。addContentView 会因 CalledFromWrongThread 抛异常，
@@ -4593,12 +4786,16 @@ void DrawVirtualKeyboard() {
         g_vkbd_pinyin_buf.clear();
     }
     ImGui::SameLine();
-    // [粘贴] 按钮 (支持直接从系统剪贴板粘贴中文)
+    // [粘贴] 按钮 (优先通过 JNI 读取 Android 系统剪贴板，ImGui 在 Android 上无默认剪贴板回调)
     if (ImGui::Button((const char*)u8"[粘贴]", ImVec2(55.0f * g_autoScale, 0))) {
-        const char* clip = ImGui::GetClipboardText();
-        if (clip && strlen(clip) > 0) {
+        std::string clipStr = GetSystemClipboardText();
+        if (clipStr.empty()) {
+            const char* fallback = ImGui::GetClipboardText();
+            if (fallback) clipStr = fallback;
+        }
+        if (!clipStr.empty()) {
             size_t cur_len = strlen(g_vkbd_target);
-            strncat(g_vkbd_target, clip, g_vkbd_target_size - cur_len - 1);
+            strncat(g_vkbd_target, clipStr.c_str(), g_vkbd_target_size - cur_len - 1);
         }
     }
     ImGui::SameLine();
@@ -4622,7 +4819,7 @@ void DrawVirtualKeyboard() {
         if (candidates.empty()) {
             ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(无匹配)");
         } else {
-            for (size_t c = 0; c < candidates.size() && c < 8; c++) {
+            for (size_t c = 0; c < candidates.size(); c++) {
                 char cand_btn[32]; snprintf(cand_btn, sizeof(cand_btn), "%zu.%s##cand_%zu", c + 1, candidates[c].c_str(), c);
                 if (ImGui::Button(cand_btn)) {
                     size_t cur_len = strlen(g_vkbd_target);
@@ -5764,7 +5961,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.15f, 0.45f, 0.95f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.25f, 0.55f, 1.0f));
     if (ImGui::Button((const char*)u8"Dump Object", ImVec2(avail_x, 38.0f * g_autoScale))) {
-        ImGui::SetClipboardText(dump_buffer.c_str());
+        SetSystemClipboardText(dump_buffer);
         AddActionLog((const char*)u8"-> [Dump] 成功将对象 %s (0x%lx) 的全量字段数据复制到系统剪贴板!", fullClassName.c_str(), currentObj);
     }
     ImGui::PopStyleColor(2);
@@ -6523,6 +6720,7 @@ void DrawMainMenu() {
             case 6:
                 {
                     DrawSectionTitle((const char*)u8"地图换肤 (Skin Changer)");
+                    LoadSkinsFromFileOnce(); // 启动后首次打开换肤菜单时, 自动加载已保存的皮肤列表
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"进入对局加载棋盘时, 自动把加载参数替换为所选皮肤");
                     ImGui::Text((const char*)u8"仅替换 x1(bundlePath) 与 x2(assetName), 其余参数原样透传");
                     ImGui::Spacing();
@@ -6539,13 +6737,16 @@ void DrawMainMenu() {
                     DrawGlassSeparator();
 
                     // 自动捕获: 展示本局游戏实际加载过的棋盘, 一键选用
+                    bool captured_used = false;
                     {
                         std::lock_guard<std::mutex> lk(g_capture_mutex);
                         size_t capN = g_captured_skins.size();
                         ImGui::TextColored(ImVec4(1.0f,0.85f,0.3f,1.0f), (const char*)u8"自动捕获 (本局加载过的棋盘): %zu", capN);
                         for (size_t i = 0; i < capN; i++) {
                             ImGui::PushID((int)(2000 + i));
-                            ImGui::TextWrapped((const char*)u8"  %s", g_captured_skins[i].x1);
+                            ImGui::TextColored(ImVec4(0.5f,0.8f,1.0f,1.0f), (const char*)u8"[%zu]", i);
+                            ImGui::SameLine();
+                            ImGui::TextWrapped((const char*)u8"%s", g_captured_skins[i].x1);
                             ImGui::TextWrapped((const char*)u8"  -> %s", g_captured_skins[i].x2);
                             if (ImGui::Button((const char*)u8"选用##cap", ImVec2(-1, 26 * g_autoScale))) {
                                 int idx = -1;
@@ -6555,12 +6756,29 @@ void DrawMainMenu() {
                                 }
                                 if (idx < 0) { g_skins.push_back(g_captured_skins[i]); idx = (int)g_skins.size() - 1; }
                                 g_skin_selected = idx;
+                                captured_used = true;
                             }
                             ImGui::PopID();
                             DrawGlassSeparator();
                         }
                     }
-                    ImGui::TextColored(UITheme().primary, (const char*)u8"皮肤列表 (默认选中第 0 项)");
+                    if (captured_used) SaveSkinsToFile(); // 锁外保存, 避免同线程重复加锁死锁
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"皮肤列表 (共 %zu 项)", g_skins.size());
+                    if (ImGui::Button((const char*)u8"排序 (按 bundlePath 字典序)", ImVec2(-1, 28 * g_autoScale))) {
+                        if (g_skins.size() > 1) {
+                            SkinEntry sel = g_skins[g_skin_selected]; // 记住当前选中项, 排序后重新定位
+                            std::stable_sort(g_skins.begin(), g_skins.end(), [](const SkinEntry& a, const SkinEntry& b) {
+                                return strcmp(a.x1, b.x1) < 0;
+                            });
+                            g_skin_selected = 0;
+                            for (size_t j = 0; j < g_skins.size(); j++) {
+                                if (strcmp(g_skins[j].x1, sel.x1) == 0 && strcmp(g_skins[j].x2, sel.x2) == 0) {
+                                    g_skin_selected = (int)j; break;
+                                }
+                            }
+                            SaveSkinsToFile();
+                        }
+                    }
                     for (size_t i = 0; i < g_skins.size(); i++) {
                         ImGui::PushID((int)i);
                         char label[32];
@@ -6577,12 +6795,13 @@ void DrawMainMenu() {
                         if (g_skin_selected == (int)i) {
                             ImGui::TextColored(ImVec4(0.2f,1.0f,0.4f,1.0f), (const char*)u8"  >> 当前选用");
                         } else {
-                            if (ImGui::Button((const char*)u8"选用")) { g_skin_selected = (int)i; }
+                            if (ImGui::Button((const char*)u8"选用")) { g_skin_selected = (int)i; SaveSkinsToFile(); }
                             ImGui::SameLine();
                         }
                         if (g_skins.size() > 1 && ImGui::Button((const char*)u8"删除")) {
                             g_skins.erase(g_skins.begin() + i);
                             if (g_skin_selected >= (int)g_skins.size()) g_skin_selected = 0;
+                            SaveSkinsToFile();
                         }
                         ImGui::PopID();
                         DrawGlassSeparator();
@@ -6590,6 +6809,7 @@ void DrawMainMenu() {
                     if (ImGui::Button((const char*)u8"＋ 添加皮肤", ImVec2(-1, 30 * g_autoScale))) {
                         SkinEntry e{};
                         g_skins.push_back(e);
+                        SaveSkinsToFile();
                     }
                     DrawGlassSeparator();
                     ImGui::TextColored(UITheme().primary, (const char*)u8"Hook 状态: %s", g_skin_hook_installed ? u8"已挂载 [OK]" : u8"未挂载 (启用时自动尝试)");
@@ -6773,13 +6993,16 @@ void hook_set_IsGameEnd(void* thisObj, uint8_t isEnd) { g_count_set_IsGameEnd++;
     if (isEnd == 0) {
         AddActionLog((const char*)u8"-> [引擎状态] call func_set_IsGameEnd(isEnd=0) | 游戏开始!");
         g_match_enter_pending.store(true, std::memory_order_release);
+        // 游戏开始 -> 之后加载棋盘才允许换肤参数替换
+        g_skin_match_active = true;
     } else if (g_is_in_match.load(std::memory_order_acquire)) {
         AddActionLog((const char*)u8"-> [引擎状态] call func_set_IsGameEnd(isEnd=%d) | 游戏结束!", isEnd);
         g_is_in_match.store(false, std::memory_order_release);
         g_match_enter_pending.store(false, std::memory_order_release);
         g_need_segment_gap_before_enter = true;
         g_Tasks.trigger_game_end.store(true, std::memory_order_release);
-        // 游戏结束 -> 标记下一局开局时轮换皮肤
+        // 游戏结束 -> 停止替换; 标记下一局开局时轮换皮肤
+        g_skin_match_active = false;
         g_skin_rotate_pending = true;
     }
 }
