@@ -3081,14 +3081,17 @@ static void InstallSkinHook() {
 }
 
 // ==================== 小小英雄换肤 (Little Legend Skin Changer) ====================
-// hook 小小英雄模型加载实例方法 0x87c46a4 (Frida 实测):
-//   x0=this, x1=模型资源路径(Il2CppString), x2=展示模型名(Il2CppString), x3=容器指针, x4=对象, x5=null
-//   x1 例: "art_tft_raw/little_legend_res/model/t_qieqishispring/t_qieqishispring_horse/low"
-//   x2 例: "t_qieqishispring_horse_1_show"
-// (0xaf4fe0c 实测 x0=字符串非 this, 非标准入口, 弃用)
-static uintptr_t g_ll_load_offset = 0x87c46a4;
-typedef void* (*LoadLittleLegend_fn)(void* self, void* path, void* showName, void* container, void* x4, void* x5);
-static LoadLittleLegend_fn g_orig_LoadLittleLegend = nullptr;
+// 两个小英雄模型加载方法都 hook, 均自动捕获; 用 g_ll_use_87 选择哪一个执行替换:
+//   A) 0x87c46a4 (标准实例方法入口): x0=this, x1=模型路径, x2=展示模型名, x3=容器, x4=对象, x5=null
+//      x1 例: "art_tft_raw/little_legend_res/model/t_qieqishispring/t_qieqishispring_horse/low"
+//      x2 例: "t_qieqishispring_horse_1_show"
+//   B) 0xaf4fe0c (备用): x0=模型路径, x1=展示模型名, x2=容器, x3=int, x4=对象, x5=null
+static uintptr_t g_ll_load_offset_87 = 0x87c46a4;
+static uintptr_t g_ll_load_offset_af = 0xaf4fe0c;
+static bool      g_ll_use_87 = true;   // true=用 0x87c46a4 替换, false=用 0xaf4fe0c 替换
+typedef void* (*LoadLittleLegend_fn)(void* a0, void* a1, void* a2, void* a3, void* a4, void* a5);
+static LoadLittleLegend_fn g_orig_LoadLittleLegend_87 = nullptr;
+static LoadLittleLegend_fn g_orig_LoadLittleLegend_af = nullptr;
 static bool g_ll_hook_installed = false;
 static bool g_ll_auto_enabled = true;
 static int  g_ll_selected = 0;
@@ -3099,43 +3102,65 @@ static std::vector<SkinEntry> g_ll_skins = {
 static std::vector<SkinEntry> g_ll_captured_skins; // 自动捕获: x1(路径)/x2(展示名)
 static std::mutex g_ll_capture_mutex;
 
-static void* HK_LoadLittleLegend(void* self, void* path, void* showName, void* container, void* x4, void* x5) {
-    // 自动捕获: 记录游戏实际加载的小小英雄 x1(路径)/x2(展示名), 无论是否启用替换
+// 捕获(去重) -> 返回是否需要落盘; 调用者需持有 g_ll_capture_mutex
+static bool LLRecordCaptured(const std::string& p1, const std::string& p2) {
+    for (const auto& s : g_ll_captured_skins) {
+        if (strcmp(s.x1, p1.c_str()) == 0 && strcmp(s.x2, p2.c_str()) == 0) return false;
+    }
+    if (g_ll_captured_skins.size() >= 256) return false;
+    SkinEntry e; memset(&e, 0, sizeof(e));
+    strncpy(e.x1, p1.c_str(), sizeof(e.x1) - 1);
+    strncpy(e.x2, p2.c_str(), sizeof(e.x2) - 1);
+    g_ll_captured_skins.push_back(e);
+    return true;
+}
+
+// Hook A: 0x87c46a4 标准入口 (x1=路径, x2=展示名)
+static void* HK_LoadLittleLegend_87(void* self, void* path, void* showName, void* container, void* x4, void* x5) {
     if (path && showName) {
         std::string p1 = ReadIl2CppString((uintptr_t)path);
         std::string p2 = ReadIl2CppString((uintptr_t)showName);
         if (!p1.empty() && !p2.empty()) {
             bool needSave = false;
-            {
-                std::lock_guard<std::mutex> lk(g_ll_capture_mutex);
-                bool dup = false;
-                for (const auto& s : g_ll_captured_skins) {
-                    if (strcmp(s.x1, p1.c_str()) == 0 && strcmp(s.x2, p2.c_str()) == 0) { dup = true; break; }
-                }
-                if (!dup && g_ll_captured_skins.size() < 256) {
-                    SkinEntry e; memset(&e, 0, sizeof(e));
-                    strncpy(e.x1, p1.c_str(), sizeof(e.x1) - 1);
-                    strncpy(e.x2, p2.c_str(), sizeof(e.x2) - 1);
-                    g_ll_captured_skins.push_back(e);
-                    needSave = true;
-                }
-            }
-            if (needSave) SaveSkinsToFile(); // 锁外保存, SaveSkinsToFile 内部自行加锁
+            { std::lock_guard<std::mutex> lk(g_ll_capture_mutex); needSave = LLRecordCaptured(p1, p2); }
+            if (needSave) SaveSkinsToFile(); // 锁外保存
         }
     }
-    // 仅对局中(set_IsGameEnd=0 游戏开始后)才替换; x1 必须是"路径样式"字符串(含'/'), 防止误判
-    if (g_ll_auto_enabled && g_skin_match_active && g_ll_selected >= 0 && g_ll_selected < (int)g_ll_skins.size()
+    // 仅选中 0x87c46a4 且对局中(set_IsGameEnd=0 游戏开始后)才替换; x1 必须是"路径样式"字符串(含'/')
+    if (g_ll_use_87 && g_ll_auto_enabled && g_skin_match_active && g_ll_selected >= 0 && g_ll_selected < (int)g_ll_skins.size()
         && g_il2cpp_api.string_new && path && showName) {
         std::string cur1 = ReadIl2CppString((uintptr_t)path);
         if (cur1.find('/') != std::string::npos) {
             void* nb = g_il2cpp_api.string_new(g_ll_skins[g_ll_selected].x1);
             void* na = g_il2cpp_api.string_new(g_ll_skins[g_ll_selected].x2);
-            if (nb && na) {
-                return g_orig_LoadLittleLegend(self, nb, na, container, x4, x5);
-            }
+            if (nb && na) return g_orig_LoadLittleLegend_87(self, nb, na, container, x4, x5);
         }
     }
-    return g_orig_LoadLittleLegend(self, path, showName, container, x4, x5);
+    return g_orig_LoadLittleLegend_87(self, path, showName, container, x4, x5);
+}
+
+// Hook B: 0xaf4fe0c 备用 (x0=路径, x1=展示名)
+static void* HK_LoadLittleLegend_af(void* x0, void* x1, void* x2, void* x3, void* x4, void* x5) {
+    if (x0 && x1) {
+        std::string p1 = ReadIl2CppString((uintptr_t)x0);
+        std::string p2 = ReadIl2CppString((uintptr_t)x1);
+        if (!p1.empty() && !p2.empty()) {
+            bool needSave = false;
+            { std::lock_guard<std::mutex> lk(g_ll_capture_mutex); needSave = LLRecordCaptured(p1, p2); }
+            if (needSave) SaveSkinsToFile(); // 锁外保存
+        }
+    }
+    // 仅选中 0xaf4fe0c 且对局中才替换; x0 必须是"路径样式"字符串(含'/')
+    if (!g_ll_use_87 && g_ll_auto_enabled && g_skin_match_active && g_ll_selected >= 0 && g_ll_selected < (int)g_ll_skins.size()
+        && g_il2cpp_api.string_new && x0 && x1) {
+        std::string cur1 = ReadIl2CppString((uintptr_t)x0);
+        if (cur1.find('/') != std::string::npos) {
+            void* nb = g_il2cpp_api.string_new(g_ll_skins[g_ll_selected].x1);
+            void* na = g_il2cpp_api.string_new(g_ll_skins[g_ll_selected].x2);
+            if (nb && na) return g_orig_LoadLittleLegend_af(nb, na, x2, x3, x4, x5);
+        }
+    }
+    return g_orig_LoadLittleLegend_af(x0, x1, x2, x3, x4, x5);
 }
 
 static void InstallLLHook() {
@@ -3143,19 +3168,23 @@ static void InstallLLHook() {
     if (g_il2cppTrueBase == 0) { LOGI("[LL] il2cpp base 未就绪"); return; }
     if (!g_il2cpp_api.string_new) g_il2cpp_api.init();
     if (!g_il2cpp_api.string_new) { LOGI("[LL] il2cpp_string_new 未解析"); return; }
-    void* fnptr = (void*)(g_il2cppTrueBase + g_ll_load_offset);
-    if (!IsValidExecutableAddr(fnptr)) {
-        LOGI("[LL] 偏移 0x%lx 不在可执行区域", (unsigned long)g_ll_load_offset);
-        return;
-    }
-    int ret = SafeDobbyHook(fnptr, (void*)HK_LoadLittleLegend, (void**)&g_orig_LoadLittleLegend);
-    if (ret == 0) {
-        g_ll_hook_installed = true;
-        LOGI("[LL] Hooked LittleLegend @ %p (offset 0x%lx)", fnptr, (unsigned long)g_ll_load_offset);
-        AddActionLog((const char*)u8"-> [小小英雄] 已挂载模型加载Hook");
-    } else {
-        LOGI("[LL] DobbyHook failed ret=%d", ret);
-    }
+    // 两个偏移都挂载(均做自动捕获), 替换由 g_ll_use_87 决定
+    void* p87 = (void*)(g_il2cppTrueBase + g_ll_load_offset_87);
+    if (IsValidExecutableAddr(p87)) {
+        if (SafeDobbyHook(p87, (void*)HK_LoadLittleLegend_87, (void**)&g_orig_LoadLittleLegend_87) == 0) {
+            g_ll_hook_installed = true;
+            LOGI("[LL] Hooked 0x87c46a4 @ %p", p87);
+            AddActionLog((const char*)u8"-> [小小英雄] 已挂载 0x87c46a4 (标准入口)");
+        } else LOGI("[LL] DobbyHook failed @ 0x87c46a4");
+    } else LOGI("[LL] 偏移 0x87c46a4 不在可执行区域");
+    void* paf = (void*)(g_il2cppTrueBase + g_ll_load_offset_af);
+    if (IsValidExecutableAddr(paf)) {
+        if (SafeDobbyHook(paf, (void*)HK_LoadLittleLegend_af, (void**)&g_orig_LoadLittleLegend_af) == 0) {
+            g_ll_hook_installed = true;
+            LOGI("[LL] Hooked 0xaf4fe0c @ %p", paf);
+            AddActionLog((const char*)u8"-> [小小英雄] 已挂载 0xaf4fe0c (备用)");
+        } else LOGI("[LL] DobbyHook failed @ 0xaf4fe0c");
+    } else LOGI("[LL] 偏移 0xaf4fe0c 不在可执行区域");
 }
 
 static void CacheValidClasses() {
@@ -6917,6 +6946,11 @@ void DrawMainMenu() {
                         g_ll_auto_enabled = !g_ll_auto_enabled;
                         if (g_ll_auto_enabled && !g_ll_hook_installed) InstallLLHook();
                     }
+                    ImGui::Text((const char*)u8"替换入口:");
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton((const char*)u8"0x87c46a4 标准", g_ll_use_87)) g_ll_use_87 = true;
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton((const char*)u8"0xaf4fe0c 备用", !g_ll_use_87)) g_ll_use_87 = false;
                     ImGui::TextColored(g_ll_auto_enabled ? ImVec4(0.2f,1.0f,0.4f,1.0f) : ImVec4(1.0f,0.5f,0.5f,1.0f),
                         (const char*)u8"小英雄状态: %s", g_ll_auto_enabled ? u8"已启用" : u8"已关闭");
                     // 自动捕获: 游戏实际加载过的小小英雄
