@@ -327,6 +327,11 @@ std::atomic<uint64_t> g_count_buy_hero_new{0};
 std::atomic<uint64_t> g_count_func_get_Instance{0};
 std::atomic<uint64_t> g_count_func_quit{0};
 std::atomic<uint64_t> g_count_func_get_hex{0};
+// 补充计数: 换肤 / 渲染 / 触摸 Hook (此前无计数器, 现集中纳入调用次数监视)
+std::atomic<uint64_t> g_count_skin_loadmap{0}; // 棋盘加载 Hook (0x8beba60) —— 游戏自身调用
+std::atomic<uint64_t> g_count_ll_load{0};      // 小小英雄加载 Hook (0xaf4fe0c) —— 游戏自身调用
+std::atomic<uint64_t> g_count_egl_swap{0};     // eglSwapBuffers (每帧渲染) —— 游戏引擎自身调用
+std::atomic<uint64_t> g_count_touch{0};        // nativeInjectEvent (触摸分发) —— 游戏自身调用
 
 uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x3, uintptr_t x4, uintptr_t x5, uintptr_t x6, uintptr_t x7) { g_count_shop_listen++;
     if (g_is_in_match.load(std::memory_order_relaxed) && !g_shop_listen_done.load() && x0 != 0) {
@@ -3035,6 +3040,7 @@ typedef void* (*LoadMapImpl_fn)(void* self, void* bundlePath, void* assetName, v
 static LoadMapImpl_fn g_orig_LoadMapImpl = nullptr;
 
 static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void* releaseList, int isBackground, int isMineMap) {
+    g_count_skin_loadmap++; // 游戏加载棋盘时进入 (游戏自身调用)
     // 自动捕获: 记录游戏实际加载的棋盘 x1/x2 (无论是否启用替换)
     if (bundlePath && assetName) {
         std::string s1 = ReadIl2CppString((uintptr_t)bundlePath);
@@ -3118,6 +3124,7 @@ static bool LLRecordCaptured(const std::string& p1, const std::string& p2) {
 
 // 0xaf4fe0c (x0=模型路径, x1=展示模型名) —— 小小英雄换肤方法, 替换 x0/x1
 static void* HK_LoadLittleLegend(void* x0, void* x1, void* x2, void* x3, void* x4, void* x5) {
+    g_count_ll_load++; // 游戏加载小小英雄时进入 (游戏自身调用)
     if (x0 && x1) {
         std::string p1 = ReadIl2CppString((uintptr_t)x0);
         std::string p2 = ReadIl2CppString((uintptr_t)x1);
@@ -6671,6 +6678,22 @@ void DrawMainMenu() {
                     PrintCol("4. 触摸分发 (nativeInjectEvent): %s", old_nativeInjectEvent != nullptr, old_nativeInjectEvent ? "已挂载 [OK]" : "未挂载 [x]");
 
                     DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【函数调用次数计数监视】(集中统计, 按调用来源分组)");
+                    ImGui::TextColored(ImVec4(0.5f, 0.85f, 1.0f, 1.0f), (const char*)u8"■ 游戏自身调用 (Hook 拦截计数):");
+                    PrintCol("func_shop_listen  商店刷新监听: %llu 次", true, (unsigned long long)g_count_shop_listen.load());
+                    PrintCol("func_set_IsGameEnd 对局状态: %llu 次", true, (unsigned long long)g_count_set_IsGameEnd.load());
+                    PrintCol("SendWillRenderCanvases UI主循环: %llu 次", true, (unsigned long long)g_count_SendWillRenderCanvases.load());
+                    PrintCol("LoadMapImpl 棋盘加载: %llu 次", true, (unsigned long long)g_count_skin_loadmap.load());
+                    PrintCol("LoadLittleLegend 小小英雄加载: %llu 次", true, (unsigned long long)g_count_ll_load.load());
+                    PrintCol("eglSwapBuffers 渲染帧: %llu 次", true, (unsigned long long)g_count_egl_swap.load());
+                    PrintCol("nativeInjectEvent 触摸事件: %llu 次", true, (unsigned long long)g_count_touch.load());
+                    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), (const char*)u8"■ 辅助主动调用 (辅助直接 call):");
+                    PrintCol("func_get_Instance 获取单例: %llu 次", true, (unsigned long long)g_count_func_get_Instance.load());
+                    PrintCol("func_get_hex 海克斯品质: %llu 次", true, (unsigned long long)g_count_func_get_hex.load());
+                    PrintCol("func_buy_hero_new 自动购买: %llu 次", true, (unsigned long long)g_count_buy_hero_new.load());
+                    PrintCol("func_quit 极速退游: %llu 次", true, (unsigned long long)g_count_func_quit.load());
+
+                    DrawGlassSeparator();
                     ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库字典链】");
                     PrintCol("addr4=0x%lx | addr7=0x%lx (大小: %zu)", IsValidPtr(g_dbg_addr4) && IsValidPtr(g_dbg_addr7), g_dbg_addr4, g_dbg_addr7, g_dbg_list7_addrs.size());
                     ImGui::Indent();
@@ -7020,6 +7043,7 @@ jobject g_context = nullptr;
 void (*old_nativeInjectEvent)(JNIEnv*, jobject, jobject) = nullptr;
 
 extern "C" void hook_nativeInjectEvent(JNIEnv* env, jobject obj, jobject event) {
+    g_count_touch++; // 游戏分发触摸事件 (游戏自身调用)
     if (!g_jvm) env->GetJavaVM(&g_jvm);
     if (obj) {
         if (!g_view_obj || !env->IsSameObject(g_view_obj, obj)) {
@@ -7367,6 +7391,7 @@ void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
 }
 
 unsigned int hook_eglSwap(EGLDisplay display, EGLSurface surface) {
+    g_count_egl_swap++; // 游戏引擎每帧交换缓冲 (游戏自身调用)
     static bool in_render = false;
     if (!in_render) {
         in_render = true;
