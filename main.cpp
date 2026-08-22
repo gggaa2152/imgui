@@ -154,7 +154,9 @@ std::vector<uintptr_t> g_dbg_player_addrs;
 
 int g_my_player_id = -1;
 int g_hex_qualities[3] = {0, 0, 0};
-std::atomic<bool> g_hex_confirmed{false}; // 海克斯品质 3 轮一致才为 true, 否则显示"无法确认"
+int g_hex_round_results[3][3] = {{0,0,0},{0,0,0},{0,0,0}}; // 3 次读取各自的 (q0,q1,q2) 结果
+int g_hex_round_count = 0;                                 // 已读取的有效次数 (0~3)
+std::atomic<bool> g_hex_confirmed{false}; // 海克斯品质 3 次读取完成才为 true, 否则显示读取进度
 std::vector<int> g_next_opponents;
 
 struct PoolHero { int heroId; int remaining; int total; int cost; uintptr_t addr10; };
@@ -327,6 +329,8 @@ std::atomic<uint64_t> g_count_buy_hero_new{0};
 std::atomic<uint64_t> g_count_func_get_Instance{0};
 std::atomic<uint64_t> g_count_func_quit{0};
 std::atomic<uint64_t> g_count_func_get_hex{0};
+std::atomic<uint64_t> g_count_load_map{0};   // 棋盘加载 hook (系统调用)
+std::atomic<uint64_t> g_count_load_ll{0};    // 小英雄加载 hook (系统调用)
 
 uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x3, uintptr_t x4, uintptr_t x5, uintptr_t x6, uintptr_t x7) { g_count_shop_listen++;
     if (g_is_in_match.load(std::memory_order_relaxed) && !g_shop_listen_done.load() && x0 != 0) {
@@ -893,6 +897,10 @@ void ClearGameState() {
     g_next_opponents.clear();
     g_my_player_id = -1;
     g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
+    g_hex_round_count = 0;
+    g_hex_round_results[0][0]=g_hex_round_results[0][1]=g_hex_round_results[0][2]=0;
+    g_hex_round_results[1][0]=g_hex_round_results[1][1]=g_hex_round_results[1][2]=0;
+    g_hex_round_results[2][0]=g_hex_round_results[2][1]=g_hex_round_results[2][2]=0;
     g_hex_confirmed.store(false);
 
     g_dbg_list7_addrs.clear();
@@ -1272,54 +1280,38 @@ void ParseGameMemory() {
             g_dbg_hexctrl = SAFE_READ_PTR(g_dbg_addr26, g_off.hexctrl);
         
         if (g_dbg_hexctrl != 0 && g_off.func_get_hex != 0) {
-            // 3 轮确认: 每 120 帧(~2秒)读一轮 (q0,q1,q2), 连续 3 轮完全相同才更新显示并置 g_hex_confirmed;
-            // 不一致则保持"无法确认"。海克斯每回合刷新, 新值连续 3 轮稳定后自动跟进。
+            // 用户要求: 连续调用 get_hex 3 次后停止, 3 次的结果全部保留并输出。
+            // 品质映射: 1=银色 2=金色 3=彩色 (显示 qn[] = 无/银/金/彩)。
+            // 每帧读一轮实现"连续"; 读到有效值(任一>0)计入一次, 3 次后停止; hexctrl 变化重置。
             static uintptr_t last_hexctrl = 0;
-            static std::atomic<int> match_counter(0);
-            static std::atomic<int> prev_q0(0), prev_q1(0), prev_q2(0);
 
             if (last_hexctrl != g_dbg_hexctrl) {
                 last_hexctrl = g_dbg_hexctrl;
-                match_counter.store(0);
-                prev_q0.store(0); prev_q1.store(0); prev_q2.store(0);
+                g_hex_round_count = 0;
+                g_hex_round_results[0][0]=g_hex_round_results[0][1]=g_hex_round_results[0][2]=0;
+                g_hex_round_results[1][0]=g_hex_round_results[1][1]=g_hex_round_results[1][2]=0;
+                g_hex_round_results[2][0]=g_hex_round_results[2][1]=g_hex_round_results[2][2]=0;
                 g_hex_confirmed.store(false);
+                g_hex_qualities[0] = 0; g_hex_qualities[1] = 0; g_hex_qualities[2] = 0;
             }
 
-            // 用户要求: 只读 3 轮确认后停止读取, 一整局保持显示不变(海克斯品质确认后固定)。
-            // 下一局/海克斯刷新(hexctrl 指针变化)时由上方 last_hexctrl 逻辑重置, 重新读 3 轮。
-            if (!g_hex_confirmed.load(std::memory_order_acquire)) {
-                static int frame_counter = 0;
-                frame_counter++;
-                if (frame_counter > 120) {
-                    frame_counter = 0;
-                    // ★ 直接同步调用, 不再每 4 秒 detach 新线程: 原实现每轮新建 std::thread +
-                    // il2cpp_thread_attach 且从不 detach, il2cpp 线程记录无限累积, 锁竞争加剧,
-                    // 表现为"玩着玩着帧率一直掉"。get_hex 是读 3 个 int 的原生函数, 微秒级,
-                    // SAFE_CALL 已兜底崩溃, 无需线程。
-                    typedef int (*func_get_hex_t)(uintptr_t, int);
-                    func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
-                    if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
-                        int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
-                        int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
-                        int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
-                        if (q0 > 0 || q1 > 0 || q2 > 0) {
-                            if (q0 == prev_q0.load() && q1 == prev_q1.load() && q2 == prev_q2.load()) {
-                                int mc = match_counter.load() + 1;
-                                match_counter.store(mc);
-                                if (mc >= 3) { // 连续 3 轮一致 -> 确认显示, 之后停止读取
-                                    g_hex_qualities[0] = q0;
-                                    g_hex_qualities[1] = q1;
-                                    g_hex_qualities[2] = q2;
-                                    g_hex_confirmed.store(true);
-                                }
-                            } else {
-                                prev_q0.store(q0); prev_q1.store(q1); prev_q2.store(q2);
-                                match_counter.store(1); // 本轮为第 1 次
-                                g_hex_confirmed.store(false);
-                            }
-                        } else {
-                            g_hex_confirmed.store(false); // 读到全 0(无效), 无法确认
-                        }
+            if (!g_hex_confirmed.load(std::memory_order_acquire) && g_hex_round_count < 3) {
+                // ★ 直接同步调用: 每帧连续读, 读满 3 次有效值即停, 无线程/无节流
+                typedef int (*func_get_hex_t)(uintptr_t, int);
+                func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
+                if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
+                    int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
+                    int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
+                    int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
+                    if (q0 > 0 || q1 > 0 || q2 > 0) { // 有任一有效值才计入, 避免全 0(未加载好)占用次数
+                        g_hex_round_results[g_hex_round_count][0] = q0;
+                        g_hex_round_results[g_hex_round_count][1] = q1;
+                        g_hex_round_results[g_hex_round_count][2] = q2;
+                        g_hex_qualities[0] = q0;
+                        g_hex_qualities[1] = q1;
+                        g_hex_qualities[2] = q2;
+                        g_hex_round_count++;
+                        if (g_hex_round_count >= 3) g_hex_confirmed.store(true); // 3 次后停止调用
                     }
                 }
             }
@@ -2877,18 +2869,26 @@ void DrawHextechCapsule() {
     if (!g_is_in_match.load(std::memory_order_relaxed)) return;
     if (!BeginContentFloatWindow("##HextechFloat", &g_win_hextech, &g_float_hex_x, &g_float_hex_y, g_alpha_hex)) return;
     ImGui::SetWindowFontScale(g_autoScale * g_hextech_scale);
-    std::string txt = (const char*)u8"海克斯预测: ";
+    const char* qn[] = { (const char*)u8"无", (const char*)u8"银", (const char*)u8"金", (const char*)u8"彩" };
     if (g_hex_confirmed.load()) {
-        const char* qn[] = { (const char*)u8"无", (const char*)u8"银", (const char*)u8"金", (const char*)u8"彩" };
-        for (int i = 0; i < 3; i++) {
-            int q = g_hex_qualities[i];
-            txt += (q >= 0 && q <= 3) ? qn[q] : "?";
-            if (i < 2) txt += " | ";
+        // 3 次读取的结果全部输出 (1=银色 2=金色 3=彩色)
+        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", (const char*)u8"海克斯预测 (3 次读取):");
+        for (int r = 0; r < 3; r++) {
+            std::string line = (const char*)u8"  第";
+            line += std::to_string(r + 1);
+            line += (const char*)u8"次: ";
+            for (int i = 0; i < 3; i++) {
+                int q = g_hex_round_results[r][i];
+                line += (q >= 0 && q <= 3) ? qn[q] : "?";
+                if (i < 2) line += " | ";
+            }
+            ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", line.c_str());
         }
     } else {
-        txt += (const char*)u8"无法确认";
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s (%d/3)", (const char*)u8"海克斯预测: 读取中", g_hex_round_count);
+        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", buf);
     }
-    ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", txt.c_str());
     EndContentFloatWindow("hex_grip", &g_hextech_scale);
 }
 
@@ -3035,6 +3035,7 @@ typedef void* (*LoadMapImpl_fn)(void* self, void* bundlePath, void* assetName, v
 static LoadMapImpl_fn g_orig_LoadMapImpl = nullptr;
 
 static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void* releaseList, int isBackground, int isMineMap) {
+    g_count_load_map++; // 调用次数统计 (系统主动调用)
     // 自动捕获: 记录游戏实际加载的棋盘 x1/x2 (无论是否启用替换)
     if (bundlePath && assetName) {
         std::string s1 = ReadIl2CppString((uintptr_t)bundlePath);
@@ -3118,6 +3119,7 @@ static bool LLRecordCaptured(const std::string& p1, const std::string& p2) {
 
 // 0xaf4fe0c (x0=模型路径, x1=展示模型名) —— 小小英雄换肤方法, 替换 x0/x1
 static void* HK_LoadLittleLegend(void* x0, void* x1, void* x2, void* x3, void* x4, void* x5) {
+    g_count_load_ll++; // 调用次数统计 (系统主动调用)
     if (x0 && x1) {
         std::string p1 = ReadIl2CppString((uintptr_t)x0);
         std::string p2 = ReadIl2CppString((uintptr_t)x1);
@@ -6669,6 +6671,18 @@ void DrawMainMenu() {
                     PrintCol("2. 对局状态 (func_set_IsGameEnd): %s", orig_set_IsGameEnd != nullptr, orig_set_IsGameEnd ? "已挂载 [OK]" : "未挂载/偏移需校准 [x]");
                     PrintCol("3. 线程管道 (SendWillRenderCanvases): %s", orig_SendWillRenderCanvases != nullptr, orig_SendWillRenderCanvases ? "已挂载 [OK]" : "未挂载 [x]");
                     PrintCol("4. 触摸分发 (nativeInjectEvent): %s", old_nativeInjectEvent != nullptr, old_nativeInjectEvent ? "已挂载 [OK]" : "未挂载 [x]");
+
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"【调用次数统计 (系统主动调用 / 辅助主动调用)】");
+                    PrintCol("set_IsGameEnd (对局状态)      [系统主动调用] %llu 次", 1, (unsigned long long)g_count_set_IsGameEnd.load());
+                    PrintCol("SendWillRenderCanvases (渲染前) [系统主动调用] %llu 次", 1, (unsigned long long)g_count_SendWillRenderCanvases.load());
+                    PrintCol("shop_listen (商店刷新)        [系统主动调用] %llu 次", 1, (unsigned long long)g_count_shop_listen.load());
+                    PrintCol("LoadMapImpl (棋盘加载)        [系统主动调用] %llu 次", 1, (unsigned long long)g_count_load_map.load());
+                    PrintCol("LoadLittleLegend (小英雄加载)  [系统主动调用] %llu 次", 1, (unsigned long long)g_count_load_ll.load());
+                    PrintCol("get_Instance (获取实例)       [辅助主动调用] %llu 次", 1, (unsigned long long)g_count_func_get_Instance.load());
+                    PrintCol("get_hex (读取海克斯)          [辅助主动调用] %llu 次", 1, (unsigned long long)g_count_func_get_hex.load());
+                    PrintCol("buy_hero_new (购买英雄)       [辅助主动调用] %llu 次", 1, (unsigned long long)g_count_buy_hero_new.load());
+                    PrintCol("func_quit (退出游戏)          [辅助主动调用] %llu 次", 1, (unsigned long long)g_count_func_quit.load());
 
                     DrawGlassSeparator();
                     ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库字典链】");
