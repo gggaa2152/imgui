@@ -285,6 +285,9 @@ float g_quit_timer = 0.0f;
 float g_lock_x = 80.0f, g_lock_y = 460.0f;
 bool g_floats_locked = false;
 
+// 帧率跟随系统开关 (默认开: 关 VSync + targetFrameRate=设备刷新率, 如 120Hz)
+bool g_unlock_fps = true;
+
 // Card pool toggle capsule
 float g_cpbtn_x = 80.0f, g_cpbtn_y = 400.0f;
 
@@ -703,6 +706,7 @@ void SaveConfig() {
         out << "alpha_opp=" << g_alpha_opp << "\n";
         out << "alpha_hex=" << g_alpha_hex << "\n";
         out << "floats_locked=" << (g_floats_locked ? 1 : 0) << "\n";
+        out << "fps_unlock=" << (g_unlock_fps ? 1 : 0) << "\n";
         out << "cp_columns=" << g_cp_columns << "\n";
         out << "cp_rows=" << g_cp_rows << "\n";
         out << "cp_scale=" << g_cp_scale << "\n";
@@ -818,6 +822,7 @@ void LoadConfig() {
                 else if (key == "alpha_opp") g_alpha_opp = std::clamp(std::stof(valStr), 0.1f, 1.0f);
                 else if (key == "alpha_hex") g_alpha_hex = std::clamp(std::stof(valStr), 0.1f, 1.0f);
                 else if (key == "floats_locked") g_floats_locked = (std::stoi(valStr) != 0);
+                else if (key == "fps_unlock") g_unlock_fps = (std::stoi(valStr) != 0);
                 else if (key == "cp_columns") g_cp_columns = std::stoi(valStr);
                 else if (key == "cp_rows") g_cp_rows = std::stoi(valStr);
                 else if (key == "cp_scale") g_cp_scale = std::stof(valStr);
@@ -4697,6 +4702,19 @@ static void SaveSkinsToFile() {
         content += "[ll_captured]\n";
         for (const auto& s : g_ll_captured_skins) { content += s.x1; content += "|"; content += s.x2; content += "\n"; }
     }
+    content += "[selected]\n";
+    {
+        std::lock_guard<std::mutex> lk(g_capture_mutex);
+        if (g_skin_selected >= 0 && g_skin_selected < (int)g_skins.size()) {
+            content += "skin="; content += g_skins[g_skin_selected].x1; content += "|"; content += g_skins[g_skin_selected].x2; content += "\n";
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_ll_capture_mutex);
+        if (g_ll_selected >= 0 && g_ll_selected < (int)g_ll_skins.size()) {
+            content += "ll="; content += g_ll_skins[g_ll_selected].x1; content += "|"; content += g_ll_skins[g_ll_selected].x2; content += "\n";
+        }
+    }
     FILE* f = fopen(g_skins_file_path.c_str(), "w");
     if (f) { fwrite(content.c_str(), 1, content.size(), f); fclose(f); LOGI("[SKIN] 皮肤已保存 %zuB -> %s", content.size(), g_skins_file_path.c_str()); }
     else   { LOGI("[SKIN] 皮肤保存失败! 无法写入: %s", g_skins_file_path.c_str()); }
@@ -4708,17 +4726,33 @@ static void LoadSkinsFromFile() {
     FILE* f = fopen(g_skins_file_path.c_str(), "r");
     if (!f) return;
     std::vector<SkinEntry> newSkins, newCaptured, newLLSkins, newLLCaptured;
-    bool inSkins = false, inCaptured = false, inLLSkins = false, inLLCaptured = false;
+    std::string selSkin1, selSkin2, selLL1, selLL2; // 上次选中的 x1|x2 (按值恢复, 比索引稳)
+    bool inSkins = false, inCaptured = false, inLLSkins = false, inLLCaptured = false, inSelected = false;
     char line[600];
     while (fgets(line, sizeof(line), f)) {
         std::string s(line);
         while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-        if (s == "[skins]") { inSkins = true; inCaptured = false; inLLSkins = false; inLLCaptured = false; continue; }
-        if (s == "[captured]") { inSkins = false; inCaptured = true; inLLSkins = false; inLLCaptured = false; continue; }
-        if (s == "[ll_skins]") { inSkins = false; inCaptured = false; inLLSkins = true; inLLCaptured = false; continue; }
-        if (s == "[ll_captured]") { inSkins = false; inCaptured = false; inLLSkins = false; inLLCaptured = true; continue; }
+        if (s == "[skins]") { inSkins = true; inCaptured = false; inLLSkins = false; inLLCaptured = false; inSelected = false; continue; }
+        if (s == "[captured]") { inSkins = false; inCaptured = true; inLLSkins = false; inLLCaptured = false; inSelected = false; continue; }
+        if (s == "[ll_skins]") { inSkins = false; inCaptured = false; inLLSkins = true; inLLCaptured = false; inSelected = false; continue; }
+        if (s == "[ll_captured]") { inSkins = false; inCaptured = false; inLLSkins = false; inLLCaptured = true; inSelected = false; continue; }
+        if (s == "[selected]") { inSkins = false; inCaptured = false; inLLSkins = false; inLLCaptured = false; inSelected = true; continue; }
         size_t sep = s.find('|');
         if (sep == std::string::npos) continue;
+        if (inSelected) {
+            // 行格式: skin=<x1>|<x2> 或 ll=<x1>|<x2>  (先用 '=' 切 key, 再用 '|' 切 x1/x2)
+            size_t eq = s.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = s.substr(0, eq);
+            std::string rest = s.substr(eq + 1);
+            size_t p2 = rest.find('|');
+            if (p2 == std::string::npos) continue;
+            std::string v1 = rest.substr(0, p2);
+            std::string v2 = rest.substr(p2 + 1);
+            if (key == "skin") { selSkin1 = v1; selSkin2 = v2; }
+            else if (key == "ll") { selLL1 = v1; selLL2 = v2; }
+            continue;
+        }
         SkinEntry en{}; 
         strncpy(en.x1, s.substr(0, sep).c_str(), sizeof(en.x1) - 1);
         strncpy(en.x2, s.substr(sep + 1).c_str(), sizeof(en.x2) - 1);
@@ -4734,12 +4768,28 @@ static void LoadSkinsFromFile() {
         std::lock_guard<std::mutex> lk(g_capture_mutex);
         if (!newSkins.empty()) g_skins = newSkins;
         if (!newCaptured.empty()) g_captured_skins = newCaptured;
+        g_skin_selected = 0;
+        if (!selSkin1.empty()) {
+            for (size_t i = 0; i < g_skins.size(); i++) {
+                if (strcmp(g_skins[i].x1, selSkin1.c_str()) == 0 && strcmp(g_skins[i].x2, selSkin2.c_str()) == 0) {
+                    g_skin_selected = (int)i; break;
+                }
+            }
+        }
         if (g_skin_selected >= (int)g_skins.size()) g_skin_selected = 0;
     }
     {
         std::lock_guard<std::mutex> lk(g_ll_capture_mutex);
         if (!newLLSkins.empty()) g_ll_skins = newLLSkins;
         if (!newLLCaptured.empty()) g_ll_captured_skins = newLLCaptured;
+        g_ll_selected = 0;
+        if (!selLL1.empty()) {
+            for (size_t i = 0; i < g_ll_skins.size(); i++) {
+                if (strcmp(g_ll_skins[i].x1, selLL1.c_str()) == 0 && strcmp(g_ll_skins[i].x2, selLL2.c_str()) == 0) {
+                    g_ll_selected = (int)i; break;
+                }
+            }
+        }
         if (g_ll_selected >= (int)g_ll_skins.size()) g_ll_selected = 0;
     }
 }
@@ -6519,6 +6569,7 @@ void DrawMainMenu() {
                 ModernToggle((const char*)u8"海克斯预测悬浮", &g_win_hextech, 3);
                 ModernToggle((const char*)u8"余量预警悬浮窗", &g_win_hero_warn, 10);
                 ModernToggle((const char*)u8"锁定全部浮窗", &g_floats_locked, 9);
+                ModernToggle((const char*)u8"帧率跟随系统", &g_unlock_fps, 11);
                 DrawGlassSeparator();
                 if (ImGui::TreeNode((const char*)u8"悬浮透明度")) {
                     float pct_cp = g_alpha_cp * 100.0f, pct_pd = g_alpha_pd * 100.0f;
@@ -7270,14 +7321,170 @@ void* hook_SendWillRenderCanvases() { g_count_SendWillRenderCanvases++;
 }
 
 // ==========================================
-// (已移除) 满血高刷帧率解锁引擎: 强制 144FPS + 关 VSync 导致 CPU/GPU 满载, 平板发烫,
-// 用户决定直接删除, 游戏保持默认 60Hz 垂直同步。
+// 跟随系统刷新率解锁引擎 (2026-08-22 重写):
+// 用户要求"不要垂直同步, 系统多少就多少, 设备设置 120"。
+// 与已删除的 ForceUnlock144FPS 区别: 不强制 144(超设备上限导致满载发烫),
+// 而是通过 JNI 读取设备真实刷新率 (如 120Hz) -> 关 VSync + targetFrameRate=刷新率,
+// 帧率与设备一致, 不超跑。
 // ==========================================
+
+// 查找指定命名空间+类名的 il2cpp 类 (遍历全部程序集镜像)
+// 注意: IL2CPP 元数据字符串堆可能带前导垃圾 ('?'), 用 StripLeadingGarbage 清洗后比较
+static void* FindIl2CppClassByName(const char* ns, const char* name) {
+    if (!g_il2cpp_api.init()) return nullptr;
+    void* domain = g_il2cpp_api.domain_get();
+    if (!domain) return nullptr;
+    size_t asm_count = 0;
+    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
+    if (!assemblies) return nullptr;
+    for (size_t a = 0; a < asm_count; a++) {
+        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
+        for (size_t c = 0; c < cls_count; c++) {
+            void* klass = g_il2cpp_api.image_get_class(img, c);
+            if (!klass) continue;
+            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass) : nullptr;
+            if (!cn) continue;
+            std::string cnClean = StripLeadingGarbage(SafeReadCString(cn)); // 元数据字符串可能奇偶错位, 用 SafeReadCString 兜底
+            if (cnClean != name) continue;
+            if (ns) {
+                const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : nullptr;
+                std::string nsClean = cns ? StripLeadingGarbage(SafeReadCString(cns)) : "";
+                if (nsClean != ns) continue;
+            }
+            return klass;
+        }
+    }
+    return nullptr;
+}
+
+// 反射设置 Unity 静态 int 属性 (如 Application.set_targetFrameRate / QualitySettings.set_vSyncCount)
+// 按 setter 名缓存函数指针, 每个属性只查找一次
+static bool SetUnityStaticIntProperty(const char* ns, const char* clsName, const char* setterName, int value) {
+    static std::unordered_map<std::string, void*> s_setters;
+    auto it = s_setters.find(setterName);
+    if (it != s_setters.end()) {
+        void* cached = it->second;
+        if (!cached) return false;
+        ((void(*)(int))cached)(value);
+        return true;
+    }
+    // 未缓存: 若 il2cpp 未就绪则不缓存, 返回 false 让调用方下帧重试
+    if (!g_il2cpp_api.init()) return false;
+    void* klass = FindIl2CppClassByName(ns, clsName);
+    void* setter = nullptr;
+    if (klass) {
+        void* iter = nullptr;
+        while (void* method = g_il2cpp_api.class_get_methods(klass, &iter)) {
+            const char* mname = g_il2cpp_api.method_get_name ? g_il2cpp_api.method_get_name(method) : nullptr;
+            if (!mname) continue;
+            std::string mClean = StripLeadingGarbage(SafeReadCString(mname));
+            if (mClean == setterName) {
+                setter = g_il2cpp_api.method_get_function_pointer ? g_il2cpp_api.method_get_function_pointer(method) : nullptr;
+                break;
+            }
+        }
+    }
+    s_setters[setterName] = setter; // 查找完成后缓存结果 (nullptr 也表示该属性不存在, 不再重试)
+    if (!setter) return false;
+    ((void(*)(int))setter)(value);
+    return true;
+}
+
+// 通过 JNI 读取 Android 系统显示刷新率 (Hz), 失败返回 0
+static int GetSystemRefreshRateHz() {
+    JNIEnv* e = nullptr;
+    if (!g_jvm) return 0;
+    jint st = g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) {
+        if (g_jvm->AttachCurrentThread(&e, nullptr) != JNI_OK || !e) return 0;
+    } else if (st != JNI_OK || !e) {
+        return 0;
+    }
+    if (!g_context) return 0;
+    jclass ctxCls = e->FindClass("android/content/Context");
+    if (!ctxCls) { e->ExceptionClear(); return 0; }
+    jmethodID getSys = e->GetMethodID(ctxCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    if (!getSys) { e->ExceptionClear(); return 0; }
+    jstring wmName = e->NewStringUTF("window");
+    jobject wm = e->CallObjectMethod(g_context, getSys, wmName);
+    e->DeleteLocalRef(wmName);
+    if (!wm) { e->ExceptionClear(); return 0; }
+    jclass wmCls = e->FindClass("android/view/WindowManager");
+    if (!wmCls) { e->ExceptionClear(); return 0; }
+    jmethodID getDisp = e->GetMethodID(wmCls, "getDefaultDisplay", "()Landroid/view/Display;");
+    if (!getDisp) { e->ExceptionClear(); return 0; }
+    jobject disp = e->CallObjectMethod(wm, getDisp);
+    if (!disp) { e->ExceptionClear(); return 0; }
+    jclass dispCls = e->GetObjectClass(disp);
+    int result = 0;
+    jmethodID getMode = e->GetMethodID(dispCls, "getMode", "()Landroid/view/Display$Mode;"); // API 23+
+    if (getMode) {
+        jobject mode = e->CallObjectMethod(disp, getMode);
+        if (mode) {
+            jclass modeCls = e->GetObjectClass(mode);
+            jmethodID getRR = e->GetMethodID(modeCls, "getRefreshRate", "()F");
+            if (getRR) result = (int)(e->CallFloatMethod(mode, getRR) + 0.5f);
+            e->ExceptionClear();
+            e->DeleteLocalRef(mode);
+        }
+    } else {
+        e->ExceptionClear(); // API<23 无 getMode
+    }
+    if (result <= 0) {
+        jmethodID getRR = e->GetMethodID(dispCls, "getRefreshRate", "()F");
+        if (getRR) result = (int)(e->CallFloatMethod(disp, getRR) + 0.5f);
+        e->ExceptionClear();
+    }
+    e->DeleteLocalRef(disp);
+    return result;
+}
 
 void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     g_current_frame++;
     if (g_active_renderer.load() == 0) g_active_renderer.store(1);
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
+
+    // ★ 帧率跟随系统开关 (默认开, 菜单可切换):
+    //   开 = 读设备刷新率 -> targetFrameRate=刷新率 + 关 VSync (跟随系统, 如 120Hz)
+    //   关 = 恢复 targetFrameRate=-1(默认) + vSyncCount=1 + 恢复 VSync (默认 60Hz)
+    //   安全关键: 只有 set_targetFrameRate 设置成功才关 VSync, 否则帧率无限跑满发烫。
+    static int s_fps_hz = -1;          // -1=未成功继续重试, 0=已放弃, >0=已成功设置
+    static int s_fps_retry = 0;        // 重试计数 (g_context 或 il2cpp 可能尚未就绪)
+    static bool s_fps_prev_on = true;  // 上一次开关状态, 用于检测切换
+    if (g_unlock_fps) {
+        if (!s_fps_prev_on) {          // 从关切到开: 重置状态重新解锁
+            s_fps_hz = -1;
+            s_fps_retry = 0;
+            LOGI("[FPS] 帧率跟随系统已开启");
+        }
+        if (s_fps_hz == -1) {
+            int hz = GetSystemRefreshRateHz();
+            if (hz >= 30 && hz <= 240) {
+                bool ok = SetUnityStaticIntProperty("UnityEngine", "Application", "set_targetFrameRate", hz);
+                SetUnityStaticIntProperty("UnityEngine", "QualitySettings", "set_vSyncCount", 0); // 尽力而为
+                if (ok) {
+                    s_fps_hz = hz;
+                    LOGI("[FPS] 系统刷新率 %dHz, 已设置 targetFrameRate, 关闭 VSync", hz);
+                }
+            }
+            if (s_fps_retry++ > 600) {      // 重试约10秒仍失败(g_context/il2cpp 未就绪或反射失败), 放弃
+                s_fps_hz = 0;
+                LOGI("[FPS] 刷新率解锁失败, 保持游戏默认帧率");
+            }
+        }
+        if (s_fps_hz > 0) eglSwapInterval(display, surface, 0); // 仅解锁成功后才每帧关 VSync
+    } else {
+        if (s_fps_prev_on) {               // 从开切到关: 恢复默认设置
+            SetUnityStaticIntProperty("UnityEngine", "Application", "set_targetFrameRate", -1);
+            SetUnityStaticIntProperty("UnityEngine", "QualitySettings", "set_vSyncCount", 1);
+            LOGI("[FPS] 帧率跟随系统已关闭, 恢复默认垂直同步");
+        }
+        eglSwapInterval(display, surface, 1); // 每帧恢复垂直同步
+        s_fps_hz = -1;                       // 下次开启时重新尝试
+    }
+    s_fps_prev_on = g_unlock_fps;
 
     eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
