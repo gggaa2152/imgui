@@ -484,9 +484,8 @@ bool SafeReadMemory(uintptr_t addr, void* buffer, size_t size) {
     if (addr < 0x10000000 || addr > 0x00007FFFFFFFFFFF) return false;
     if (size == 0 || !buffer) return false;
     if (addr + size > 0x00007FFFFFFFFFFF) return false;
-    bool ok = false;
-    SAFE_CALL({ memcpy(buffer, (const void*)addr, size); ok = true; }, (void)0);
-    return ok;
+    // 逗号表达式: 成功返回 (memcpy, true) -> bool; 崩溃 fallback false -> bool, 类型一致
+    return SAFE_CALL((memcpy(buffer, (const void*)addr, size), true), false);
 }
 
 uintptr_t SafeReadPtr(uintptr_t addr, uint32_t offset) {
