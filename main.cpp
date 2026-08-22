@@ -154,9 +154,7 @@ std::vector<uintptr_t> g_dbg_player_addrs;
 
 int g_my_player_id = -1;
 int g_hex_qualities[3] = {0, 0, 0};
-int g_hex_round_results[3][3] = {{0,0,0},{0,0,0},{0,0,0}}; // 3 次读取各自的 (q0,q1,q2) 结果
-int g_hex_round_count = 0;                                 // 已读取的有效次数 (0~3)
-std::atomic<bool> g_hex_confirmed{false}; // 海克斯品质 3 次读取完成才为 true, 否则显示读取进度
+std::atomic<bool> g_hex_confirmed{false}; // 海克斯品质读满一轮(3 个候选)后为 true, 停止调用
 std::vector<int> g_next_opponents;
 
 struct PoolHero { int heroId; int remaining; int total; int cost; uintptr_t addr10; };
@@ -897,10 +895,6 @@ void ClearGameState() {
     g_next_opponents.clear();
     g_my_player_id = -1;
     g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
-    g_hex_round_count = 0;
-    g_hex_round_results[0][0]=g_hex_round_results[0][1]=g_hex_round_results[0][2]=0;
-    g_hex_round_results[1][0]=g_hex_round_results[1][1]=g_hex_round_results[1][2]=0;
-    g_hex_round_results[2][0]=g_hex_round_results[2][1]=g_hex_round_results[2][2]=0;
     g_hex_confirmed.store(false);
 
     g_dbg_list7_addrs.clear();
@@ -1280,38 +1274,30 @@ void ParseGameMemory() {
             g_dbg_hexctrl = SAFE_READ_PTR(g_dbg_addr26, g_off.hexctrl);
         
         if (g_dbg_hexctrl != 0 && g_off.func_get_hex != 0) {
-            // 用户要求: 连续调用 get_hex 3 次后停止, 3 次的结果全部保留并输出。
+            // 用户要求: 读一轮(get_hex 调 0/1/2 共 3 次)直接输出 3 个候选品质, 之后不再调用。
             // 品质映射: 1=银色 2=金色 3=彩色 (显示 qn[] = 无/银/金/彩)。
-            // 每帧读一轮实现"连续"; 读到有效值(任一>0)计入一次, 3 次后停止; hexctrl 变化重置。
+            // 全 0(未加载好)时下一帧重试, 直到读出有效值; hexctrl 变化(下一局)重新读。
             static uintptr_t last_hexctrl = 0;
 
             if (last_hexctrl != g_dbg_hexctrl) {
                 last_hexctrl = g_dbg_hexctrl;
-                g_hex_round_count = 0;
-                g_hex_round_results[0][0]=g_hex_round_results[0][1]=g_hex_round_results[0][2]=0;
-                g_hex_round_results[1][0]=g_hex_round_results[1][1]=g_hex_round_results[1][2]=0;
-                g_hex_round_results[2][0]=g_hex_round_results[2][1]=g_hex_round_results[2][2]=0;
                 g_hex_confirmed.store(false);
                 g_hex_qualities[0] = 0; g_hex_qualities[1] = 0; g_hex_qualities[2] = 0;
             }
 
-            if (!g_hex_confirmed.load(std::memory_order_acquire) && g_hex_round_count < 3) {
-                // ★ 直接同步调用: 每帧连续读, 读满 3 次有效值即停, 无线程/无节流
+            if (!g_hex_confirmed.load(std::memory_order_acquire)) {
+                // ★ 直接同步调用: 一轮读 3 个候选, 有有效值即停, 无线程/无节流
                 typedef int (*func_get_hex_t)(uintptr_t, int);
                 func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
                 if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
                     int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
                     int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
                     int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
-                    if (q0 > 0 || q1 > 0 || q2 > 0) { // 有任一有效值才计入, 避免全 0(未加载好)占用次数
-                        g_hex_round_results[g_hex_round_count][0] = q0;
-                        g_hex_round_results[g_hex_round_count][1] = q1;
-                        g_hex_round_results[g_hex_round_count][2] = q2;
+                    if (q0 > 0 || q1 > 0 || q2 > 0) { // 有任一有效值即输出并停止, 避免全 0(未加载好)
                         g_hex_qualities[0] = q0;
                         g_hex_qualities[1] = q1;
                         g_hex_qualities[2] = q2;
-                        g_hex_round_count++;
-                        if (g_hex_round_count >= 3) g_hex_confirmed.store(true); // 3 次后停止调用
+                        g_hex_confirmed.store(true); // 一轮即停, 之后不再调用 get_hex
                     }
                 }
             }
@@ -2864,31 +2850,80 @@ void DrawMyHeroWarningWindow() {
     EndContentFloatWindow("hw_grip", &g_hero_warn_scale);
 }
 
+static bool g_hex_collapsed = false; // 海克斯预测悬浮窗收起状态 (锁定时也可通过三角收起/展开)
+
+// 展开态窗口内的"收起"三角手柄: ForegroundDrawList 绘制 + 手动命中检测,
+// 不受锁定态 NoMouseInputs 影响, 锁定时也可点击收起
+static void DrawHextechCollapseButton() {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    if (!win) return;
+    ImRect wr = win->Rect();
+    float sc = g_autoScale;
+    float s = 11.0f * sc;
+    ImVec2 c(wr.Max.x - s - 6.0f * sc, wr.Min.y + s + 6.0f * sc);
+    float hit_r = s * 2.6f;
+    if (ImGui::IsMouseClicked(0) && ImLengthSqr(io.MousePos - c) <= hit_r * hit_r) {
+        g_hex_collapsed = true;
+    }
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    dl->AddCircleFilled(c, s * 0.95f, IM_COL32(0, 0, 0, 110), 20);
+    ImVec2 p1(c.x - s * 0.55f, c.y - s * 0.32f);
+    ImVec2 p2(c.x + s * 0.55f, c.y - s * 0.32f);
+    ImVec2 p3(c.x, c.y + s * 0.42f);
+    dl->AddTriangleFilled(p1, p2, p3, IM_COL32(255, 255, 255, 220));
+}
+
+// 收起态小胶囊: 显示"海克斯 ▸", 点击展开 (手动命中检测, 锁定时也可点)
+static void DrawHextechCollapsedCapsule() {
+    ImGuiIO& io = ImGui::GetIO();
+    float sc = g_autoScale;
+    const char* txt = (const char*)u8"海克斯 ▸";
+    ImFont* font = ImGui::GetFont();
+    if (!font) return;
+    float font_h = font->FontSize * 0.9f;
+    ImVec2 tsz = font->CalcTextSizeA(font_h, FLT_MAX, 0.0f, txt);
+    float pad = 8.0f * sc;
+    float w = tsz.x + pad * 2.0f;
+    float h = tsz.y + pad * 1.6f;
+    ImVec2 pos(g_float_hex_x, g_float_hex_y);
+    if (pos.x < 0.0f) pos.x = 120.0f * sc;
+    if (pos.y < 0.0f) pos.y = 200.0f * sc;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(pos, pos + ImVec2(w, h), IM_COL32(12, 18, 32, 200), 8.0f * sc);
+    dl->AddRect(pos, pos + ImVec2(w, h), IM_COL32(120, 180, 255, 160), 8.0f * sc, 0, 1.2f * sc);
+    dl->AddText(font, font_h, pos + ImVec2(pad, pad * 0.7f), IM_COL32(180, 220, 255, 255), txt);
+    if (ImGui::IsMouseClicked(0)) {
+        ImVec2 m = io.MousePos;
+        if (m.x >= pos.x && m.x <= pos.x + w && m.y >= pos.y && m.y <= pos.y + h)
+            g_hex_collapsed = false;
+    }
+}
+
 void DrawHextechCapsule() {
     if (!g_win_hextech) return;
     if (!g_is_in_match.load(std::memory_order_relaxed)) return;
+    // 收起态: 只画小胶囊, 点击展开
+    if (g_hex_collapsed) { DrawHextechCollapsedCapsule(); return; }
     if (!BeginContentFloatWindow("##HextechFloat", &g_win_hextech, &g_float_hex_x, &g_float_hex_y, g_alpha_hex)) return;
     ImGui::SetWindowFontScale(g_autoScale * g_hextech_scale);
     const char* qn[] = { (const char*)u8"无", (const char*)u8"银", (const char*)u8"金", (const char*)u8"彩" };
     if (g_hex_confirmed.load()) {
-        // 3 次读取的结果全部输出 (1=银色 2=金色 3=彩色)
-        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", (const char*)u8"海克斯预测 (3 次读取):");
-        for (int r = 0; r < 3; r++) {
-            std::string line = (const char*)u8"  第";
-            line += std::to_string(r + 1);
-            line += (const char*)u8"次: ";
-            for (int i = 0; i < 3; i++) {
-                int q = g_hex_round_results[r][i];
-                line += (q >= 0 && q <= 3) ? qn[q] : "?";
-                if (i < 2) line += " | ";
-            }
-            ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", line.c_str());
+        // 一次读取的 3 个候选品质全部输出 (1=银色 2=金色 3=彩色)
+        std::string txt = (const char*)u8"海克斯预测: ";
+        for (int i = 0; i < 3; i++) {
+            int q = g_hex_qualities[i];
+            txt += (q >= 0 && q <= 3) ? qn[q] : "?";
+            if (i < 2) txt += " | ";
         }
+        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", txt.c_str());
     } else {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%s (%d/3)", (const char*)u8"海克斯预测: 读取中", g_hex_round_count);
-        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", buf);
+        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", (const char*)u8"海克斯预测: 读取中...");
     }
+    // 展开态窗口内容后补一点右侧间距, 避免三角盖住文字
+    ImGui::SameLine(0, 26.0f * g_autoScale);
+    ImGui::Dummy(ImVec2(1.0f, 1.0f));
+    DrawHextechCollapseButton();
     EndContentFloatWindow("hex_grip", &g_hextech_scale);
 }
 
