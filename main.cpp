@@ -1286,20 +1286,17 @@ void ParseGameMemory() {
                 g_hex_confirmed.store(false);
             }
 
-            static int frame_counter = 0;
-            frame_counter++;
-            if (frame_counter > 120) {
-                frame_counter = 0;
-                std::thread([=]() {
-                    typedef void* (*il2cpp_domain_get_t)();
-                    typedef void* (*il2cpp_thread_attach_t)(void*);
-                    auto domain_get = (il2cpp_domain_get_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_domain_get");
-                    auto thread_attach = (il2cpp_thread_attach_t)DobbySymbolResolver("libil2cpp.so", "il2cpp_thread_attach");
-                    if (domain_get && thread_attach) {
-                        void* domain = domain_get();
-                        if (domain) thread_attach(domain);
-                    }
-
+            // 用户要求: 只读 3 轮确认后停止读取, 一整局保持显示不变(海克斯品质确认后固定)。
+            // 下一局/海克斯刷新(hexctrl 指针变化)时由上方 last_hexctrl 逻辑重置, 重新读 3 轮。
+            if (!g_hex_confirmed.load(std::memory_order_acquire)) {
+                static int frame_counter = 0;
+                frame_counter++;
+                if (frame_counter > 120) {
+                    frame_counter = 0;
+                    // ★ 直接同步调用, 不再每 4 秒 detach 新线程: 原实现每轮新建 std::thread +
+                    // il2cpp_thread_attach 且从不 detach, il2cpp 线程记录无限累积, 锁竞争加剧,
+                    // 表现为"玩着玩着帧率一直掉"。get_hex 是读 3 个 int 的原生函数, 微秒级,
+                    // SAFE_CALL 已兜底崩溃, 无需线程。
                     typedef int (*func_get_hex_t)(uintptr_t, int);
                     func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
                     if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
@@ -1310,7 +1307,7 @@ void ParseGameMemory() {
                             if (q0 == prev_q0.load() && q1 == prev_q1.load() && q2 == prev_q2.load()) {
                                 int mc = match_counter.load() + 1;
                                 match_counter.store(mc);
-                                if (mc >= 3) { // 连续 3 轮一致 -> 确认显示
+                                if (mc >= 3) { // 连续 3 轮一致 -> 确认显示, 之后停止读取
                                     g_hex_qualities[0] = q0;
                                     g_hex_qualities[1] = q1;
                                     g_hex_qualities[2] = q2;
@@ -1325,7 +1322,7 @@ void ParseGameMemory() {
                             g_hex_confirmed.store(false); // 读到全 0(无效), 无法确认
                         }
                     }
-                }).detach();
+                }
             }
         }
     } else {
