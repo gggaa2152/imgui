@@ -3080,6 +3080,84 @@ static void InstallSkinHook() {
     }
 }
 
+// ==================== 小小英雄换肤 (Little Legend Skin Changer) ====================
+// hook 小小英雄模型加载实例方法 0x87c46a4 (Frida 实测):
+//   x0=this, x1=模型资源路径(Il2CppString), x2=展示模型名(Il2CppString), x3=容器指针, x4=对象, x5=null
+//   x1 例: "art_tft_raw/little_legend_res/model/t_qieqishispring/t_qieqishispring_horse/low"
+//   x2 例: "t_qieqishispring_horse_1_show"
+// (0xaf4fe0c 实测 x0=字符串非 this, 非标准入口, 弃用)
+static uintptr_t g_ll_load_offset = 0x87c46a4;
+typedef void* (*LoadLittleLegend_fn)(void* self, void* path, void* showName, void* container, void* x4, void* x5);
+static LoadLittleLegend_fn g_orig_LoadLittleLegend = nullptr;
+static bool g_ll_hook_installed = false;
+static bool g_ll_auto_enabled = true;
+static int  g_ll_selected = 0;
+static std::vector<SkinEntry> g_ll_skins = {
+    // 默认: 盲僧李青小英雄 (Frida 日志确认可加载)
+    { "art_tft_raw/little_legend_res/model/t_leesin/t_leesin/low", "t_leesin_1_show" },
+};
+static std::vector<SkinEntry> g_ll_captured_skins; // 自动捕获: x1(路径)/x2(展示名)
+static std::mutex g_ll_capture_mutex;
+
+static void* HK_LoadLittleLegend(void* self, void* path, void* showName, void* container, void* x4, void* x5) {
+    // 自动捕获: 记录游戏实际加载的小小英雄 x1(路径)/x2(展示名), 无论是否启用替换
+    if (path && showName) {
+        std::string p1 = ReadIl2CppString((uintptr_t)path);
+        std::string p2 = ReadIl2CppString((uintptr_t)showName);
+        if (!p1.empty() && !p2.empty()) {
+            bool needSave = false;
+            {
+                std::lock_guard<std::mutex> lk(g_ll_capture_mutex);
+                bool dup = false;
+                for (const auto& s : g_ll_captured_skins) {
+                    if (strcmp(s.x1, p1.c_str()) == 0 && strcmp(s.x2, p2.c_str()) == 0) { dup = true; break; }
+                }
+                if (!dup && g_ll_captured_skins.size() < 256) {
+                    SkinEntry e; memset(&e, 0, sizeof(e));
+                    strncpy(e.x1, p1.c_str(), sizeof(e.x1) - 1);
+                    strncpy(e.x2, p2.c_str(), sizeof(e.x2) - 1);
+                    g_ll_captured_skins.push_back(e);
+                    needSave = true;
+                }
+            }
+            if (needSave) SaveSkinsToFile(); // 锁外保存, SaveSkinsToFile 内部自行加锁
+        }
+    }
+    // 仅对局中(set_IsGameEnd=0 游戏开始后)才替换; x1 必须是"路径样式"字符串(含'/'), 防止误判
+    if (g_ll_auto_enabled && g_skin_match_active && g_ll_selected >= 0 && g_ll_selected < (int)g_ll_skins.size()
+        && g_il2cpp_api.string_new && path && showName) {
+        std::string cur1 = ReadIl2CppString((uintptr_t)path);
+        if (cur1.find('/') != std::string::npos) {
+            void* nb = g_il2cpp_api.string_new(g_ll_skins[g_ll_selected].x1);
+            void* na = g_il2cpp_api.string_new(g_ll_skins[g_ll_selected].x2);
+            if (nb && na) {
+                return g_orig_LoadLittleLegend(self, nb, na, container, x4, x5);
+            }
+        }
+    }
+    return g_orig_LoadLittleLegend(self, path, showName, container, x4, x5);
+}
+
+static void InstallLLHook() {
+    if (g_ll_hook_installed) return;
+    if (g_il2cppTrueBase == 0) { LOGI("[LL] il2cpp base 未就绪"); return; }
+    if (!g_il2cpp_api.string_new) g_il2cpp_api.init();
+    if (!g_il2cpp_api.string_new) { LOGI("[LL] il2cpp_string_new 未解析"); return; }
+    void* fnptr = (void*)(g_il2cppTrueBase + g_ll_load_offset);
+    if (!IsValidExecutableAddr(fnptr)) {
+        LOGI("[LL] 偏移 0x%lx 不在可执行区域", (unsigned long)g_ll_load_offset);
+        return;
+    }
+    int ret = SafeDobbyHook(fnptr, (void*)HK_LoadLittleLegend, (void**)&g_orig_LoadLittleLegend);
+    if (ret == 0) {
+        g_ll_hook_installed = true;
+        LOGI("[LL] Hooked LittleLegend @ %p (offset 0x%lx)", fnptr, (unsigned long)g_ll_load_offset);
+        AddActionLog((const char*)u8"-> [小小英雄] 已挂载模型加载Hook");
+    } else {
+        LOGI("[LL] DobbyHook failed ret=%d", ret);
+    }
+}
+
 static void CacheValidClasses() {
     if (g_classes_cached || !g_il2cpp_api.init()) return;
     
@@ -4578,6 +4656,13 @@ static void SaveSkinsToFile() {
         content += "[captured]\n";
         for (const auto& s : g_captured_skins) { content += s.x1; content += "|"; content += s.x2; content += "\n"; }
     }
+    content += "[ll_skins]\n";
+    {
+        std::lock_guard<std::mutex> lk(g_ll_capture_mutex);
+        for (const auto& s : g_ll_skins) { content += s.x1; content += "|"; content += s.x2; content += "\n"; }
+        content += "[ll_captured]\n";
+        for (const auto& s : g_ll_captured_skins) { content += s.x1; content += "|"; content += s.x2; content += "\n"; }
+    }
     FILE* f = fopen(g_skins_file_path.c_str(), "w");
     if (f) { fwrite(content.c_str(), 1, content.size(), f); fclose(f); }
 }
@@ -4587,14 +4672,16 @@ static void LoadSkinsFromFile() {
     if (g_skins_file_path.empty()) return;
     FILE* f = fopen(g_skins_file_path.c_str(), "r");
     if (!f) return;
-    std::vector<SkinEntry> newSkins, newCaptured;
-    bool inSkins = false, inCaptured = false;
+    std::vector<SkinEntry> newSkins, newCaptured, newLLSkins, newLLCaptured;
+    bool inSkins = false, inCaptured = false, inLLSkins = false, inLLCaptured = false;
     char line[600];
     while (fgets(line, sizeof(line), f)) {
         std::string s(line);
         while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-        if (s == "[skins]") { inSkins = true; inCaptured = false; continue; }
-        if (s == "[captured]") { inSkins = false; inCaptured = true; continue; }
+        if (s == "[skins]") { inSkins = true; inCaptured = false; inLLSkins = false; inLLCaptured = false; continue; }
+        if (s == "[captured]") { inSkins = false; inCaptured = true; inLLSkins = false; inLLCaptured = false; continue; }
+        if (s == "[ll_skins]") { inSkins = false; inCaptured = false; inLLSkins = true; inLLCaptured = false; continue; }
+        if (s == "[ll_captured]") { inSkins = false; inCaptured = false; inLLSkins = false; inLLCaptured = true; continue; }
         size_t sep = s.find('|');
         if (sep == std::string::npos) continue;
         SkinEntry en{}; 
@@ -4603,13 +4690,23 @@ static void LoadSkinsFromFile() {
         if (en.x1[0] && en.x2[0]) {
             if (inSkins) newSkins.push_back(en);
             else if (inCaptured) newCaptured.push_back(en);
+            else if (inLLSkins) newLLSkins.push_back(en);
+            else if (inLLCaptured) newLLCaptured.push_back(en);
         }
     }
     fclose(f);
-    std::lock_guard<std::mutex> lk(g_capture_mutex);
-    if (!newSkins.empty()) g_skins = newSkins;
-    if (!newCaptured.empty()) g_captured_skins = newCaptured;
-    if (g_skin_selected >= (int)g_skins.size()) g_skin_selected = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_capture_mutex);
+        if (!newSkins.empty()) g_skins = newSkins;
+        if (!newCaptured.empty()) g_captured_skins = newCaptured;
+        if (g_skin_selected >= (int)g_skins.size()) g_skin_selected = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_ll_capture_mutex);
+        if (!newLLSkins.empty()) g_ll_skins = newLLSkins;
+        if (!newLLCaptured.empty()) g_ll_captured_skins = newLLCaptured;
+        if (g_ll_selected >= (int)g_ll_skins.size()) g_ll_selected = 0;
+    }
 }
 
 static void LoadSkinsFromFileOnce() {
@@ -6812,6 +6909,79 @@ void DrawMainMenu() {
                         SaveSkinsToFile();
                     }
                     DrawGlassSeparator();
+
+                    // ============ 小小英雄换肤 (Little Legend) ============
+                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"小小英雄换肤 (Little Legend)");
+                    ImGui::Text((const char*)u8"对局中加载小英雄时, 替换 x1(模型路径) 与 x2(展示模型名), 其余参数透传");
+                    if (ImGui::Button((const char*)u8"启用小小英雄换肤", ImVec2(-1, 30 * g_autoScale * g_scale))) {
+                        g_ll_auto_enabled = !g_ll_auto_enabled;
+                        if (g_ll_auto_enabled && !g_ll_hook_installed) InstallLLHook();
+                    }
+                    ImGui::TextColored(g_ll_auto_enabled ? ImVec4(0.2f,1.0f,0.4f,1.0f) : ImVec4(1.0f,0.5f,0.5f,1.0f),
+                        (const char*)u8"小英雄状态: %s", g_ll_auto_enabled ? u8"已启用" : u8"已关闭");
+                    // 自动捕获: 游戏实际加载过的小小英雄
+                    bool ll_captured_used = false;
+                    {
+                        std::lock_guard<std::mutex> lk(g_ll_capture_mutex);
+                        size_t llN = g_ll_captured_skins.size();
+                        ImGui::TextColored(ImVec4(1.0f,0.85f,0.3f,1.0f), (const char*)u8"自动捕获 (加载过的小小英雄): %zu", llN);
+                        for (size_t i = 0; i < llN; i++) {
+                            ImGui::PushID((int)(4000 + i));
+                            ImGui::TextColored(ImVec4(0.5f,0.8f,1.0f,1.0f), (const char*)u8"[%zu]", i);
+                            ImGui::SameLine();
+                            ImGui::TextWrapped((const char*)u8"%s", g_ll_captured_skins[i].x1);
+                            ImGui::TextWrapped((const char*)u8"  -> %s", g_ll_captured_skins[i].x2);
+                            if (ImGui::Button((const char*)u8"选用##llcap", ImVec2(-1, 26 * g_autoScale))) {
+                                int idx = -1;
+                                for (size_t j = 0; j < g_ll_skins.size(); j++) {
+                                    if (strcmp(g_ll_skins[j].x1, g_ll_captured_skins[i].x1) == 0 &&
+                                        strcmp(g_ll_skins[j].x2, g_ll_captured_skins[i].x2) == 0) { idx = (int)j; break; }
+                                }
+                                if (idx < 0) { g_ll_skins.push_back(g_ll_captured_skins[i]); idx = (int)g_ll_skins.size() - 1; }
+                                g_ll_selected = idx;
+                                ll_captured_used = true;
+                            }
+                            ImGui::PopID();
+                            DrawGlassSeparator();
+                        }
+                    }
+                    if (ll_captured_used) SaveSkinsToFile();
+                    // 小英雄皮肤列表
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"小英雄列表 (共 %zu 项)", g_ll_skins.size());
+                    for (size_t i = 0; i < g_ll_skins.size(); i++) {
+                        ImGui::PushID((int)(5000 + i));
+                        char ll_label[32];
+                        snprintf(ll_label, sizeof(ll_label), (const char*)u8"小英雄 #%zu", i);
+                        ImGui::Text((const char*)u8"【%s】", ll_label);
+                        ImGui::Text((const char*)u8"  路径:"); ImGui::SameLine();
+                        ImGui::SetNextItemWidth(-1);
+                        ImGui::InputText((const char*)u8"##llx1", g_ll_skins[i].x1, sizeof(g_ll_skins[i].x1));
+                        AutoPopupSoftKbd(g_ll_skins[i].x1, sizeof(g_ll_skins[i].x1));
+                        ImGui::Text((const char*)u8"  展示名:"); ImGui::SameLine();
+                        ImGui::SetNextItemWidth(-1);
+                        ImGui::InputText((const char*)u8"##llx2", g_ll_skins[i].x2, sizeof(g_ll_skins[i].x2));
+                        AutoPopupSoftKbd(g_ll_skins[i].x2, sizeof(g_ll_skins[i].x2));
+                        if (g_ll_selected == (int)i) {
+                            ImGui::TextColored(ImVec4(0.2f,1.0f,0.4f,1.0f), (const char*)u8"  >> 当前选用");
+                        } else {
+                            if (ImGui::Button((const char*)u8"选用##ll")) { g_ll_selected = (int)i; SaveSkinsToFile(); }
+                            ImGui::SameLine();
+                        }
+                        if (g_ll_skins.size() > 1 && ImGui::Button((const char*)u8"删除##ll")) {
+                            g_ll_skins.erase(g_ll_skins.begin() + i);
+                            if (g_ll_selected >= (int)g_ll_skins.size()) g_ll_selected = 0;
+                            SaveSkinsToFile();
+                        }
+                        ImGui::PopID();
+                        DrawGlassSeparator();
+                    }
+                    if (ImGui::Button((const char*)u8"＋ 添加小英雄", ImVec2(-1, 30 * g_autoScale))) {
+                        SkinEntry e{};
+                        g_ll_skins.push_back(e);
+                        SaveSkinsToFile();
+                    }
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"小英雄Hook: %s", g_ll_hook_installed ? u8"已挂载 [OK]" : u8"未挂载 (启用时自动尝试)");
                     ImGui::TextColored(UITheme().primary, (const char*)u8"Hook 状态: %s", g_skin_hook_installed ? u8"已挂载 [OK]" : u8"未挂载 (启用时自动尝试)");
                     break;
                 }
@@ -7356,6 +7526,8 @@ void* Il2CppInitThread(void*) {
 
     // 自动换肤: 挂载地图加载 Hook (进入对局加载棋盘时替换皮肤参数 x1=x2)
     InstallSkinHook();
+    // 小小英雄换肤: 挂载小英雄模型加载 Hook (对局中加载小英雄时替换 x0=x1)
+    InstallLLHook();
 
 
 
