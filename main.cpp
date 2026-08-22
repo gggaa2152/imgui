@@ -146,27 +146,16 @@ std::vector<uintptr_t> g_dbg_list23_addrs;
 struct AvatarRankProbe { uintptr_t entry = 0, addr26 = 0; int raw_rank = 0, rank = 0, pid = 0, matched_id = -1; };
 std::vector<AvatarRankProbe> g_dbg_avatar_ranks;
 uintptr_t g_dbg_addr26 = 0;
+uintptr_t g_dbg_hexctrl = 0;
 
 std::vector<uintptr_t> g_dbg_list7_addrs;
 std::map<uintptr_t, std::vector<uintptr_t>> g_dbg_list9_map;
 std::vector<uintptr_t> g_dbg_player_addrs;
 
 int g_my_player_id = -1;
-// ============ 海克斯预测 (重写版) ============
-// 链路: seg+0x148->21 +0x18->22 +0x10->23(数组) [0]=24 +0x68->25 +0x60->HextechAugmentsCtrl
-// 调用 0x8BBA7FC(参数1=ctrl, 参数2=0/1/2 依次3次), 每 2 秒采样一组, 共 3 组 -> 3 行候选品质
-// 品质映射: 1=银色 2=金色 3=彩色
-int g_hex_rows[3][3] = {{0,0,0},{0,0,0},{0,0,0}};   // 3 组采样各自的 (q0,q1,q2), 整局显示 3 行
-int g_hex_row_count = 0;                            // 已完成采样组数 (0~3)
-std::atomic<bool> g_hex_confirmed{false};           // 满 3 组才 true, 停止采样
-int g_hex_last[3] = {-1, -1, -1};                   // 最近一次原始返回值 (-1=未采样, -999=崩溃)
-std::atomic<uint64_t> g_count_hex_calls{0};         // get_hex 调用次数 (菜单诊断)
-std::atomic<uint64_t> g_count_hex_crash{0};         // get_hex 崩溃保护次数 (菜单诊断)
-uintptr_t g_dbg_hexctrl = 0;                        // 诊断: HextechAugmentsCtrl 指针
+int g_hex_qualities[3] = {0, 0, 0};
+std::atomic<bool> g_hex_confirmed{false}; // 海克斯品质 3 轮一致才为 true, 否则显示"无法确认"
 std::vector<int> g_next_opponents;
-
-// 海克斯预测采样 (定义在文件后部 IL2CPP 反射区)
-void UpdateHexPrediction();
 
 struct PoolHero { int heroId; int remaining; int total; int cost; uintptr_t addr10; };
 std::vector<PoolHero> g_poolHeroes;
@@ -296,9 +285,6 @@ float g_quit_timer = 0.0f;
 float g_lock_x = 80.0f, g_lock_y = 460.0f;
 bool g_floats_locked = false;
 
-// 帧率跟随系统开关 (默认开: 关 VSync + targetFrameRate=设备刷新率, 如 120Hz)
-bool g_unlock_fps = true;
-
 // Card pool toggle capsule
 float g_cpbtn_x = 80.0f, g_cpbtn_y = 400.0f;
 
@@ -340,8 +326,7 @@ std::atomic<uint64_t> g_count_SendWillRenderCanvases{0};
 std::atomic<uint64_t> g_count_buy_hero_new{0};
 std::atomic<uint64_t> g_count_func_get_Instance{0};
 std::atomic<uint64_t> g_count_func_quit{0};
-std::atomic<uint64_t> g_count_load_map{0};   // 棋盘加载 hook (系统调用)
-std::atomic<uint64_t> g_count_load_ll{0};    // 小英雄加载 hook (系统调用)
+std::atomic<uint64_t> g_count_func_get_hex{0};
 
 uintptr_t hook_shop_listen(uintptr_t x0, uintptr_t x1, uintptr_t x2, uintptr_t x3, uintptr_t x4, uintptr_t x5, uintptr_t x6, uintptr_t x7) { g_count_shop_listen++;
     if (g_is_in_match.load(std::memory_order_relaxed) && !g_shop_listen_done.load() && x0 != 0) {
@@ -716,7 +701,6 @@ void SaveConfig() {
         out << "alpha_opp=" << g_alpha_opp << "\n";
         out << "alpha_hex=" << g_alpha_hex << "\n";
         out << "floats_locked=" << (g_floats_locked ? 1 : 0) << "\n";
-        out << "fps_unlock=" << (g_unlock_fps ? 1 : 0) << "\n";
         out << "cp_columns=" << g_cp_columns << "\n";
         out << "cp_rows=" << g_cp_rows << "\n";
         out << "cp_scale=" << g_cp_scale << "\n";
@@ -832,7 +816,6 @@ void LoadConfig() {
                 else if (key == "alpha_opp") g_alpha_opp = std::clamp(std::stof(valStr), 0.1f, 1.0f);
                 else if (key == "alpha_hex") g_alpha_hex = std::clamp(std::stof(valStr), 0.1f, 1.0f);
                 else if (key == "floats_locked") g_floats_locked = (std::stoi(valStr) != 0);
-                else if (key == "fps_unlock") g_unlock_fps = (std::stoi(valStr) != 0);
                 else if (key == "cp_columns") g_cp_columns = std::stoi(valStr);
                 else if (key == "cp_rows") g_cp_rows = std::stoi(valStr);
                 else if (key == "cp_scale") g_cp_scale = std::stof(valStr);
@@ -909,13 +892,8 @@ void ClearGameState() {
     g_players.clear();
     g_next_opponents.clear();
     g_my_player_id = -1;
-    g_hex_rows[0][0]=g_hex_rows[0][1]=g_hex_rows[0][2]=0;
-    g_hex_rows[1][0]=g_hex_rows[1][1]=g_hex_rows[1][2]=0;
-    g_hex_rows[2][0]=g_hex_rows[2][1]=g_hex_rows[2][2]=0;
-    g_hex_row_count = 0;
+    g_hex_qualities[0] = g_hex_qualities[1] = g_hex_qualities[2] = 0;
     g_hex_confirmed.store(false);
-    g_hex_last[0] = g_hex_last[1] = g_hex_last[2] = -1;
-    g_dbg_hexctrl = 0;
 
     g_dbg_list7_addrs.clear();
     g_dbg_list9_map.clear();
@@ -1113,18 +1091,6 @@ static void ApplyAvatarRanksFromList23() {
 }
 
 void ParseGameMemory() {
-    // ★ 诊断 (最外层, 无条件节流打印; 用于确认本函数是否被调用 / 对局状态 / 关键偏移)
-    {
-        static int s_dbg_frame = 0;
-        if ((++s_dbg_frame % 120) == 0) {
-            uintptr_t fptr = (g_off.func_get_hex != 0) ? (g_il2cppTrueBase + g_off.func_get_hex) : 0;
-            LOGI("[HEXDBG] ParseGameMemory CALLED | il2cppBase=%p inMatch=%d 链21=%d 22=%d 23=%d 数组=%zu ctrl=%p func=0x%lx fptr=%p",
-                (void*)g_il2cppTrueBase, (int)g_is_in_match.load(std::memory_order_relaxed),
-                IsValidPtr(g_dbg_addr21) ? 1 : 0, IsValidPtr(g_dbg_addr22) ? 1 : 0, IsValidPtr(g_dbg_addr23) ? 1 : 0,
-                g_dbg_list23_addrs.size(), (void*)g_dbg_hexctrl,
-                (unsigned long)g_off.func_get_hex, (void*)fptr);
-        }
-    }
     if (g_il2cppTrueBase == 0) return;
     if (!g_is_in_match.load(std::memory_order_acquire)) return;
 
@@ -1301,25 +1267,67 @@ void ParseGameMemory() {
     g_dbg_addr26 = 0;
     g_dbg_hexctrl = 0;
     if (!g_dbg_list23_addrs.empty()) {
-        // 读取数组第一条 -> addr24; addr24+0x68=addr25; addr25+0x60=HextechAugmentsCtrl
-        // 海克斯游戏全局共享, 固定取第一条
-        uintptr_t entry = g_dbg_list23_addrs[0];
-        if (IsValidPtr(entry)) {
-            uintptr_t a26 = SAFE_READ_PTR(entry, g_off.addr26); // +0x68 → addr25
-            if (IsValidPtr(a26)) {
-                g_dbg_addr26 = a26;
-                g_dbg_hexctrl = SAFE_READ_PTR(a26, g_off.hexctrl); // +0x60 → HextechAugmentsCtrl
+        g_dbg_addr26 = SAFE_READ_PTR(g_dbg_list23_addrs[0], g_off.addr26);
+        if (IsValidPtr(g_dbg_addr26))
+            g_dbg_hexctrl = SAFE_READ_PTR(g_dbg_addr26, g_off.hexctrl);
+        
+        if (g_dbg_hexctrl != 0 && g_off.func_get_hex != 0) {
+            // 3 轮确认: 每 120 帧(~2秒)读一轮 (q0,q1,q2), 连续 3 轮完全相同才更新显示并置 g_hex_confirmed;
+            // 不一致则保持"无法确认"。海克斯每回合刷新, 新值连续 3 轮稳定后自动跟进。
+            static uintptr_t last_hexctrl = 0;
+            static std::atomic<int> match_counter(0);
+            static std::atomic<int> prev_q0(0), prev_q1(0), prev_q2(0);
+
+            if (last_hexctrl != g_dbg_hexctrl) {
+                last_hexctrl = g_dbg_hexctrl;
+                match_counter.store(0);
+                prev_q0.store(0); prev_q1.store(0); prev_q2.store(0);
+                g_hex_confirmed.store(false);
+            }
+
+            // 用户要求: 只读 3 轮确认后停止读取, 一整局保持显示不变(海克斯品质确认后固定)。
+            // 下一局/海克斯刷新(hexctrl 指针变化)时由上方 last_hexctrl 逻辑重置, 重新读 3 轮。
+            if (!g_hex_confirmed.load(std::memory_order_acquire)) {
+                static int frame_counter = 0;
+                frame_counter++;
+                if (frame_counter > 120) {
+                    frame_counter = 0;
+                    // ★ 直接同步调用, 不再每 4 秒 detach 新线程: 原实现每轮新建 std::thread +
+                    // il2cpp_thread_attach 且从不 detach, il2cpp 线程记录无限累积, 锁竞争加剧,
+                    // 表现为"玩着玩着帧率一直掉"。get_hex 是读 3 个 int 的原生函数, 微秒级,
+                    // SAFE_CALL 已兜底崩溃, 无需线程。
+                    typedef int (*func_get_hex_t)(uintptr_t, int);
+                    func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
+                    if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
+                        int q0 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 0)), 0);
+                        int q1 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 1)), 0);
+                        int q2 = SAFE_CALL((g_count_func_get_hex++, get_hex(g_dbg_hexctrl, 2)), 0);
+                        if (q0 > 0 || q1 > 0 || q2 > 0) {
+                            if (q0 == prev_q0.load() && q1 == prev_q1.load() && q2 == prev_q2.load()) {
+                                int mc = match_counter.load() + 1;
+                                match_counter.store(mc);
+                                if (mc >= 3) { // 连续 3 轮一致 -> 确认显示, 之后停止读取
+                                    g_hex_qualities[0] = q0;
+                                    g_hex_qualities[1] = q1;
+                                    g_hex_qualities[2] = q2;
+                                    g_hex_confirmed.store(true);
+                                }
+                            } else {
+                                prev_q0.store(q0); prev_q1.store(q1); prev_q2.store(q2);
+                                match_counter.store(1); // 本轮为第 1 次
+                                g_hex_confirmed.store(false);
+                            }
+                        } else {
+                            g_hex_confirmed.store(false); // 读到全 0(无效), 无法确认
+                        }
+                    }
+                }
             }
         }
-        UpdateHexPrediction(); // 采样逻辑独立成函数 (真实 method_info 反射, 见文件后部)
     } else {
         g_dbg_addr26 = 0; g_dbg_hexctrl = 0;
         g_hex_confirmed.store(false);
-        g_hex_rows[0][0]=g_hex_rows[0][1]=g_hex_rows[0][2]=0;
-        g_hex_rows[1][0]=g_hex_rows[1][1]=g_hex_rows[1][2]=0;
-        g_hex_rows[2][0]=g_hex_rows[2][1]=g_hex_rows[2][2]=0;
-        g_hex_row_count = 0;
-        g_hex_last[0] = g_hex_last[1] = g_hex_last[2] = -1;
+        g_hex_qualities[0] = 0; g_hex_qualities[1] = 0; g_hex_qualities[2] = 0;
     }
 }
 
@@ -2864,125 +2872,23 @@ void DrawMyHeroWarningWindow() {
     EndContentFloatWindow("hw_grip", &g_hero_warn_scale);
 }
 
-static bool g_hex_collapsed = false; // 海克斯预测悬浮窗收起状态 (锁定时也可通过三角收起/展开)
-
-// 展开态窗口内的"收起"三角手柄: ForegroundDrawList 绘制 + 手动命中检测,
-// 不受锁定态 NoMouseInputs 影响, 锁定时也可点击收起
-static void DrawHextechCollapseButton() {
-    ImGuiIO& io = ImGui::GetIO();
-    ImGuiWindow* win = ImGui::GetCurrentWindow();
-    if (!win) return;
-    ImRect wr = win->Rect();
-    float sc = g_autoScale;
-    float s = 11.0f * sc;
-    ImVec2 c(wr.Max.x - s - 6.0f * sc, wr.Min.y + s + 6.0f * sc);
-    float hit_r = s * 1.7f; // ★ 缩小判定半径(原 2.6 倍易误触)
-    // ★ 防拖动误触: 按下时记录位置, 释放时位移 < 8*sc 且仍在命中圈内才算"点击"收起
-    static bool s_dn = false;
-    static ImVec2 s_dn_pos(0.0f, 0.0f);
-    if (ImGui::IsMouseClicked(0) && ImLengthSqr(io.MousePos - c) <= hit_r * hit_r) {
-        s_dn = true;
-        s_dn_pos = io.MousePos;
-    }
-    if (s_dn && !ImGui::IsMouseDown(0)) {
-        float max_mv = 8.0f * sc;
-        if (ImLengthSqr(io.MousePos - s_dn_pos) <= max_mv * max_mv
-            && ImLengthSqr(io.MousePos - c) <= hit_r * hit_r * 4.0f)
-            g_hex_collapsed = true;
-        s_dn = false;
-    }
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddCircleFilled(c, s * 0.95f, IM_COL32(0, 0, 0, 110), 20);
-    ImVec2 p1(c.x - s * 0.55f, c.y - s * 0.32f);
-    ImVec2 p2(c.x + s * 0.55f, c.y - s * 0.32f);
-    ImVec2 p3(c.x, c.y + s * 0.42f);
-    dl->AddTriangleFilled(p1, p2, p3, IM_COL32(255, 255, 255, 220));
-}
-
-// 收起态小胶囊: 显示"海克斯 ▸", 点击展开 (手动命中检测, 锁定时也可点)
-static void DrawHextechCollapsedCapsule() {
-    ImGuiIO& io = ImGui::GetIO();
-    float sc = g_autoScale;
-    const char* txt = (const char*)u8"海克斯 ▸";
-    ImFont* font = ImGui::GetFont();
-    if (!font) return;
-    float font_h = ImGui::GetFontSize() * 0.9f; // 旧版 imgui 无 font->FontSize, 用全局 GetFontSize()
-    ImVec2 tsz = font->CalcTextSizeA(font_h, FLT_MAX, 0.0f, txt);
-    float pad = 8.0f * sc;
-    float w = tsz.x + pad * 2.0f;
-    float h = tsz.y + pad * 1.6f;
-    ImVec2 pos(g_float_hex_x, g_float_hex_y);
-    if (pos.x < 0.0f) pos.x = 120.0f * sc;
-    if (pos.y < 0.0f) pos.y = 200.0f * sc;
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddRectFilled(pos, pos + ImVec2(w, h), IM_COL32(12, 18, 32, 200), 8.0f * sc);
-    dl->AddRect(pos, pos + ImVec2(w, h), IM_COL32(120, 180, 255, 160), 8.0f * sc, 0, 1.2f * sc);
-    dl->AddText(font, font_h, pos + ImVec2(pad, pad * 0.7f), IM_COL32(180, 220, 255, 255), txt);
-    if (ImGui::IsMouseClicked(0)) {
-        ImVec2 m = io.MousePos;
-        if (m.x >= pos.x && m.x <= pos.x + w && m.y >= pos.y && m.y <= pos.y + h)
-            g_hex_collapsed = false;
-    }
-}
-
 void DrawHextechCapsule() {
     if (!g_win_hextech) return;
     if (!g_is_in_match.load(std::memory_order_relaxed)) return;
-    // 收起态: 只画小胶囊, 点击展开
-    if (g_hex_collapsed) { DrawHextechCollapsedCapsule(); return; }
     if (!BeginContentFloatWindow("##HextechFloat", &g_win_hextech, &g_float_hex_x, &g_float_hex_y, g_alpha_hex)) return;
     ImGui::SetWindowFontScale(g_autoScale * g_hextech_scale);
-    const char* qn[] = { (const char*)u8"无", (const char*)u8"银", (const char*)u8"金", (const char*)u8"彩" };
+    std::string txt = (const char*)u8"海克斯预测: ";
     if (g_hex_confirmed.load()) {
-        // 3 组采样结果全部输出 (1=银色 2=金色 3=彩色), 整局看候选变化
-        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", (const char*)u8"海克斯预测 (3 次采样):");
-        for (int r = 0; r < 3; r++) {
-            std::string line = (const char*)u8"  第";
-            line += std::to_string(r + 1);
-            line += (const char*)u8"次: ";
-            for (int i = 0; i < 3; i++) {
-                int q = g_hex_rows[r][i];
-                line += (q >= 0 && q <= 3) ? qn[q] : "?";
-                if (i < 2) line += " | ";
-            }
-            ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", line.c_str());
+        const char* qn[] = { (const char*)u8"无", (const char*)u8"银", (const char*)u8"金", (const char*)u8"彩" };
+        for (int i = 0; i < 3; i++) {
+            int q = g_hex_qualities[i];
+            txt += (q >= 0 && q <= 3) ? qn[q] : "?";
+            if (i < 2) txt += " | ";
         }
     } else {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%s (%d/3)", (const char*)u8"海克斯预测: 采样中", g_hex_row_count);
-        ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", buf);
-
-        // ★ 屏上诊断 (不依赖 logcat): 链路 + 调用状态, 断在哪一眼看出
-        {
-            uintptr_t fptr = (g_off.func_get_hex != 0) ? (g_il2cppTrueBase + g_off.func_get_hex) : 0;
-            char dbg[192];
-            snprintf(dbg, sizeof(dbg),
-                "链:21=%s 22=%s 23=%s 数组=%zu ctrl=%p(%s)",
-                IsValidPtr(g_dbg_addr21) ? "OK" : "--",
-                IsValidPtr(g_dbg_addr22) ? "OK" : "--",
-                IsValidPtr(g_dbg_addr23) ? "OK" : "--",
-                g_dbg_list23_addrs.size(),
-                (void*)g_dbg_hexctrl, IsValidPtr(g_dbg_hexctrl) ? "OK" : "--");
-            ImGui::TextColored(ImVec4(0.65f, 0.72f, 0.82f, 1.f), "%s", dbg);
-            const char* fs = (g_off.func_get_hex == 0) ? "--" : (IsValidExecutableAddr((void*)fptr) ? "OK" : "BAD");
-            auto fmtq = [](int q) -> const char* {
-                if (q == -999) return (const char*)u8"崩";
-                if (q == -1) return "-";
-                static thread_local char t[3][16]; static int ti = 0; ti = (ti + 1) % 3;
-                snprintf(t[ti], sizeof(t[ti]), "%d", q); return t[ti];
-            };
-            snprintf(dbg, sizeof(dbg), "func=0x%lx(%s) %s:%llu %s:%llu %s[%s,%s,%s]",
-                (unsigned long)g_off.func_get_hex, fs,
-                (const char*)u8"调", (unsigned long long)g_count_hex_calls.load(),
-                (const char*)u8"崩", (unsigned long long)g_count_hex_crash.load(),
-                (const char*)u8"上次", fmtq(g_hex_last[0]), fmtq(g_hex_last[1]), fmtq(g_hex_last[2]));
-            ImGui::TextColored(ImVec4(0.65f, 0.72f, 0.82f, 1.f), "%s", dbg);
-        }
+        txt += (const char*)u8"无法确认";
     }
-    // 展开态窗口内容后补一点右侧间距, 避免三角盖住文字
-    ImGui::SameLine(0, 26.0f * g_autoScale);
-    ImGui::Dummy(ImVec2(1.0f, 1.0f));
-    DrawHextechCollapseButton();
+    ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.f, 1.f), "%s", txt.c_str());
     EndContentFloatWindow("hex_grip", &g_hextech_scale);
 }
 
@@ -3129,7 +3035,6 @@ typedef void* (*LoadMapImpl_fn)(void* self, void* bundlePath, void* assetName, v
 static LoadMapImpl_fn g_orig_LoadMapImpl = nullptr;
 
 static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void* releaseList, int isBackground, int isMineMap) {
-    g_count_load_map++; // 调用次数统计 (系统主动调用)
     // 自动捕获: 记录游戏实际加载的棋盘 x1/x2 (无论是否启用替换)
     if (bundlePath && assetName) {
         std::string s1 = ReadIl2CppString((uintptr_t)bundlePath);
@@ -3213,7 +3118,6 @@ static bool LLRecordCaptured(const std::string& p1, const std::string& p2) {
 
 // 0xaf4fe0c (x0=模型路径, x1=展示模型名) —— 小小英雄换肤方法, 替换 x0/x1
 static void* HK_LoadLittleLegend(void* x0, void* x1, void* x2, void* x3, void* x4, void* x5) {
-    g_count_load_ll++; // 调用次数统计 (系统主动调用)
     if (x0 && x1) {
         std::string p1 = ReadIl2CppString((uintptr_t)x0);
         std::string p2 = ReadIl2CppString((uintptr_t)x1);
@@ -4756,19 +4660,6 @@ static void SaveSkinsToFile() {
         content += "[ll_captured]\n";
         for (const auto& s : g_ll_captured_skins) { content += s.x1; content += "|"; content += s.x2; content += "\n"; }
     }
-    content += "[selected]\n";
-    {
-        std::lock_guard<std::mutex> lk(g_capture_mutex);
-        if (g_skin_selected >= 0 && g_skin_selected < (int)g_skins.size()) {
-            content += "skin="; content += g_skins[g_skin_selected].x1; content += "|"; content += g_skins[g_skin_selected].x2; content += "\n";
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lk(g_ll_capture_mutex);
-        if (g_ll_selected >= 0 && g_ll_selected < (int)g_ll_skins.size()) {
-            content += "ll="; content += g_ll_skins[g_ll_selected].x1; content += "|"; content += g_ll_skins[g_ll_selected].x2; content += "\n";
-        }
-    }
     FILE* f = fopen(g_skins_file_path.c_str(), "w");
     if (f) { fwrite(content.c_str(), 1, content.size(), f); fclose(f); LOGI("[SKIN] 皮肤已保存 %zuB -> %s", content.size(), g_skins_file_path.c_str()); }
     else   { LOGI("[SKIN] 皮肤保存失败! 无法写入: %s", g_skins_file_path.c_str()); }
@@ -4780,33 +4671,17 @@ static void LoadSkinsFromFile() {
     FILE* f = fopen(g_skins_file_path.c_str(), "r");
     if (!f) return;
     std::vector<SkinEntry> newSkins, newCaptured, newLLSkins, newLLCaptured;
-    std::string selSkin1, selSkin2, selLL1, selLL2; // 上次选中的 x1|x2 (按值恢复, 比索引稳)
-    bool inSkins = false, inCaptured = false, inLLSkins = false, inLLCaptured = false, inSelected = false;
+    bool inSkins = false, inCaptured = false, inLLSkins = false, inLLCaptured = false;
     char line[600];
     while (fgets(line, sizeof(line), f)) {
         std::string s(line);
         while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-        if (s == "[skins]") { inSkins = true; inCaptured = false; inLLSkins = false; inLLCaptured = false; inSelected = false; continue; }
-        if (s == "[captured]") { inSkins = false; inCaptured = true; inLLSkins = false; inLLCaptured = false; inSelected = false; continue; }
-        if (s == "[ll_skins]") { inSkins = false; inCaptured = false; inLLSkins = true; inLLCaptured = false; inSelected = false; continue; }
-        if (s == "[ll_captured]") { inSkins = false; inCaptured = false; inLLSkins = false; inLLCaptured = true; inSelected = false; continue; }
-        if (s == "[selected]") { inSkins = false; inCaptured = false; inLLSkins = false; inLLCaptured = false; inSelected = true; continue; }
+        if (s == "[skins]") { inSkins = true; inCaptured = false; inLLSkins = false; inLLCaptured = false; continue; }
+        if (s == "[captured]") { inSkins = false; inCaptured = true; inLLSkins = false; inLLCaptured = false; continue; }
+        if (s == "[ll_skins]") { inSkins = false; inCaptured = false; inLLSkins = true; inLLCaptured = false; continue; }
+        if (s == "[ll_captured]") { inSkins = false; inCaptured = false; inLLSkins = false; inLLCaptured = true; continue; }
         size_t sep = s.find('|');
         if (sep == std::string::npos) continue;
-        if (inSelected) {
-            // 行格式: skin=<x1>|<x2> 或 ll=<x1>|<x2>  (先用 '=' 切 key, 再用 '|' 切 x1/x2)
-            size_t eq = s.find('=');
-            if (eq == std::string::npos) continue;
-            std::string key = s.substr(0, eq);
-            std::string rest = s.substr(eq + 1);
-            size_t p2 = rest.find('|');
-            if (p2 == std::string::npos) continue;
-            std::string v1 = rest.substr(0, p2);
-            std::string v2 = rest.substr(p2 + 1);
-            if (key == "skin") { selSkin1 = v1; selSkin2 = v2; }
-            else if (key == "ll") { selLL1 = v1; selLL2 = v2; }
-            continue;
-        }
         SkinEntry en{}; 
         strncpy(en.x1, s.substr(0, sep).c_str(), sizeof(en.x1) - 1);
         strncpy(en.x2, s.substr(sep + 1).c_str(), sizeof(en.x2) - 1);
@@ -4822,28 +4697,12 @@ static void LoadSkinsFromFile() {
         std::lock_guard<std::mutex> lk(g_capture_mutex);
         if (!newSkins.empty()) g_skins = newSkins;
         if (!newCaptured.empty()) g_captured_skins = newCaptured;
-        g_skin_selected = 0;
-        if (!selSkin1.empty()) {
-            for (size_t i = 0; i < g_skins.size(); i++) {
-                if (strcmp(g_skins[i].x1, selSkin1.c_str()) == 0 && strcmp(g_skins[i].x2, selSkin2.c_str()) == 0) {
-                    g_skin_selected = (int)i; break;
-                }
-            }
-        }
         if (g_skin_selected >= (int)g_skins.size()) g_skin_selected = 0;
     }
     {
         std::lock_guard<std::mutex> lk(g_ll_capture_mutex);
         if (!newLLSkins.empty()) g_ll_skins = newLLSkins;
         if (!newLLCaptured.empty()) g_ll_captured_skins = newLLCaptured;
-        g_ll_selected = 0;
-        if (!selLL1.empty()) {
-            for (size_t i = 0; i < g_ll_skins.size(); i++) {
-                if (strcmp(g_ll_skins[i].x1, selLL1.c_str()) == 0 && strcmp(g_ll_skins[i].x2, selLL2.c_str()) == 0) {
-                    g_ll_selected = (int)i; break;
-                }
-            }
-        }
         if (g_ll_selected >= (int)g_ll_skins.size()) g_ll_selected = 0;
     }
 }
@@ -6623,7 +6482,6 @@ void DrawMainMenu() {
                 ModernToggle((const char*)u8"海克斯预测悬浮", &g_win_hextech, 3);
                 ModernToggle((const char*)u8"余量预警悬浮窗", &g_win_hero_warn, 10);
                 ModernToggle((const char*)u8"锁定全部浮窗", &g_floats_locked, 9);
-                ModernToggle((const char*)u8"帧率跟随系统", &g_unlock_fps, 11);
                 DrawGlassSeparator();
                 if (ImGui::TreeNode((const char*)u8"悬浮透明度")) {
                     float pct_cp = g_alpha_cp * 100.0f, pct_pd = g_alpha_pd * 100.0f;
@@ -6813,18 +6671,6 @@ void DrawMainMenu() {
                     PrintCol("4. 触摸分发 (nativeInjectEvent): %s", old_nativeInjectEvent != nullptr, old_nativeInjectEvent ? "已挂载 [OK]" : "未挂载 [x]");
 
                     DrawGlassSeparator();
-                    ImGui::TextColored(UITheme().primary, (const char*)u8"【调用次数统计 (系统主动调用 / 辅助主动调用)】");
-                    PrintCol("set_IsGameEnd (对局状态)      [系统主动调用] %llu 次", 1, (unsigned long long)g_count_set_IsGameEnd.load());
-                    PrintCol("SendWillRenderCanvases (渲染前) [系统主动调用] %llu 次", 1, (unsigned long long)g_count_SendWillRenderCanvases.load());
-                    PrintCol("shop_listen (商店刷新)        [系统主动调用] %llu 次", 1, (unsigned long long)g_count_shop_listen.load());
-                    PrintCol("LoadMapImpl (棋盘加载)        [系统主动调用] %llu 次", 1, (unsigned long long)g_count_load_map.load());
-                    PrintCol("LoadLittleLegend (小英雄加载)  [系统主动调用] %llu 次", 1, (unsigned long long)g_count_load_ll.load());
-                    PrintCol("get_Instance (获取实例)       [辅助主动调用] %llu 次", 1, (unsigned long long)g_count_func_get_Instance.load());
-                    PrintCol("get_hex (读取海克斯)          [辅助主动调用] %llu 次 (崩溃 %llu)", 1, (unsigned long long)g_count_hex_calls.load(), (unsigned long long)g_count_hex_crash.load());
-                    PrintCol("buy_hero_new (购买英雄)       [辅助主动调用] %llu 次", 1, (unsigned long long)g_count_buy_hero_new.load());
-                    PrintCol("func_quit (退出游戏)          [辅助主动调用] %llu 次", 1, (unsigned long long)g_count_func_quit.load());
-
-                    DrawGlassSeparator();
                     ImGui::TextColored(UITheme().primary, (const char*)u8"【牌库字典链】");
                     PrintCol("addr4=0x%lx | addr7=0x%lx (大小: %zu)", IsValidPtr(g_dbg_addr4) && IsValidPtr(g_dbg_addr7), g_dbg_addr4, g_dbg_addr7, g_dbg_list7_addrs.size());
                     ImGui::Indent();
@@ -6871,7 +6717,7 @@ void DrawMainMenu() {
                     DrawGlassSeparator();
                     ImGui::TextColored(UITheme().primary, (const char*)u8"【海克斯与排位段位 (addr21~26)】");
                     PrintCol("addr21=0x%lx | addr23=0x%lx | addr26=0x%lx | hexctrl=0x%lx", IsValidPtr(g_dbg_addr21) && IsValidPtr(g_dbg_addr26), g_dbg_addr21, g_dbg_addr23, g_dbg_addr26, g_dbg_hexctrl);
-                    PrintCol("海克斯最近采样: [%d, %d, %d] (组数 %d/3)", IsValidPtr(g_dbg_hexctrl), g_hex_last[0], g_hex_last[1], g_hex_last[2], g_hex_row_count);
+                    PrintCol("海克斯品质: [%d, %d, %d]", IsValidPtr(g_dbg_hexctrl), g_hex_qualities[0], g_hex_qualities[1], g_hex_qualities[2]);
                 }
                 break;
             case 3:
@@ -7375,215 +7221,14 @@ void* hook_SendWillRenderCanvases() { g_count_SendWillRenderCanvases++;
 }
 
 // ==========================================
-// 跟随系统刷新率解锁引擎 (2026-08-22 重写):
-// 用户要求"不要垂直同步, 系统多少就多少, 设备设置 120"。
-// 与已删除的 ForceUnlock144FPS 区别: 不强制 144(超设备上限导致满载发烫),
-// 而是通过 JNI 读取设备真实刷新率 (如 120Hz) -> 关 VSync + targetFrameRate=刷新率,
-// 帧率与设备一致, 不超跑。
+// (已移除) 满血高刷帧率解锁引擎: 强制 144FPS + 关 VSync 导致 CPU/GPU 满载, 平板发烫,
+// 用户决定直接删除, 游戏保持默认 60Hz 垂直同步。
 // ==========================================
-
-// 查找指定命名空间+类名的 il2cpp 类 (遍历全部程序集镜像)
-// 注意: IL2CPP 元数据字符串堆可能带前导垃圾 ('?'), 用 StripLeadingGarbage 清洗后比较
-static void* FindIl2CppClassByName(const char* ns, const char* name) {
-    if (!g_il2cpp_api.init()) return nullptr;
-    void* domain = g_il2cpp_api.domain_get();
-    if (!domain) return nullptr;
-    size_t asm_count = 0;
-    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
-    if (!assemblies) return nullptr;
-    for (size_t a = 0; a < asm_count; a++) {
-        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
-        if (!img) continue;
-        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
-        for (size_t c = 0; c < cls_count; c++) {
-            void* klass = g_il2cpp_api.image_get_class(img, c);
-            if (!klass) continue;
-            const char* cn = g_il2cpp_api.class_get_name ? g_il2cpp_api.class_get_name(klass) : nullptr;
-            if (!cn) continue;
-            std::string cnClean = StripLeadingGarbage(SafeReadCString(cn)); // 元数据字符串可能奇偶错位, 用 SafeReadCString 兜底
-            if (cnClean != name) continue;
-            if (ns) {
-                const char* cns = g_il2cpp_api.class_get_namespace ? g_il2cpp_api.class_get_namespace(klass) : nullptr;
-                std::string nsClean = cns ? StripLeadingGarbage(SafeReadCString(cns)) : "";
-                if (nsClean != ns) continue;
-            }
-            return klass;
-        }
-    }
-    return nullptr;
-}
-
-// ==================== 海克斯预测 ====================
-// 调用: 0x8BBA7FC, 参数1=HextechAugmentsCtrl 地址, 参数2=0/1/2 依次 3 次
-// 每 2 秒采样一组, 共 3 组 -> 3 行候选品质; 1=银色 2=金色 3=彩色
-// 纯 2 参数调用 (用户指定), 带崩溃保护防止闪退
-void UpdateHexPrediction() {
-    if (!g_is_in_match.load(std::memory_order_relaxed)) return;
-    if (g_hex_confirmed.load(std::memory_order_acquire)) return;
-    if (g_dbg_hexctrl == 0 || g_off.func_get_hex == 0) return;
-    if (!IsValidPtr(g_dbg_hexctrl)) return;
-
-    typedef int (*func_get_hex_t)(uintptr_t, int);
-    func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
-    if (!get_hex || !IsValidExecutableAddr((void*)get_hex)) return;
-
-    static auto s_last_sample = std::chrono::steady_clock::now() - std::chrono::seconds(10); // 首次立即采样
-    auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration<double>(now - s_last_sample).count() < 2.0) return;
-    s_last_sample = now;
-
-    int q[3] = {0, 0, 0};
-    for (int i = 0; i < 3; i++) {
-        g_count_hex_calls++;
-        InitCrashGuard();
-        g_segv_guard_active = true;
-        if (sigsetjmp(g_segv_jmp_buf, 1) == 0) {
-            q[i] = get_hex(g_dbg_hexctrl, i); // 参数1=HextechAugmentsCtrl, 参数2=0/1/2
-            g_segv_guard_active = false;
-        } else {
-            g_segv_guard_active = false;
-            g_count_hex_crash++;
-            q[i] = -999; // 崩溃哨兵值
-        }
-    }
-    g_hex_last[0] = q[0]; g_hex_last[1] = q[1]; g_hex_last[2] = q[2];
-    LOGI("[HEX] sample: q0=%d q1=%d q2=%d (ctrl=%p)", q[0], q[1], q[2], (void*)g_dbg_hexctrl);
-    if (q[0] >= 0 && q[1] >= 0 && q[2] >= 0 && (q[0] + q[1] + q[2]) > 0) {
-        int row = (g_hex_row_count < 3) ? g_hex_row_count : 2;
-        g_hex_rows[row][0] = q[0];
-        g_hex_rows[row][1] = q[1];
-        g_hex_rows[row][2] = q[2];
-        g_hex_row_count++;
-        if (g_hex_row_count >= 3) g_hex_confirmed.store(true);
-    }
-}
-
-// 反射设置 Unity 静态 int 属性 (如 Application.set_targetFrameRate / QualitySettings.set_vSyncCount)
-// 按 setter 名缓存函数指针, 每个属性只查找一次
-static bool SetUnityStaticIntProperty(const char* ns, const char* clsName, const char* setterName, int value) {
-    static std::unordered_map<std::string, void*> s_setters;
-    auto it = s_setters.find(setterName);
-    if (it != s_setters.end()) {
-        void* cached = it->second;
-        if (!cached) return false;
-        ((void(*)(int))cached)(value);
-        return true;
-    }
-    // 未缓存: 若 il2cpp 未就绪则不缓存, 返回 false 让调用方下帧重试
-    if (!g_il2cpp_api.init()) return false;
-    void* klass = FindIl2CppClassByName(ns, clsName);
-    void* setter = nullptr;
-    if (klass) {
-        void* iter = nullptr;
-        while (void* method = g_il2cpp_api.class_get_methods(klass, &iter)) {
-            const char* mname = g_il2cpp_api.method_get_name ? g_il2cpp_api.method_get_name(method) : nullptr;
-            if (!mname) continue;
-            std::string mClean = StripLeadingGarbage(SafeReadCString(mname));
-            if (mClean == setterName) {
-                setter = g_il2cpp_api.method_get_function_pointer ? g_il2cpp_api.method_get_function_pointer(method) : nullptr;
-                break;
-            }
-        }
-    }
-    s_setters[setterName] = setter; // 查找完成后缓存结果 (nullptr 也表示该属性不存在, 不再重试)
-    if (!setter) return false;
-    ((void(*)(int))setter)(value);
-    return true;
-}
-
-// 通过 JNI 读取 Android 系统显示刷新率 (Hz), 失败返回 0
-static int GetSystemRefreshRateHz() {
-    JNIEnv* e = nullptr;
-    if (!g_jvm) return 0;
-    jint st = g_jvm->GetEnv((void**)&e, JNI_VERSION_1_6);
-    if (st == JNI_EDETACHED) {
-        if (g_jvm->AttachCurrentThread(&e, nullptr) != JNI_OK || !e) return 0;
-    } else if (st != JNI_OK || !e) {
-        return 0;
-    }
-    if (!g_context) return 0;
-    jclass ctxCls = e->FindClass("android/content/Context");
-    if (!ctxCls) { e->ExceptionClear(); return 0; }
-    jmethodID getSys = e->GetMethodID(ctxCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
-    if (!getSys) { e->ExceptionClear(); return 0; }
-    jstring wmName = e->NewStringUTF("window");
-    jobject wm = e->CallObjectMethod(g_context, getSys, wmName);
-    e->DeleteLocalRef(wmName);
-    if (!wm) { e->ExceptionClear(); return 0; }
-    jclass wmCls = e->FindClass("android/view/WindowManager");
-    if (!wmCls) { e->ExceptionClear(); return 0; }
-    jmethodID getDisp = e->GetMethodID(wmCls, "getDefaultDisplay", "()Landroid/view/Display;");
-    if (!getDisp) { e->ExceptionClear(); return 0; }
-    jobject disp = e->CallObjectMethod(wm, getDisp);
-    if (!disp) { e->ExceptionClear(); return 0; }
-    jclass dispCls = e->GetObjectClass(disp);
-    int result = 0;
-    jmethodID getMode = e->GetMethodID(dispCls, "getMode", "()Landroid/view/Display$Mode;"); // API 23+
-    if (getMode) {
-        jobject mode = e->CallObjectMethod(disp, getMode);
-        if (mode) {
-            jclass modeCls = e->GetObjectClass(mode);
-            jmethodID getRR = e->GetMethodID(modeCls, "getRefreshRate", "()F");
-            if (getRR) result = (int)(e->CallFloatMethod(mode, getRR) + 0.5f);
-            e->ExceptionClear();
-            e->DeleteLocalRef(mode);
-        }
-    } else {
-        e->ExceptionClear(); // API<23 无 getMode
-    }
-    if (result <= 0) {
-        jmethodID getRR = e->GetMethodID(dispCls, "getRefreshRate", "()F");
-        if (getRR) result = (int)(e->CallFloatMethod(disp, getRR) + 0.5f);
-        e->ExceptionClear();
-    }
-    e->DeleteLocalRef(disp);
-    return result;
-}
 
 void RenderImGui_Core_GLES(EGLDisplay display, EGLSurface surface) {
     g_current_frame++;
     if (g_active_renderer.load() == 0) g_active_renderer.store(1);
     if (!g_engine_rendering.load()) g_engine_rendering.store(true);
-
-    // ★ 帧率跟随系统开关 (默认开, 菜单可切换):
-    //   开 = 读设备刷新率 -> targetFrameRate=刷新率 + 关 VSync (跟随系统, 如 120Hz)
-    //   关 = 恢复 targetFrameRate=-1(默认) + vSyncCount=1 + 恢复 VSync (默认 60Hz)
-    //   安全关键: 只有 set_targetFrameRate 设置成功才关 VSync, 否则帧率无限跑满发烫。
-    static int s_fps_hz = -1;          // -1=未成功继续重试, 0=已放弃, >0=已成功设置
-    static int s_fps_retry = 0;        // 重试计数 (g_context 或 il2cpp 可能尚未就绪)
-    static bool s_fps_prev_on = true;  // 上一次开关状态, 用于检测切换
-    if (g_unlock_fps) {
-        if (!s_fps_prev_on) {          // 从关切到开: 重置状态重新解锁
-            s_fps_hz = -1;
-            s_fps_retry = 0;
-            LOGI("[FPS] 帧率跟随系统已开启");
-        }
-        if (s_fps_hz == -1) {
-            int hz = GetSystemRefreshRateHz();
-            if (hz >= 30 && hz <= 240) {
-                bool ok = SetUnityStaticIntProperty("UnityEngine", "Application", "set_targetFrameRate", hz);
-                SetUnityStaticIntProperty("UnityEngine", "QualitySettings", "set_vSyncCount", 0); // 尽力而为
-                if (ok) {
-                    s_fps_hz = hz;
-                    LOGI("[FPS] 系统刷新率 %dHz, 已设置 targetFrameRate, 关闭 VSync", hz);
-                }
-            }
-            if (s_fps_retry++ > 600) {      // 重试约10秒仍失败(g_context/il2cpp 未就绪或反射失败), 放弃
-                s_fps_hz = 0;
-                LOGI("[FPS] 刷新率解锁失败, 保持游戏默认帧率");
-            }
-        }
-        if (s_fps_hz > 0) eglSwapInterval(display, 0); // 仅解锁成功后才每帧关 VSync (签名: eglSwapInterval(dpy, interval), 无 surface)
-    } else {
-        if (s_fps_prev_on) {               // 从开切到关: 恢复默认设置
-            SetUnityStaticIntProperty("UnityEngine", "Application", "set_targetFrameRate", -1);
-            SetUnityStaticIntProperty("UnityEngine", "QualitySettings", "set_vSyncCount", 1);
-            LOGI("[FPS] 帧率跟随系统已关闭, 恢复默认垂直同步");
-        }
-        eglSwapInterval(display, 1); // 每帧恢复垂直同步 (签名: eglSwapInterval(dpy, interval), 无 surface)
-        s_fps_hz = -1;                       // 下次开启时重新尝试
-    }
-    s_fps_prev_on = g_unlock_fps;
 
     eglQuerySurface(display, surface, EGL_WIDTH, &g_gl_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_gl_height);
