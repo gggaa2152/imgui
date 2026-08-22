@@ -1311,15 +1311,33 @@ void ParseGameMemory() {
             // 品质映射: 1=银色 2=金色 3=彩色 (显示 qn[] = 无/银/金/彩)。
             // 固定读取数组第一条的 HextechAugmentsCtrl, 不做指针比较重置 (每 2 帧重解析会抖动)。
             if (!g_hex_confirmed.load(std::memory_order_acquire)) {
-                typedef int (*func_get_hex_t)(uintptr_t, int);
-                func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
+                // ★ 修复: IL2CPP 实例方法标准签名 int func(This*, int, MethodInfo*)
+                //   之前只传 2 参数 -> x2 是垃圾值, 函数用到 method_info 时解引用垃圾地址 -> 段错误 (崩:63/63)
+                //   切换 HEX_CALL_STYLE 宏可换签名: 0=this+idx+null  1=this+idx  2=null+this+idx  3=idx+null
+                #define HEX_CALL_STYLE 0
+                #if HEX_CALL_STYLE == 0
+                    typedef int (*func_get_hex_t)(uintptr_t, int, void*);
+                    func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
+                #else
+                    typedef int (*func_get_hex_t)(uintptr_t, int);
+                    func_get_hex_t get_hex = (func_get_hex_t)(g_il2cppTrueBase + g_off.func_get_hex);
+                #endif
                 if (get_hex && IsValidExecutableAddr((void*)get_hex) && IsValidPtr(g_dbg_hexctrl)) {
                     // 带崩溃计数的调用封装: 区分"函数正常返回 0"和"调用直接崩被信号保护拦下"
                     auto hex_call = [&](int idx) -> int {
                         InitCrashGuard();
                         g_segv_guard_active = true;
                         if (sigsetjmp(g_segv_jmp_buf, 1) == 0) {
-                            int r = get_hex(g_dbg_hexctrl, idx); // 参数1=HextechAugmentsCtrl, 参数2=0/1/2
+                            int r;
+                            #if HEX_CALL_STYLE == 0
+                                r = get_hex(g_dbg_hexctrl, idx, (void*)0); // 试: this+idx+MethodInfo=null
+                            #elif HEX_CALL_STYLE == 1
+                                r = get_hex(g_dbg_hexctrl, idx); // 试: this+idx (旧方式, 几乎肯定崩)
+                            #elif HEX_CALL_STYLE == 2
+                                r = get_hex((void*)0, g_dbg_hexctrl, idx); // 试: null+this+idx (method_info 排第一)
+                            #else
+                                r = get_hex(idx, (void*)0); // 试: idx+null (静态方法)
+                            #endif
                             g_segv_guard_active = false;
                             return r;
                         }
