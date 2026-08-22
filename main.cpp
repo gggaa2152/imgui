@@ -2933,13 +2933,31 @@ struct SkinEntry {
     char x2[256]; // assetName   (包内 prefab 名)
 };
 
+// 自动捕获: 游戏实际加载过的棋盘 (x1=bundlePath, x2=assetName), 去重记录, 供换肤菜单直接选用
+static std::vector<SkinEntry> g_captured_skins;
+static std::mutex           g_capture_mutex;
+static void RecordCapturedSkin(const std::string& x1, const std::string& x2) {
+    if (x1.empty() || x2.empty()) return;
+    std::lock_guard<std::mutex> lk(g_capture_mutex);
+    for (const auto& s : g_captured_skins) {
+        if (strcmp(s.x1, x1.c_str()) == 0 && strcmp(s.x2, x2.c_str()) == 0) return;
+    }
+    if (g_captured_skins.size() >= 256) return;
+    SkinEntry e;
+    memset(&e, 0, sizeof(e));
+    strncpy(e.x1, x1.c_str(), sizeof(e.x1) - 1);
+    strncpy(e.x2, x2.c_str(), sizeof(e.x2) - 1);
+    g_captured_skins.push_back(e);
+}
 static std::vector<SkinEntry> g_skins = {
     // 默认皮肤: S5 中秋棋盘 (用户已验证可加载). 后续可继续往这里加 x1/x2.
     { "art_tft_raw/scenes/prefab/s5_tft_midautumn", "s5_tft_midautumn" },
 };
 static int  g_skin_selected = 0;
 static bool g_auto_skin_enabled = true;
-static bool g_skin_hook_installed = false;
+static bool g_skin_autorotate = true;      // 每局结束自动轮换到下一款皮肤
+static bool g_skin_hook_installed =  false;
+static bool g_skin_rotate_pending = false; // 下一局开局时轮转皮肤 (由游戏结束事件触发)
 // LoadMapImpl 在 libil2cpp.so 内的偏移(RVA)。游戏版本更新导致偏移变化时需更新此值
 static uintptr_t g_skin_loadmap_offset = 0x8beba60;
 
@@ -2948,6 +2966,23 @@ typedef void* (*LoadMapImpl_fn)(void* self, void* bundlePath, void* assetName, v
 static LoadMapImpl_fn g_orig_LoadMapImpl = nullptr;
 
 static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void* releaseList, int isBackground, int isMineMap) {
+    // 自动捕获: 记录游戏实际加载的棋盘 x1/x2 (无论是否启用替换)
+    if (bundlePath && assetName) {
+        std::string s1 = ReadIl2CppString((uintptr_t)bundlePath);
+        std::string s2 = ReadIl2CppString((uintptr_t)  assetName);
+        if (!s1.empty() && !s2.empty()) RecordCapturedSkin(s1, s2);
+    }
+
+    // 每局自动轮换: 由"游戏结束"事件置位 g_skin_rotate_pending, 在下一局开局 LoadMapImpl 时切换一次
+    if (g_auto_skin_enabled && g_skin_autorotate && !g_skins.empty() && g_il2cpp_api.string_new) {
+        if (g_skin_rotate_pending) {
+            g_skin_rotate_pending = false;
+            g_skin_selected = (g_skin_selected + 1) % (int)g_skins.size();
+            LOGI("[SKIN] 每局轮换 -> 皮肤 #%d : %s", g_skin_selected, g_skins[g_skin_selected].x2);
+            AddActionLog((const char*)u8"-> [换肤] 每局轮换到新皮肤");
+        }
+    }
+
     if (g_auto_skin_enabled && g_skin_selected >= 0 && g_skin_selected < (int)g_skins.size()
         && g_il2cpp_api.string_new) {
         void* nb = g_il2cpp_api.string_new(g_skins[g_skin_selected].x1);
@@ -4374,8 +4409,21 @@ static bool        g_ime_open = false;
 static bool        g_ime_pending_show = false;
 static bool        g_ime_pending_hide = false;
 static std::string g_last_ime_text;
-static char*       g_ime_focus_target = nullptr; // 点[输入法]后需重新聚焦的输入框
 static const char* g_last_focused_input = nullptr; // 记录上一帧获得焦点的输入框，用于“点框即弹键盘”
+
+// 点击输入框自动弹出内置软键盘（纯 ImGui 自绘，不依赖 JNI/线程/权限；替代会卡死的系统 IME 自动触发）
+static void AutoPopupSoftKbd(char* buf, size_t size) {
+    if (ImGui::IsItemFocused()) {
+        if (g_last_focused_input != buf) {
+            g_last_focused_input = buf;
+            g_vkbd_target = buf;
+            g_vkbd_target_size = size;
+            g_show_vkbd = true;
+        }
+    } else if (g_last_focused_input == buf) {
+        g_last_focused_input = nullptr;
+    }
+}
 
 // 注意：本函数可能在 GL 渲染线程（非 UI 线程）被调用。addContentView 会因 CalledFromWrongThread 抛异常，
 // 此时自动回退到 WindowManager 分支（独立 ViewRootImpl，线程一致，不会抛该异常，但需 SYSTEM_ALERT_WINDOW 权限）。
@@ -4484,9 +4532,6 @@ static void DoHideIME() {
     if (g_ime_edittext) { e->DeleteGlobalRef(g_ime_edittext); g_ime_edittext = nullptr; }
     g_last_ime_text.clear();
 }
-
-static void RequestShowIME() { g_ime_pending_show = true; }
-static void RequestHideIME() { g_ime_pending_hide = true; }
 
 // 每帧调用：把 EditText 文本增量回传给 ImGui 当前输入框（仅读取，跨线程安全）
 static void PollIMEToImGui() {
@@ -5157,6 +5202,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(140.0f * g_autoScale);
     ImGui::InputTextWithHint("##ManualInspectAddr", "0x... / 类名", g_manual_inspect_input, sizeof(g_manual_inspect_input));
+    AutoPopupSoftKbd(g_manual_inspect_input, sizeof(g_manual_inspect_input));
     ImGui::SameLine();
     if (ImGui::Button((const char*)u8"载入##btnManualInspect")) {
         if (strlen(g_manual_inspect_input) > 0) {
@@ -5224,6 +5270,7 @@ void DrawObjectInspectorContent(float avail_x, float avail_y) {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(160.0f * g_autoScale);
     ImGui::InputText("##InspectorFilter", g_inspector_filter, sizeof(g_inspector_filter));
+    AutoPopupSoftKbd(g_inspector_filter, sizeof(g_inspector_filter));
     ImGui::SameLine();
     if (ImGui::Button((const char*)u8"清空##ClrFilter")) { g_inspector_filter[0] = '\0'; }
 
@@ -5776,31 +5823,12 @@ void DrawSymbolResolverUI() {
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址起点(单例类):");
     ImGui::SetNextItemWidth(avail_x - 2*btn_w - 16.0f);
     ImGui::InputText("##RootClassInput", g_root_class_input, sizeof(g_root_class_input)); 
-    if (g_ime_focus_target == g_root_class_input) { ImGui::SetKeyboardFocusHere(-1); g_ime_focus_target = nullptr; }
-    // 点输入框即唤起系统输入法（自然行为）：焦点刚进入且 IME 未开时自动弹出
-    if (ImGui::IsItemFocused()) {
-        if (g_last_focused_input != g_root_class_input) {
-            g_last_focused_input = g_root_class_input;
-            g_ime_focus_target = g_root_class_input;
-            if (!g_ime_open) RequestShowIME();
-        }
-    } else if (g_last_focused_input == g_root_class_input) {
-        g_last_focused_input = nullptr;
-    }
+    AutoPopupSoftKbd(g_root_class_input, sizeof(g_root_class_input));
     ImGui::SameLine(); 
     if (ImGui::Button((const char*)u8"[键盘]##1", ImVec2(btn_w, 0))) { 
         g_vkbd_target = g_root_class_input; 
         g_vkbd_target_size = sizeof(g_root_class_input); 
         g_show_vkbd = true; 
-    }
-    ImGui::SameLine();
-    if (g_ime_open) {
-        if (ImGui::Button((const char*)u8"[关闭输入法]##1", ImVec2(btn_w, 0))) { RequestHideIME(); }
-    } else {
-        if (ImGui::Button((const char*)u8"[输入法]##1", ImVec2(btn_w, 0))) { 
-            g_ime_focus_target = g_root_class_input;
-            RequestShowIME();
-        }
     }
 
     ImGui::Spacing();
@@ -5809,30 +5837,12 @@ void DrawSymbolResolverUI() {
     ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), (const char*)u8"寻址终点(类名/字段名/金币数值/列表字典，留空则全量探测链条):");
     ImGui::SetNextItemWidth(avail_x - 2*btn_w - 16.0f);
     ImGui::InputText("##TargetClassInput", g_class_search_input, sizeof(g_class_search_input)); 
-    if (g_ime_focus_target == g_class_search_input) { ImGui::SetKeyboardFocusHere(-1); g_ime_focus_target = nullptr; }
-    if (ImGui::IsItemFocused()) {
-        if (g_last_focused_input != g_class_search_input) {
-            g_last_focused_input = g_class_search_input;
-            g_ime_focus_target = g_class_search_input;
-            if (!g_ime_open) RequestShowIME();
-        }
-    } else if (g_last_focused_input == g_class_search_input) {
-        g_last_focused_input = nullptr;
-    }
+    AutoPopupSoftKbd(g_class_search_input, sizeof(g_class_search_input));
     ImGui::SameLine(); 
     if (ImGui::Button((const char*)u8"[键盘]##2", ImVec2(btn_w, 0))) { 
         g_vkbd_target = g_class_search_input; 
         g_vkbd_target_size = sizeof(g_class_search_input); 
         g_show_vkbd = true; 
-    }
-    ImGui::SameLine();
-    if (g_ime_open) {
-        if (ImGui::Button((const char*)u8"[关闭输入法]##2", ImVec2(btn_w, 0))) { RequestHideIME(); }
-    } else {
-        if (ImGui::Button((const char*)u8"[输入法]##2", ImVec2(btn_w, 0))) { 
-            g_ime_focus_target = g_class_search_input;
-            RequestShowIME();
-        }
     }
 
     ImGui::Spacing();
@@ -6520,10 +6530,36 @@ void DrawMainMenu() {
                         g_auto_skin_enabled = !g_auto_skin_enabled;
                         if (g_auto_skin_enabled && !g_skin_hook_installed) InstallSkinHook();
                     }
+                    if (ImGui::Checkbox((const char*)u8"每局自动轮换 (结束后换下一款)", &g_skin_autorotate)) {
+                        if (g_skin_autorotate) {} // 实际轮换在游戏结束时标记, 下一局开局触发
+                    }
+                    ImGui::TextColored(ImVec4(0.6f,0.6f,0.6f,1.0f), (const char*)u8"当前皮肤索引: %d / %zu", g_skin_selected, g_skins.size());
                     ImGui::TextColored(g_auto_skin_enabled ? ImVec4(0.2f,1.0f,0.4f,1.0f) : ImVec4(1.0f,0.5f,0.5f,1.0f),
                         (const char*)u8"状态: %s", g_auto_skin_enabled ? u8"已启用" : u8"已关闭");
                     DrawGlassSeparator();
 
+                    // 自动捕获: 展示本局游戏实际加载过的棋盘, 一键选用
+                    {
+                        std::lock_guard<std::mutex> lk(g_capture_mutex);
+                        size_t capN = g_captured_skins.size();
+                        ImGui::TextColored(ImVec4(1.0f,0.85f,0.3f,1.0f), (const char*)u8"自动捕获 (本局加载过的棋盘): %zu", capN);
+                        for (size_t i = 0; i < capN; i++) {
+                            ImGui::PushID((int)(2000 + i));
+                            ImGui::TextWrapped((const char*)u8"  %s", g_captured_skins[i].x1);
+                            ImGui::TextWrapped((const char*)u8"  -> %s", g_captured_skins[i].x2);
+                            if (ImGui::Button((const char*)u8"选用##cap", ImVec2(-1, 26 * g_autoScale))) {
+                                int idx = -1;
+                                for (size_t j = 0; j < g_skins.size(); j++) {
+                                    if (strcmp(g_skins[j].x1, g_captured_skins[i].x1) == 0 &&
+                                        strcmp(g_skins[j].x2, g_captured_skins[i].x2) == 0) { idx = (int)j; break; }
+                                }
+                                if (idx < 0) { g_skins.push_back(g_captured_skins[i]); idx = (int)g_skins.size() - 1; }
+                                g_skin_selected = idx;
+                            }
+                            ImGui::PopID();
+                            DrawGlassSeparator();
+                        }
+                    }
                     ImGui::TextColored(UITheme().primary, (const char*)u8"皮肤列表 (默认选中第 0 项)");
                     for (size_t i = 0; i < g_skins.size(); i++) {
                         ImGui::PushID((int)i);
@@ -6533,11 +6569,13 @@ void DrawMainMenu() {
                         ImGui::Text((const char*)u8"  bundlePath:"); ImGui::SameLine();
                         ImGui::SetNextItemWidth(-1);
                         ImGui::InputText((const char*)u8"##sx1", g_skins[i].x1, sizeof(g_skins[i].x1));
+                        AutoPopupSoftKbd(g_skins[i].x1, sizeof(g_skins[i].x1));
                         ImGui::Text((const char*)u8"  assetName :"); ImGui::SameLine();
                         ImGui::SetNextItemWidth(-1);
                         ImGui::InputText((const char*)u8"##sx2", g_skins[i].x2, sizeof(g_skins[i].x2));
+                        AutoPopupSoftKbd(g_skins[i].x2, sizeof(g_skins[i].x2));
                         if (g_skin_selected == (int)i) {
-                            ImGui::TextColored(ImVec4(0.2f,1.0f,0.4f,1.0f), (const char*)u8"  ▶ 当前选用");
+                            ImGui::TextColored(ImVec4(0.2f,1.0f,0.4f,1.0f), (const char*)u8"  >> 当前选用");
                         } else {
                             if (ImGui::Button((const char*)u8"选用")) { g_skin_selected = (int)i; }
                             ImGui::SameLine();
@@ -6741,6 +6779,8 @@ void hook_set_IsGameEnd(void* thisObj, uint8_t isEnd) { g_count_set_IsGameEnd++;
         g_match_enter_pending.store(false, std::memory_order_release);
         g_need_segment_gap_before_enter = true;
         g_Tasks.trigger_game_end.store(true, std::memory_order_release);
+        // 游戏结束 -> 标记下一局开局时轮换皮肤
+        g_skin_rotate_pending = true;
     }
 }
 
