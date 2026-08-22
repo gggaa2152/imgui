@@ -2853,6 +2853,9 @@ struct Il2CppApis {
     typedef void* (*class_get_parent_t)(void* klass);
     typedef void* (*runtime_invoke_t)(void* method, void* obj, void** params, void** exc);
     typedef void* (*object_unbox_t)(void* obj);
+    typedef void* (*string_new_t)(const char*);
+    typedef void* (*method_get_function_pointer_t)(void* method);
+    typedef void* (*method_get_code_t)(void* method);
 
     domain_get_t domain_get = nullptr;
     domain_get_assemblies_t domain_get_assemblies = nullptr;
@@ -2875,6 +2878,9 @@ struct Il2CppApis {
     class_get_parent_t class_get_parent = nullptr;
     runtime_invoke_t runtime_invoke = nullptr;
     object_unbox_t object_unbox = nullptr;
+    string_new_t string_new = nullptr;
+    method_get_function_pointer_t method_get_function_pointer = nullptr;
+    method_get_code_t method_get_code = nullptr;
     bool inited = false;
 
     bool init() {
@@ -2905,6 +2911,9 @@ struct Il2CppApis {
         field_static_get_value = (field_static_get_value_t)resolve("il2cpp_field_static_get_value");
         field_get_flags = (field_get_flags_t)resolve("il2cpp_field_get_flags");
         class_get_parent = (class_get_parent_t)resolve("il2cpp_class_get_parent");
+        string_new = (string_new_t)resolve("il2cpp_string_new");
+        method_get_function_pointer = (method_get_function_pointer_t)resolve("il2cpp_method_get_function_pointer");
+        method_get_code = (method_get_code_t)resolve("il2cpp_method_get_code");
 
         inited = (domain_get != nullptr && assembly_get_image != nullptr && class_get_name != nullptr);
         return inited;
@@ -2915,6 +2924,84 @@ static Il2CppApis g_il2cpp_api;
 
 static std::unordered_set<void*> g_valid_classes;
 static bool g_classes_cached = false;
+
+// ==================== 自动换肤 (Skin Changer) ====================
+// 思路: hook BattleMap::LoadMapImpl(String bundlePath, String assetName, IReleaseList, Boolean, Boolean)
+// 游戏进入对局加载棋盘时会调用它; 我们仅替换前两个字符串参数 (x1=bundlePath, x2=assetName), 其余参数原样透传
+struct SkinEntry {
+    char x1[256]; // bundlePath  (资源 AB 包路径)
+    char x2[256]; // assetName   (包内 prefab 名)
+};
+
+static std::vector<SkinEntry> g_skins = {
+    // 默认皮肤: S5 中秋棋盘 (用户已验证可加载). 后续可继续往这里加 x1/x2.
+    { "art_tft_raw/scenes/prefab/s5_tft_midautumn", "s5_tft_midautumn" },
+};
+static int  g_skin_selected = 0;
+static bool g_auto_skin_enabled = false;
+static bool g_skin_hook_installed = false;
+
+// 与原方法同 ABI: ARM64 实例方法 -> x0=this, x1=bundlePath, x2=assetName, x3=releaseList, x4=isBackground, x5=isMineMap
+typedef void* (*LoadMapImpl_fn)(void* self, void* bundlePath, void* assetName, void* releaseList, int isBackground, int isMineMap);
+static LoadMapImpl_fn g_orig_LoadMapImpl = nullptr;
+
+static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void* releaseList, int isBackground, int isMineMap) {
+    if (g_auto_skin_enabled && g_skin_selected >= 0 && g_skin_selected < (int)g_skins.size()
+        && g_il2cpp_api.string_new) {
+        void* nb = g_il2cpp_api.string_new(g_skins[g_skin_selected].x1);
+        void* na = g_il2cpp_api.string_new(g_skins[g_skin_selected].x2);
+        if (nb && na) {
+            return g_orig_LoadMapImpl(self, nb, na, releaseList, isBackground, isMineMap);
+        }
+    }
+    return g_orig_LoadMapImpl(self, bundlePath, assetName, releaseList, isBackground, isMineMap);
+}
+
+static void InstallSkinHook() {
+    if (g_skin_hook_installed) return;
+    if (!g_il2cpp_api.init()) { LOGI("[SKIN] il2cpp api init failed"); return; }
+    void* domain = g_il2cpp_api.domain_get();
+    if (!domain) { LOGI("[SKIN] domain null"); return; }
+    size_t asm_count = 0;
+    void** assemblies = g_il2cpp_api.domain_get_assemblies(domain, &asm_count);
+    if (!assemblies) { LOGI("[SKIN] no assemblies"); return; }
+    for (size_t a = 0; a < asm_count; a++) {
+        void* img = g_il2cpp_api.assembly_get_image(assemblies[a]);
+        if (!img) continue;
+        size_t cls_count = g_il2cpp_api.image_get_class_count ? g_il2cpp_api.image_get_class_count(img) : 0;
+        for (size_t c = 0; c < cls_count; c++) {
+            void* klass = g_il2cpp_api.image_get_class(img, c);
+            if (!klass) continue;
+            const char* cname = SAFE_CALL(g_il2cpp_api.class_get_name(klass), (const char*)nullptr);
+            if (!cname) continue;
+            if (strstr(cname, "BattleMap") == nullptr) continue;   // 类名可改: 若实际类是 BattleMapManager 之外, 在这里调整
+            void* iter = nullptr;
+            while (void* m = g_il2cpp_api.class_get_methods(klass, &iter)) {
+                const char* mname = g_il2cpp_api.method_get_name(m);
+                if (!mname || strcmp(mname, "LoadMapImpl") != 0) continue;
+                uint32_t pc = g_il2cpp_api.method_get_param_count ? g_il2cpp_api.method_get_param_count(m) : 0;
+                if (pc != 5) continue;   // (String, String, IReleaseList, bool, bool)
+                void* fnptr = nullptr;
+                if (g_il2cpp_api.method_get_function_pointer)
+                    fnptr = g_il2cpp_api.method_get_function_pointer(m);
+                else if (g_il2cpp_api.method_get_code)
+                    fnptr = g_il2cpp_api.method_get_code(m);
+                if (!fnptr) continue;
+                int ret = SafeDobbyHook(fnptr, (void*)HK_LoadMapImpl, (void**)&g_orig_LoadMapImpl);
+                if (ret == 0) {
+                    g_skin_hook_installed = true;
+                    LOGI("[SKIN] Hooked %s::LoadMapImpl @ %p", cname, fnptr);
+                    AddActionLog((const char*)u8"-> [换肤] 已挂载地图加载Hook, 自动换肤就绪");
+                } else {
+                    LOGI("[SKIN] DobbyHook failed ret=%d", ret);
+                }
+                return;
+            }
+        }
+    }
+    LOGI("[SKIN] LoadMapImpl not found");
+    AddActionLog((const char*)u8"-> [换肤] 未找到 LoadMapImpl, 请确认类名/方法名");
+}
 
 static void CacheValidClasses() {
     if (g_classes_cached || !g_il2cpp_api.init()) return;
@@ -6093,8 +6180,8 @@ void DrawMainMenu() {
             float sidebarW = 132.0f * g_autoScale * g_scale;
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
             ImGui::BeginChild("FrostSidebar", ImVec2(sidebarW, 0), true, ImGuiWindowFlags_NoScrollbar);
-                        const char* tabLabels[] = { (const char*)u8"视觉透视", (const char*)u8"自动购买", (const char*)u8"链路诊断", (const char*)u8"偏移调试", (const char*)u8"符号反查", (const char*)u8"对象检查" };
-            for (int i = 0; i < 6; i++) {
+                        const char* tabLabels[] = { (const char*)u8"视觉透视", (const char*)u8"自动购买", (const char*)u8"链路诊断", (const char*)u8"偏移调试", (const char*)u8"符号反查", (const char*)u8"对象检查", (const char*)u8"地图换肤" };
+            for (int i = 0; i < 7; i++) {
                 if (FrostSidebarBtn(tabLabels[i], current_tab == i, i)) current_tab = i;
                 ImGui::Dummy(ImVec2(0, 4.0f * g_autoScale));
             }
@@ -6441,6 +6528,53 @@ void DrawMainMenu() {
                     float avail_w = ImGui::GetContentRegionAvail().x;
                     float avail_h = ImGui::GetContentRegionAvail().y;
                     DrawObjectInspectorContent(avail_w, avail_h);
+                    break;
+                }
+            case 6:
+                {
+                    DrawSectionTitle((const char*)u8"地图换肤 (Skin Changer)");
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), (const char*)u8"进入对局加载棋盘时, 自动把加载参数替换为所选皮肤");
+                    ImGui::Text((const char*)u8"仅替换 x1(bundlePath) 与 x2(assetName), 其余参数原样透传");
+                    ImGui::Spacing();
+                    if (ImGui::Button((const char*)u8"启用自动换肤", ImVec2(-1, 34 * g_autoScale * g_scale))) {
+                        g_auto_skin_enabled = !g_auto_skin_enabled;
+                        if (g_auto_skin_enabled && !g_skin_hook_installed) InstallSkinHook();
+                    }
+                    ImGui::TextColored(g_auto_skin_enabled ? ImVec4(0.2f,1.0f,0.4f,1.0f) : ImVec4(1.0f,0.5f,0.5f,1.0f),
+                        (const char*)u8"状态: %s", g_auto_skin_enabled ? u8"已启用" : u8"已关闭");
+                    DrawGlassSeparator();
+
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"皮肤列表 (默认选中第 0 项)");
+                    for (size_t i = 0; i < g_skins.size(); i++) {
+                        ImGui::PushID((int)i);
+                        char label[32];
+                        snprintf(label, sizeof(label), (const char*)u8"皮肤 #%zu", i);
+                        ImGui::Text((const char*)u8"【%s】", label);
+                        ImGui::Text((const char*)u8"  bundlePath:"); ImGui::SameLine();
+                        ImGui::SetNextItemWidth(-1);
+                        ImGui::InputText((const char*)u8"##sx1", g_skins[i].x1, sizeof(g_skins[i].x1));
+                        ImGui::Text((const char*)u8"  assetName :"); ImGui::SameLine();
+                        ImGui::SetNextItemWidth(-1);
+                        ImGui::InputText((const char*)u8"##sx2", g_skins[i].x2, sizeof(g_skins[i].x2));
+                        if (g_skin_selected == (int)i) {
+                            ImGui::TextColored(ImVec4(0.2f,1.0f,0.4f,1.0f), (const char*)u8"  ▶ 当前选用");
+                        } else {
+                            if (ImGui::Button((const char*)u8"选用")) { g_skin_selected = (int)i; }
+                            ImGui::SameLine();
+                        }
+                        if (g_skins.size() > 1 && ImGui::Button((const char*)u8"删除")) {
+                            g_skins.erase(g_skins.begin() + i);
+                            if (g_skin_selected >= (int)g_skins.size()) g_skin_selected = 0;
+                        }
+                        ImGui::PopID();
+                        DrawGlassSeparator();
+                    }
+                    if (ImGui::Button((const char*)u8"＋ 添加皮肤", ImVec2(-1, 30 * g_autoScale))) {
+                        SkinEntry e{};
+                        g_skins.push_back(e);
+                    }
+                    DrawGlassSeparator();
+                    ImGui::TextColored(UITheme().primary, (const char*)u8"Hook 状态: %s", g_skin_hook_installed ? u8"已挂载 [OK]" : u8"未挂载 (启用时自动尝试)");
                     break;
                 }
             default:
@@ -6976,6 +7110,9 @@ void* Il2CppInitThread(void*) {
         void* target = (void*)(g_il2cppTrueBase + g_off.func_SendWillRenderCanvases);
         SafeDobbyHook(target, (void*)hook_SendWillRenderCanvases, (void**)&orig_SendWillRenderCanvases);
     }
+
+    // 自动换肤: 挂载地图加载 Hook (进入对局加载棋盘时替换皮肤参数 x1=x2)
+    InstallSkinHook();
 
 
 
