@@ -3014,7 +3014,6 @@ static bool g_auto_skin_enabled = true;
 static bool g_skin_autorotate = true;      // 每局结束自动轮换到下一款皮肤
 static bool g_skin_hook_installed =  false;
 static bool g_skin_rotate_pending = false; // 下一局开局时轮转皮肤 (由游戏结束事件触发)
-static bool g_skin_match_active = false;   // 仅 set_IsGameEnd(isEnd=0)(游戏开始) 后才允许替换参数
 // LoadMapImpl 在 libil2cpp.so 内的偏移(RVA)。游戏版本更新导致偏移变化时需更新此值
 static uintptr_t g_skin_loadmap_offset = 0x8beba60;
 
@@ -3030,12 +3029,8 @@ static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void*
         if (!s1.empty() && !s2.empty()) RecordCapturedSkin(s1, s2);
     }
 
-    // 仅真正进入对局(游戏状态机 g_is_in_match) 且 set_IsGameEnd(isEnd=0) 之后才替换参数;
-    // 商店/大厅/预览等场景 g_is_in_match=false, 只捕获不替换
-    bool in_match = g_skin_match_active && g_is_in_match.load(std::memory_order_acquire);
-
     // 每局自动轮换: 由"游戏结束"事件置位 g_skin_rotate_pending, 在下一局开局 LoadMapImpl 时切换一次
-    if (g_auto_skin_enabled && g_skin_autorotate && in_match && !g_skins.empty() && g_il2cpp_api.string_new) {
+    if (g_auto_skin_enabled && g_skin_autorotate && !g_skins.empty() && g_il2cpp_api.string_new) {
         if (g_skin_rotate_pending) {
             g_skin_rotate_pending = false;
             g_skin_selected = (g_skin_selected + 1) % (int)g_skins.size();
@@ -3044,7 +3039,8 @@ static void* HK_LoadMapImpl(void* self, void* bundlePath, void* assetName, void*
         }
     }
 
-    if (g_auto_skin_enabled && in_match && g_skin_selected >= 0 && g_skin_selected < (int)g_skins.size()
+    // 直接替换: 不做对局状态判断, 加载棋盘就替换 x1/x2
+    if (g_auto_skin_enabled && g_skin_selected >= 0 && g_skin_selected < (int)g_skins.size()
         && g_il2cpp_api.string_new) {
         void* nb = g_il2cpp_api.string_new(g_skins[g_skin_selected].x1);
         void* na = g_il2cpp_api.string_new(g_skins[g_skin_selected].x2);
@@ -3118,9 +3114,8 @@ static void* HK_LoadLittleLegend(void* x0, void* x1, void* x2, void* x3, void* x
             if (needSave) SaveSkinsToFile(); // 锁外保存
         }
     }
-    // 仅真正进入对局(g_is_in_match)且 set_IsGameEnd(isEnd=0) 后才替换; 商店/大厅只捕获不替换
-    if (g_ll_auto_enabled && g_skin_match_active && g_is_in_match.load(std::memory_order_acquire)
-        && g_ll_selected >= 0 && g_ll_selected < (int)g_ll_skins.size()
+    // 直接替换: 不做对局状态判断, 加载小英雄就替换 x0/x1
+    if (g_ll_auto_enabled && g_ll_selected >= 0 && g_ll_selected < (int)g_ll_skins.size()
         && g_il2cpp_api.string_new && x0 && x1) {
         std::string cur1 = ReadIl2CppString((uintptr_t)x0);
         if (cur1.find('/') != std::string::npos) {
@@ -7156,17 +7151,16 @@ void hook_set_IsGameEnd(void* thisObj, uint8_t isEnd) { g_count_set_IsGameEnd++;
     if (isEnd == 0) {
         AddActionLog((const char*)u8"-> [引擎状态] call func_set_IsGameEnd(isEnd=0) | 游戏开始!");
         g_match_enter_pending.store(true, std::memory_order_release);
-        // 游戏开始 -> 之后加载棋盘才允许换肤参数替换
-        g_skin_match_active = true;
-    } else if (g_is_in_match.load(std::memory_order_acquire)) {
-        AddActionLog((const char*)u8"-> [引擎状态] call func_set_IsGameEnd(isEnd=%d) | 游戏结束!", isEnd);
-        g_is_in_match.store(false, std::memory_order_release);
-        g_match_enter_pending.store(false, std::memory_order_release);
-        g_need_segment_gap_before_enter = true;
-        g_Tasks.trigger_game_end.store(true, std::memory_order_release);
-        // 游戏结束 -> 停止替换; 标记下一局开局时轮换皮肤
-        g_skin_match_active = false;
+    } else {
+        // isEnd != 0: 标记下一局开局时轮换皮肤
         g_skin_rotate_pending = true;
+        if (g_is_in_match.load(std::memory_order_acquire)) {
+            AddActionLog((const char*)u8"-> [引擎状态] call func_set_IsGameEnd(isEnd=%d) | 游戏结束!", isEnd);
+            g_is_in_match.store(false, std::memory_order_release);
+            g_match_enter_pending.store(false, std::memory_order_release);
+            g_need_segment_gap_before_enter = true;
+            g_Tasks.trigger_game_end.store(true, std::memory_order_release);
+        }
     }
 }
 
