@@ -618,32 +618,48 @@ static std::string GetPrivateFilesDir() {
     return cached;
 }
 
-// 真实写探测: access 在 Android 分区存储下会误报, 直接尝试建临时文件判断目录是否可写
-static bool CanWriteDir(const char* dir) {
-    std::string probe = std::string(dir) + ".jkt_w";
-    FILE* f = fopen(probe.c_str(), "w");
+static bool CanWriteFile(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "a");
     if (!f) return false;
     fclose(f);
-    remove(probe.c_str());
     return true;
 }
 
-// 配置路径: /sdcard/Download 优先 -> /data/local/tmp -> 游戏私有目录 files/ (必有写权限)
 std::string GetConfigPath() {
-    if (CanWriteDir("/sdcard/Download/")) return "/sdcard/Download/jkt_offsets.txt";
-    if (CanWriteDir("/data/local/tmp/")) return "/data/local/tmp/jkt_offsets.txt";
+    std::string sdcard = "/sdcard/Download/jkt_offsets.txt";
+    if (CanWriteFile(sdcard)) return sdcard;
+    
+    std::string tmp = "/data/local/tmp/jkt_offsets.txt";
+    if (CanWriteFile(tmp)) return tmp;
+    
     std::string priv = GetPrivateFilesDir();
-    if (!priv.empty() && CanWriteDir(priv.c_str())) return priv + "jkt_offsets.txt";
-    return "/data/local/tmp/jkt_offsets.txt";
+    if (!priv.empty()) {
+        mkdir(priv.c_str(), 0777);
+        std::string privPath = priv + "jkt_offsets.txt";
+        if (CanWriteFile(privPath)) return privPath;
+        FILE* f = fopen(privPath.c_str(), "w");
+        if (f) { fclose(f); return privPath; }
+    }
+    return tmp;
 }
 
 // 皮肤列表保存路径, 与配置文件同一目录/同一判定逻辑
 std::string GetSkinsPath() {
-    if (CanWriteDir("/sdcard/Download/")) return "/sdcard/Download/jkt_skins.txt";
-    if (CanWriteDir("/data/local/tmp/")) return "/data/local/tmp/jkt_skins.txt";
+    std::string sdcard = "/sdcard/Download/jkt_skins.txt";
+    if (CanWriteFile(sdcard)) return sdcard;
+    
+    std::string tmp = "/data/local/tmp/jkt_skins.txt";
+    if (CanWriteFile(tmp)) return tmp;
+    
     std::string priv = GetPrivateFilesDir();
-    if (!priv.empty() && CanWriteDir(priv.c_str())) return priv + "jkt_skins.txt";
-    return "/data/local/tmp/jkt_skins.txt";
+    if (!priv.empty()) {
+        mkdir(priv.c_str(), 0777);
+        std::string privPath = priv + "jkt_skins.txt";
+        if (CanWriteFile(privPath)) return privPath;
+        FILE* f = fopen(privPath.c_str(), "w");
+        if (f) { fclose(f); return privPath; }
+    }
+    return tmp;
 }
 
 static void CaptureWindowPos(const char* name, float& x, float& y) {
