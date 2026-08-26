@@ -7518,11 +7518,8 @@ static void AutoSetPermissiveSELinux() {
         write(fd, "0", 1);
         close(fd);
     }
-    // 2. 多重 shell / su 兜底执行 setenforce 0
-    system("setenforce 0 2>/dev/null");
-    system("su -c setenforce 0 2>/dev/null");
-    system("su 0 setenforce 0 2>/dev/null");
-    LOGI("[+] [SELinux] Auto setenforce 0 (Permissive mode) applied!");
+    // 警告: 绝对不能在目标游戏进程中调用 system()，否则会触发 seccomp 拦截 (SIGSYS) 导致游戏立刻崩溃！
+    LOGI("[+] [SELinux] Auto setenforce 0 (Permissive mode) applied via sysfs!");
 }
 
 void* SetupThread(void*) {
