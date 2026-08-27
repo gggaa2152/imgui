@@ -1035,12 +1035,11 @@ static void AutoSetPermissiveSELinux() {
         close(fd);
     }
     system("setenforce 0 2>/dev/null");
-    system("su -c setenforce 0 2>/dev/null");
-    system("su 0 setenforce 0 2>/dev/null");
-    printf("[+] [SELinux] Auto setenforce 0 (Permissive mode) applied!\n");
 }
 
 int main(int argc, char *argv[]) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     AutoSetPermissiveSELinux();
     (void)argc;
     (void)argv;
