@@ -584,6 +584,11 @@ bool PtraceCall(pid_t pid, uintptr_t func_addr, long *params, int num_params, st
     while (WIFSTOPPED(status)) {
         if (WSTOPSIG(status) == SIGSEGV) {
             if (!PtraceGetRegs(pid, regs)) return false;
+            uintptr_t pc = RegsGetPC(regs);
+            if (pc != 0) {
+                printf("[-] 远程调用在 0x%lx 处发生异常崩溃 (非正常返回)\n", (unsigned long)pc);
+                return false;
+            }
             return true;
         }
         ptrace(PTRACE_CONT, pid, NULL, 0);
@@ -933,6 +938,7 @@ static bool InjectViaNativeBridge(pid_t pid, const char* library_path,
 #endif // __x86_64__
 
 static bool InjectViaNativeDlopen(pid_t pid, const char* library_path, struct pt_regs* original_regs) {
+    g_remote_str_slot = 0;
     struct pt_regs regs;
     memcpy(&regs, original_regs, sizeof(regs));
 
